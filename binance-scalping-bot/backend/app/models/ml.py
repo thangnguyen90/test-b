@@ -16,6 +16,7 @@ class TrainResponse(BaseModel):
     accuracy: float | None
     roc_auc: float | None
     trained_at: datetime | None
+    feedback_samples: int = 0
 
 
 class ModelStatus(BaseModel):

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pymysql
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+_VN_TZ = timezone(timedelta(hours=7))
+
+
+def _now_vn() -> datetime:
+    # Persist timestamps in Vietnam local time (UTC+7), as requested.
+    return datetime.now(_VN_TZ).replace(tzinfo=None)
 
 
 class MySQLTradeRepository:
@@ -79,7 +83,7 @@ class MySQLTradeRepository:
                 )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
-        now = _now_utc()
+        now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -126,7 +130,7 @@ class MySQLTradeRepository:
                 return list(cur.fetchall())
 
     def close_trade(self, trade_id: int, close_price: float, pnl: float, result: int) -> None:
-        now = _now_utc()
+        now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -161,6 +165,32 @@ class MySQLTradeRepository:
                             now,
                         ),
                     )
+
+    def update_take_profit(self, trade_id: int, take_profit: float) -> None:
+        now = _now_vn()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET take_profit=%s, updated_at=%s
+                    WHERE id=%s AND status='OPEN'
+                    """,
+                    (take_profit, now, trade_id),
+                )
+
+    def update_stop_loss(self, trade_id: int, stop_loss: float) -> None:
+        now = _now_vn()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET stop_loss=%s, updated_at=%s
+                    WHERE id=%s AND status='OPEN'
+                    """,
+                    (stop_loss, now, trade_id),
+                )
 
     def list_recent_trades(self, limit: int = 200) -> list[dict[str, Any]]:
         safe_limit = max(1, min(limit, 2000))
@@ -224,3 +254,60 @@ class MySQLTradeRepository:
             return None
         wins = sum(1 for row in rows if int(row.get("result", 0)) == 1)
         return wins / len(rows)
+
+    def list_feedback(self, limit: int = 1000) -> list[dict[str, Any]]:
+        safe_limit = max(10, min(limit, 5000))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT symbol, side, result, created_at
+                    FROM ml_feedback
+                    ORDER BY created_at DESC
+                    LIMIT {safe_limit}
+                    """
+                )
+                return list(cur.fetchall())
+
+    def daily_summary(self, days: int = 30) -> list[dict[str, Any]]:
+        safe_days = max(1, min(days, 365))
+        now = _now_vn()
+        from_dt = now - timedelta(days=safe_days - 1)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        DATE(closed_at) AS trade_date,
+                        COUNT(*) AS total_trades,
+                        SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END) AS win_trades,
+                        SUM(CASE WHEN COALESCE(pnl, 0) <= 0 THEN 1 ELSE 0 END) AS loss_trades,
+                        COALESCE(SUM(pnl), 0) AS total_pnl,
+                        COALESCE(AVG(pnl), 0) AS avg_pnl
+                    FROM paper_trades
+                    WHERE status='CLOSED' AND closed_at >= %s
+                    GROUP BY DATE(closed_at)
+                    ORDER BY trade_date DESC
+                    """,
+                    (from_dt,),
+                )
+                rows = cur.fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            total = int(row.get("total_trades") or 0)
+            wins = int(row.get("win_trades") or 0)
+            win_rate = (wins / total) if total > 0 else 0.0
+            trade_date = row.get("trade_date")
+            out.append(
+                {
+                    "trade_date": str(trade_date),
+                    "total_trades": total,
+                    "win_trades": wins,
+                    "loss_trades": int(row.get("loss_trades") or 0),
+                    "win_rate": float(win_rate),
+                    "total_pnl": float(row.get("total_pnl") or 0.0),
+                    "avg_pnl": float(row.get("avg_pnl") or 0.0),
+                }
+            )
+        return out

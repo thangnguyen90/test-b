@@ -42,11 +42,26 @@ class PaperTradeStatsResponse(BaseModel):
     stats: PaperTradeStats
 
 
+class PaperTradeDailySummary(BaseModel):
+    trade_date: str
+    total_trades: int
+    win_trades: int
+    loss_trades: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
+
+
+class PaperTradeDailySummaryResponse(BaseModel):
+    items: list[PaperTradeDailySummary]
+
+
 class PaperMarketOpenRequest(BaseModel):
     symbol: str
     side: str = Field(pattern="^(LONG|SHORT)$")
     signal_win_probability: float = Field(ge=0, le=1)
     effective_win_probability: Optional[float] = Field(default=None, ge=0, le=1)
+    entry_price: Optional[float] = Field(default=None, gt=0)
     take_profit: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
     quantity: Optional[float] = Field(default=None, gt=0)

@@ -34,8 +34,10 @@ type Order = {
 
 type PriceStreamMessage = {
   type: string
-  symbol: string
+  symbol?: string
+  symbols?: string[]
   price?: number
+  prices?: Record<string, number>
   timestamp?: string | null
   source?: string
   error?: string
@@ -147,6 +149,16 @@ type PaperTradeStats = {
   avg_pnl: number
 }
 
+type DailyTradeSummary = {
+  trade_date: string
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
 type VolatilityItem = {
   symbol: string
   move_pct: number
@@ -164,6 +176,34 @@ type LiquidationOverviewItem = {
   open_interest_notional: number
   est_liq_zone_price: number
   est_liq_zone_value: number
+  signal_side?: 'LONG' | 'SHORT' | null
+  signal_win_probability?: number | null
+  signal_entry_price?: number | null
+  signal_take_profit?: number | null
+  signal_stop_loss?: number | null
+  signal_order_type?: 'LIMIT' | 'MARKET' | null
+}
+
+type BtcTrendItem = {
+  timeframe: string
+  trend: 'BULLISH' | 'BEARISH' | 'SIDEWAYS'
+  action: 'LONG' | 'SHORT' | 'WAIT'
+  confidence: number
+  prob_up: number
+  prob_down: number
+  technical_score: number
+  ml_score: number
+  blended_score: number
+  rsi: number
+  slope_pct: number
+}
+
+type BtcTrendResponse = {
+  symbol: string
+  mark_price: number
+  ml_side: 'LONG' | 'SHORT'
+  ml_win_probability: number
+  items: BtcTrendItem[]
 }
 
 type SortDirection = 'asc' | 'desc'
@@ -173,12 +213,16 @@ type PaperMarketOpenRequest = {
   side: 'LONG' | 'SHORT'
   signal_win_probability: number
   effective_win_probability?: number
+  entry_price?: number
   take_profit: number
   stop_loss: number
 }
 
 const API_BASE = 'http://127.0.0.1:8000'
-const SIGNALS_WS_URL = 'ws://127.0.0.1:8000/ws/signals?min_win=0.7&max_symbols=80&interval_sec=12'
+const WS_BASE = API_BASE.replace(/^http/, 'ws')
+const AUTO_LIQ_MIN_WIN = 0.7
+const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
+const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const FALLBACK_COINS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT',
   'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'SUI/USDT', 'TON/USDT', 'NEAR/USDT',
@@ -312,6 +356,15 @@ function calcEMA(series: number[], period: number): Array<number | null> {
 
 function canonicalSymbol(symbol: string): string {
   return symbol.replace(':USDT', '').trim().toUpperCase()
+}
+
+function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
+  if (typeof markPrice !== 'number' || !Number.isFinite(markPrice) || markPrice <= 0) return null
+  if (trade.entry_price <= 0 || trade.leverage <= 0) return null
+  const movePct = trade.side === 'LONG'
+    ? (markPrice - trade.entry_price) / trade.entry_price
+    : (trade.entry_price - markPrice) / trade.entry_price
+  return movePct * trade.leverage * 100
 }
 
 function buildHeatmap(
@@ -584,6 +637,9 @@ function App() {
   const mapSectionRef = useRef<HTMLElement | null>(null)
   const selectedCoinRef = useRef<string>('BTC/USDT')
   const symbolReqIdRef = useRef(0)
+  const liqReqRef = useRef(false)
+  const btcTrendReqRef = useRef(false)
+  const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const [health, setHealth] = useState<Health | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
@@ -607,13 +663,23 @@ function App() {
   const [symbolsStatus, setSymbolsStatus] = useState<string>('Using fallback symbols')
   const [priceWsStatus, setPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [showPaperScreen, setShowPaperScreen] = useState(false)
+  const [showDailyScreen, setShowDailyScreen] = useState(false)
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
+  const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
+  const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
+  const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
+  const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
   const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
   const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
   const [liqOverview, setLiqOverview] = useState<LiquidationOverviewItem[]>([])
+  const [liqPage, setLiqPage] = useState(1)
+  const [liqPageSize] = useState(30)
+  const [liqTotalSymbols, setLiqTotalSymbols] = useState(0)
+  const [btcTrend, setBtcTrend] = useState<BtcTrendResponse | null>(null)
+  const [autoLiqMarketEnabled, setAutoLiqMarketEnabled] = useState(false)
   const [volSort, setVolSort] = useState<{ key: keyof VolatilityItem; direction: SortDirection }>({
     key: 'abs_move_pct',
     direction: 'desc',
@@ -753,6 +819,10 @@ function App() {
     })
     return rows
   }, [liqOverview, liqSort])
+  const liqMaxPage = useMemo(
+    () => Math.max(1, Math.ceil((liqTotalSymbols || 0) / liqPageSize)),
+    [liqTotalSymbols, liqPageSize],
+  )
 
   function toggleVolSort(key: keyof VolatilityItem) {
     setVolSort((prev) => {
@@ -791,6 +861,59 @@ function App() {
     window.requestAnimationFrame(() => {
       mapSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
+  }
+
+  function canOpenFromLiq(row: LiquidationOverviewItem): boolean {
+    return (
+      !!row.signal_side
+      && typeof row.signal_win_probability === 'number'
+      && row.signal_win_probability >= AUTO_LIQ_MIN_WIN
+      && typeof row.signal_take_profit === 'number'
+      && typeof row.signal_stop_loss === 'number'
+    )
+  }
+
+  async function openFromLiqRow(row: LiquidationOverviewItem) {
+    if (!canOpenFromLiq(row) || !row.signal_side) return
+    await openPaperMarketOrder({
+      symbol: row.symbol,
+      side: row.signal_side,
+      signal_win_probability: row.signal_win_probability ?? 0,
+      entry_price: row.signal_entry_price ?? row.mark_price,
+      take_profit: row.signal_take_profit as number,
+      stop_loss: row.signal_stop_loss as number,
+    })
+  }
+
+  function renderSymbolJump(symbol: string, hintPrice?: number) {
+    return (
+      <button
+        type="button"
+        className="symbol-jump"
+        onClick={() => openSymbolOnChart(symbol, hintPrice)}
+        title={`Open ${symbol} on liquidation chart`}
+      >
+        {symbol}
+      </button>
+    )
+  }
+
+  function resolveLivePrice(symbol: string): number | undefined {
+    if (paperLivePrices[symbol] != null) return paperLivePrices[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(paperLivePrices)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
+  }
+
+  function resolveLiveTime(symbol: string): string | undefined {
+    if (paperLivePriceTime[symbol] != null) return paperLivePriceTime[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(paperLivePriceTime)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
   }
 
   async function fetchHealth() {
@@ -840,6 +963,22 @@ function App() {
       setMarketPriceTime(data.timestamp)
     }
     return data.price
+  }
+
+  async function fetchMarketPricesBatch(symbols: string[]): Promise<Record<string, number>> {
+    if (symbols.length === 0) return {}
+    const response = await fetch(
+      `${API_BASE}/api/v1/market/prices?symbols=${encodeURIComponent(symbols.join(','))}`,
+    )
+    if (!response.ok) throw new Error('Cannot fetch market prices batch')
+    const data = await response.json() as { prices?: Record<string, number>; timestamp?: string | null }
+    const prices = data.prices ?? {}
+    if (data.timestamp) {
+      const stampMap: Record<string, string> = {}
+      for (const key of Object.keys(prices)) stampMap[key] = data.timestamp
+      setPaperLivePriceTime((prev) => ({ ...prev, ...stampMap }))
+    }
+    return prices
   }
 
   async function fetchKlines(symbol = selectedCoin) {
@@ -899,6 +1038,13 @@ function App() {
     }
   }
 
+  async function fetchDailySummary() {
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/daily?days=30`)
+    if (!response.ok) throw new Error('Daily summary API unavailable')
+    const payload = await response.json() as { items: DailyTradeSummary[] }
+    setDailySummary(payload.items ?? [])
+  }
+
   async function fetchTopVolatility(days: 1 | 3 | 5 | 7 = volDays) {
     const response = await fetch(`${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`)
     if (!response.ok) throw new Error('Cannot fetch top volatility')
@@ -906,29 +1052,63 @@ function App() {
     setTopVolatility(payload.items ?? [])
   }
 
-  async function fetchLiqOverview() {
-    const response = await fetch(`${API_BASE}/api/v1/analytics/liquidation-overview?limit=30`)
-    if (!response.ok) throw new Error('Cannot fetch liquidation overview')
-    const payload = await response.json() as { items: LiquidationOverviewItem[] }
-    setLiqOverview(payload.items ?? [])
+  async function fetchLiqOverview(page = liqPage) {
+    if (liqReqRef.current) return
+    liqReqRef.current = true
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/v1/analytics/liquidation-overview?page=${page}&page_size=${liqPageSize}&full_symbols=true`,
+      )
+      if (!response.ok) throw new Error('Cannot fetch liquidation overview')
+      const payload = await response.json() as { items: LiquidationOverviewItem[]; total_symbols?: number; page?: number }
+      setLiqOverview(payload.items ?? [])
+      setLiqTotalSymbols(payload.total_symbols ?? 0)
+      if (payload.page && payload.page !== liqPage) setLiqPage(payload.page)
+    } finally {
+      liqReqRef.current = false
+    }
+  }
+
+  async function fetchBtcTrend() {
+    if (btcTrendReqRef.current) return
+    btcTrendReqRef.current = true
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/analytics/btc-trend`)
+      if (!response.ok) throw new Error('Cannot fetch BTC trend forecast')
+      const payload = await response.json() as BtcTrendResponse
+      setBtcTrend(payload)
+    } finally {
+      btcTrendReqRef.current = false
+    }
   }
 
   async function openPaperMarketOrder(input: PaperMarketOpenRequest) {
     setIsOpeningMarketOrder(true)
+    let timeoutId: number | null = null
     try {
+      const controller = new AbortController()
+      timeoutId = window.setTimeout(() => controller.abort(), 12000)
       const response = await fetch(`${API_BASE}/api/v1/paper-trades/market-open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),
+        signal: controller.signal,
       })
       if (!response.ok) {
         const text = await response.text()
         throw new Error(`Market open failed: ${text}`)
       }
-      await fetchPaperTradingStats().catch(() => {
+      // Do not block the button waiting for all stats endpoints.
+      fetchPaperTradingStats().catch(() => {
         // Keep UI responsive even if stats refresh fails once.
       })
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error('Market open request timeout (12s)')
+      }
+      throw err
     } finally {
+      if (timeoutId != null) window.clearTimeout(timeoutId)
       setIsOpeningMarketOrder(false)
     }
   }
@@ -1040,22 +1220,193 @@ function App() {
   }, [showPaperScreen])
 
   useEffect(() => {
+    if (!showDailyScreen) return
+
+    fetchDailySummary().catch((err) => {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    })
+
+    const timer = window.setInterval(() => {
+      fetchDailySummary().catch(() => {
+        // Keep previous daily summary on transient failures.
+      })
+    }, 12000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [showDailyScreen])
+
+  useEffect(() => {
+    if (!showPaperScreen || paperOpenTrades.length === 0) return
+
+    let mounted = true
+    const symbols = Array.from(new Set(paperOpenTrades.map((row) => row.symbol)))
+    let ws: WebSocket | null = null
+    let reconnectTimer: number | null = null
+    let fallbackTimer: number | null = null
+
+    const stopFallback = () => {
+      if (fallbackTimer != null) {
+        window.clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
+    }
+
+    const startFallback = () => {
+      if (fallbackTimer != null) return
+      setPaperPriceWsStatus('fallback')
+      fallbackTimer = window.setInterval(() => {
+        fetchMarketPricesBatch(symbols)
+          .then((prices) => {
+            if (!mounted) return
+            setPaperLivePrices((prev) => ({ ...prev, ...prices }))
+          })
+          .catch(() => {
+            // Keep last prices on transient failures.
+          })
+      }, 2500)
+    }
+
+    const connect = () => {
+      if (!mounted) return
+      setPaperPriceWsStatus('connecting')
+      const wsUrl = `${WS_BASE}/ws/prices?symbols=${encodeURIComponent(symbols.join(','))}&interval_sec=1`
+      ws = new WebSocket(wsUrl)
+
+      ws.onopen = () => {
+        if (!mounted) return
+        setPaperPriceWsStatus('live')
+        stopFallback()
+      }
+      ws.onmessage = (event) => {
+        if (!mounted) return
+        try {
+          const payload = JSON.parse(event.data) as PriceStreamMessage
+          if (payload.type === 'prices_error') {
+            startFallback()
+            return
+          }
+          if (payload.type !== 'prices' || !payload.prices) return
+          setPaperLivePrices((prev) => ({ ...prev, ...payload.prices }))
+          if (payload.timestamp) {
+            const stamp = payload.timestamp
+            const updates: Record<string, string> = {}
+            for (const key of Object.keys(payload.prices)) updates[key] = stamp
+            setPaperLivePriceTime((prev) => ({ ...prev, ...updates }))
+          }
+        } catch {
+          // Ignore malformed payload.
+        }
+      }
+      ws.onerror = () => {
+        if (!mounted) return
+        startFallback()
+      }
+      ws.onclose = () => {
+        if (!mounted) return
+        startFallback()
+        reconnectTimer = window.setTimeout(connect, 4000)
+      }
+    }
+
+    fetchMarketPricesBatch(symbols)
+      .then((prices) => {
+        if (!mounted) return
+        setPaperLivePrices((prev) => ({ ...prev, ...prices }))
+      })
+      .catch(() => {
+        // Ignore initial failures.
+      })
+    connect()
+
+    return () => {
+      mounted = false
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
+      stopFallback()
+      ws?.close()
+    }
+  }, [showPaperScreen, paperOpenTrades])
+
+  useEffect(() => {
     fetchTopVolatility(volDays).catch(() => {
       // Keep previous volatility table on request failure.
     })
   }, [volDays])
 
   useEffect(() => {
-    fetchLiqOverview().catch(() => {
+    fetchBtcTrend().catch(() => {
+      // Keep previous BTC trend block on request failure.
+    })
+
+    const timer = window.setInterval(() => {
+      fetchBtcTrend().catch(() => {
+        // Keep previous BTC trend block on periodic refresh failure.
+      })
+    }, 15000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchLiqOverview(liqPage).catch(() => {
       // Keep previous liquidation overview table on request failure.
     })
 
     const timer = window.setInterval(() => {
-      fetchLiqOverview().catch(() => {
+      fetchLiqOverview(liqPage).catch(() => {
         // Keep previous liquidation overview on periodic refresh failure.
       })
     }, 45000)
 
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [liqPage, liqPageSize])
+
+  useEffect(() => {
+    if (!autoLiqMarketEnabled) return
+    if (isOpeningMarketOrder) return
+
+    const now = Date.now()
+    let opened = 0
+
+    const run = async () => {
+      for (const row of sortedLiqOverview) {
+        if (opened >= AUTO_LIQ_MAX_ORDERS_PER_CYCLE) break
+        if (!canOpenFromLiq(row)) continue
+
+        const key = `${row.symbol}:${row.signal_side}`
+        const lastOpened = liqAutoOpenedRef.current[key] ?? 0
+        if ((now - lastOpened) < AUTO_LIQ_OPEN_COOLDOWN_MS) continue
+
+        liqAutoOpenedRef.current[key] = now
+        try {
+          await openFromLiqRow(row)
+          opened += 1
+        } catch {
+          // Ignore duplicate/temporary failures in auto mode.
+        }
+      }
+    }
+
+    run().catch(() => {
+      // Do not block UI if auto-open cycle fails.
+    })
+  }, [autoLiqMarketEnabled, sortedLiqOverview, isOpeningMarketOrder])
+
+  useEffect(() => {
+    setSignalsWsStatus('fallback')
+    fetchHighWinSignals().catch(() => {
+      // Initial fetch.
+    })
+    const timer = window.setInterval(() => {
+      fetchHighWinSignals().catch(() => {
+        // Keep previous values when request fails.
+      })
+    }, 12000)
     return () => {
       window.clearInterval(timer)
     }
@@ -1076,77 +1427,24 @@ function App() {
 
     const startFallback = () => {
       if (fallbackTimer != null) return
+      setPriceWsStatus('fallback')
       fallbackTimer = window.setInterval(() => {
-        fetchHighWinSignals().catch(() => {
-          // Keep previous values when fallback request fails.
+        fetchMarketPriceFallback(selectedCoinRef.current).catch(() => {
+          // Keep last market price if fallback request fails.
         })
-      }, 25000)
+      }, 2000)
     }
-
-    const connect = () => {
-      if (!mounted) return
-      setSignalsWsStatus('connecting')
-      socket = new WebSocket(SIGNALS_WS_URL)
-
-      socket.onopen = () => {
-        if (!mounted) return
-        setSignalsWsStatus('live')
-        stopFallback()
-      }
-
-      socket.onmessage = (event) => {
-        if (!mounted) return
-        try {
-          const payload = JSON.parse(event.data) as { type?: string; data?: ScanSignalsResponse }
-          if (payload.type !== 'signals_scan' || !payload.data) return
-          setHighWinSignals(payload.data.signals ?? [])
-          setScannedCount(payload.data.scanned ?? 0)
-        } catch {
-          // Ignore malformed payload
-        }
-      }
-
-      socket.onerror = () => {
-        if (!mounted) return
-        setSignalsWsStatus('fallback')
-        startFallback()
-      }
-
-      socket.onclose = () => {
-        if (!mounted) return
-        setSignalsWsStatus('fallback')
-        startFallback()
-        reconnectTimer = window.setTimeout(connect, 5000)
-      }
-    }
-
-    fetchHighWinSignals().catch(() => {
-      // Initial fallback fetch.
-    })
-    connect()
-
-    return () => {
-      mounted = false
-      stopFallback()
-      if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
-      socket?.close()
-    }
-  }, [])
-
-  useEffect(() => {
-    let socket: WebSocket | null = null
-    let reconnectTimer: number | null = null
-    let mounted = true
 
     const connect = () => {
       if (!mounted) return
       setPriceWsStatus('connecting')
-      const url = `ws://127.0.0.1:8000/ws/price?symbol=${encodeURIComponent(selectedCoin)}&interval_sec=2`
+      const url = `${WS_BASE}/ws/price?symbol=${encodeURIComponent(selectedCoin)}&interval_sec=1`
       socket = new WebSocket(url)
 
       socket.onopen = () => {
         if (!mounted) return
         setPriceWsStatus('live')
+        stopFallback()
       }
 
       socket.onmessage = (event) => {
@@ -1162,7 +1460,7 @@ function App() {
             return
           }
           if (msg.type === 'price_error') {
-            setPriceWsStatus('fallback')
+            startFallback()
           }
         } catch {
           // ignore invalid payload
@@ -1171,12 +1469,12 @@ function App() {
 
       socket.onerror = () => {
         if (!mounted) return
-        setPriceWsStatus('fallback')
+        startFallback()
       }
 
       socket.onclose = () => {
         if (!mounted) return
-        setPriceWsStatus('fallback')
+        startFallback()
         reconnectTimer = window.setTimeout(connect, 4000)
       }
     }
@@ -1189,6 +1487,7 @@ function App() {
     return () => {
       mounted = false
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
+      stopFallback()
       socket?.close()
     }
   }, [selectedCoin])
@@ -1202,8 +1501,24 @@ function App() {
           A liquidation heatmap styled dashboard with coin selection, threshold control, and realtime overlay.
         </p>
         <div className="hero-actions">
-          <button type="button" onClick={() => setShowPaperScreen((v) => !v)}>
+          <button
+            type="button"
+            onClick={() => {
+              setShowPaperScreen((v) => !v)
+              setShowDailyScreen(false)
+            }}
+          >
             {showPaperScreen ? 'Back To Main Screen' : 'Open Paper Trade Stats'}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              setShowDailyScreen((v) => !v)
+              setShowPaperScreen(false)
+            }}
+          >
+            {showDailyScreen ? 'Back To Main Screen' : 'Open Daily Win/Loss'}
           </button>
         </div>
       </section>
@@ -1237,28 +1552,45 @@ function App() {
                     <th>Symbol</th>
                     <th>Side</th>
                     <th>Entry</th>
+                    <th>Mark (WS)</th>
+                    <th>Mark TS</th>
                     <th>TP</th>
                     <th>SL</th>
+                    <th>uPnL% (Margin)</th>
                     <th>Signal%</th>
                     <th>Effective%</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {paperOpenTrades.map((row) => (
+                  {paperOpenTrades.map((row) => {
+                    const mark = resolveLivePrice(row.symbol)
+                    const markTs = resolveLiveTime(row.symbol)
+                    const upnlPct = calcUnrealizedPnlPct(row, mark)
+                    return (
                     <tr key={row.id}>
                       <td>{row.id}</td>
-                      <td>{row.symbol}</td>
+                      <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                       <td>{row.side}</td>
                       <td>{row.entry_price}</td>
+                      <td>{typeof mark === 'number' ? mark : '-'}</td>
+                      <td>{markTs ?? '-'}</td>
                       <td>{row.take_profit}</td>
                       <td>{row.stop_loss}</td>
+                      <td>
+                        {typeof upnlPct === 'number' ? (
+                          <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>{(row.signal_win_probability * 100).toFixed(2)}</td>
                       <td>{(row.effective_win_probability * 100).toFixed(2)}</td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             )}
+            <p className="symbols-text">Open trade WS status: {paperPriceWsStatus}</p>
           </div>
 
           <h3 className="section-title">Closed Trade History</h3>
@@ -1283,13 +1615,60 @@ function App() {
                   {paperHistory.map((row) => (
                     <tr key={`${row.id}-${row.status}`}>
                       <td>{row.id}</td>
-                      <td>{row.symbol}</td>
+                      <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                       <td>{row.side}</td>
                       <td>{row.status}</td>
                       <td>{row.entry_price}</td>
                       <td>{row.close_price ?? '-'}</td>
-                      <td>{row.pnl ?? '-'}</td>
+                      <td>
+                        {typeof row.pnl === 'number' ? (
+                          <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${row.pnl >= 0 ? '+' : ''}${row.pnl}`}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>{row.result == null ? '-' : row.result === 1 ? 'WIN' : 'LOSS'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {showDailyScreen ? (
+        <section className="card">
+          <header className="card-header">
+            <h2>Daily Win/Loss Summary (VN Time)</h2>
+            <span className="badge neutral">Last 30 Days</span>
+          </header>
+          <div className="content table-wrap">
+            {dailySummary.length === 0 ? (
+              <p>No closed trades in selected period.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Total</th>
+                    <th>Win</th>
+                    <th>Loss</th>
+                    <th>Win Rate</th>
+                    <th>Total PnL</th>
+                    <th>Avg PnL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailySummary.map((row) => (
+                    <tr key={row.trade_date}>
+                      <td>{row.trade_date}</td>
+                      <td>{row.total_trades}</td>
+                      <td>{row.win_trades}</td>
+                      <td>{row.loss_trades}</td>
+                      <td>{(row.win_rate * 100).toFixed(2)}%</td>
+                      <td>{row.total_pnl.toFixed(6)}</td>
+                      <td>{row.avg_pnl.toFixed(6)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1393,6 +1772,10 @@ function App() {
             {selectedCoin} Liquidation Map
             {' | Price: '}
             {marketPrice != null ? marketPrice.toFixed(marketPrice >= 100 ? 2 : 6) : '...'}
+            {' | WS: '}
+            {priceWsStatus}
+            {' | TS: '}
+            {marketPriceTime ?? '-'}
           </h2>
           <span className={`badge ${connectionStatus === 'Live' ? 'success' : 'warn'}`}>{connectionStatus}</span>
         </div>
@@ -1449,7 +1832,10 @@ function App() {
             <span className="badge neutral">{signal?.side ?? 'N/A'}</span>
           </header>
           <div className="content">
-            <p><strong>Symbol:</strong> {signal?.symbol ?? selectedCoin}</p>
+            <p>
+              <strong>Symbol:</strong>{' '}
+              {renderSymbolJump(signal?.symbol ?? selectedCoin, signal?.predicted_entry_price)}
+            </p>
             <p><strong>Win Probability:</strong> {signal ? `${(signal.win_probability * 100).toFixed(2)}%` : '-'}</p>
             <p><strong>Entry:</strong> {signal?.predicted_entry_price ?? '-'}</p>
             <p><strong>TP:</strong> {signal?.take_profit ?? '-'}</p>
@@ -1466,6 +1852,7 @@ function App() {
                     symbol: signal.symbol,
                     side: signal.side,
                     signal_win_probability: signal.win_probability,
+                    entry_price: signal.predicted_entry_price,
                     take_profit: signal.take_profit,
                     stop_loss: signal.stop_loss,
                   }).catch((err) => {
@@ -1504,7 +1891,7 @@ function App() {
                   {pendingOrders.map((order) => (
                     <tr key={order.id}>
                       <td>{order.id}</td>
-                      <td>{order.symbol}</td>
+                      <td>{renderSymbolJump(order.symbol, order.predicted_entry_price)}</td>
                       <td>{order.side}</td>
                       <td>{order.predicted_entry_price}</td>
                       <td>{order.take_profit}</td>
@@ -1548,14 +1935,7 @@ function App() {
                 {highWinSignals.map((item) => (
                   <tr key={`${item.symbol}-${item.side}`}>
                     <td>
-                      <button
-                        type="button"
-                        className="symbol-jump"
-                        onClick={() => openSymbolOnChart(item.symbol, item.predicted_entry_price)}
-                        title={`Open ${item.symbol} on liquidation chart`}
-                      >
-                        {item.symbol}
-                      </button>
+                      {renderSymbolJump(item.symbol, item.predicted_entry_price)}
                     </td>
                     <td>{item.side}</td>
                     <td>{(item.win_probability * 100).toFixed(2)}</td>
@@ -1572,6 +1952,7 @@ function App() {
                             symbol: item.symbol,
                             side: item.side,
                             signal_win_probability: item.win_probability,
+                            entry_price: item.predicted_entry_price,
                             take_profit: item.take_profit,
                             stop_loss: item.stop_loss,
                           }).catch((err) => {
@@ -1623,7 +2004,7 @@ function App() {
               <tbody>
                 {sortedVolatility.map((row) => (
                   <tr key={`${row.symbol}-${row.days}`}>
-                    <td>{row.symbol}</td>
+                    <td>{renderSymbolJump(row.symbol, row.to_price)}</td>
                     <td>{row.move_pct.toFixed(2)}</td>
                     <td>{row.abs_move_pct.toFixed(2)}</td>
                     <td>{row.from_price}</td>
@@ -1638,8 +2019,89 @@ function App() {
 
       <section className="card">
         <header className="card-header">
+          <h2>BTC Trend Forecast (15m / 1h / 4h / 1d)</h2>
+          <span className="badge neutral">
+            {btcTrend ? `${btcTrend.symbol} ${btcTrend.mark_price.toFixed(2)}` : 'Loading'}
+          </span>
+        </header>
+        <div className="content table-wrap">
+          {btcTrend == null || btcTrend.items.length === 0 ? (
+            <p>No BTC trend data available.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>TF</th>
+                  <th>Trend</th>
+                  <th>Action</th>
+                  <th>Confidence</th>
+                  <th>Prob Up</th>
+                  <th>Prob Down</th>
+                  <th>RSI</th>
+                  <th>Slope%</th>
+                  <th>Tech Score</th>
+                  <th>ML Score</th>
+                  <th>Blend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {btcTrend.items.map((row) => (
+                  <tr key={row.timeframe} className={row.action === 'LONG' ? 'row-long' : row.action === 'SHORT' ? 'row-short' : ''}>
+                    <td>{row.timeframe}</td>
+                    <td>{row.trend}</td>
+                    <td>
+                      <span className={row.action === 'LONG' ? 'pill-long' : row.action === 'SHORT' ? 'pill-short' : ''}>
+                        {row.action}
+                      </span>
+                    </td>
+                    <td>{(row.confidence * 100).toFixed(1)}%</td>
+                    <td>{(row.prob_up * 100).toFixed(1)}%</td>
+                    <td>{(row.prob_down * 100).toFixed(1)}%</td>
+                    <td>{row.rsi.toFixed(2)}</td>
+                    <td>{row.slope_pct.toFixed(3)}</td>
+                    <td>{row.technical_score.toFixed(3)}</td>
+                    <td>{row.ml_score.toFixed(3)}</td>
+                    <td>{row.blended_score.toFixed(3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
           <h2>Liquidation Zone + Long/Short + Funding</h2>
-          <span className="badge neutral">Estimated Zone</span>
+          <div className="scan-actions">
+            <span className="badge neutral">Page {liqPage}/{liqMaxPage}</span>
+            <span className="badge neutral">Symbols: {liqTotalSymbols}</span>
+            <span className="badge neutral">Estimated Zone</span>
+            <button
+              type="button"
+              className="btn-inline btn-secondary"
+              disabled={liqPage <= 1}
+              onClick={() => setLiqPage((p) => Math.max(1, p - 1))}
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              className="btn-inline btn-secondary"
+              disabled={liqPage >= liqMaxPage}
+              onClick={() => setLiqPage((p) => Math.min(liqMaxPage, p + 1))}
+            >
+              Next
+            </button>
+            <button
+              type="button"
+              className={`btn-inline ${autoLiqMarketEnabled ? '' : 'btn-secondary'}`}
+              onClick={() => setAutoLiqMarketEnabled((v) => !v)}
+              title="Auto open market orders from this table"
+            >
+              {autoLiqMarketEnabled ? 'Auto Market ON' : 'Auto Market OFF'}
+            </button>
+          </div>
         </header>
         <div className="content table-wrap">
           {liqOverview.length === 0 ? (
@@ -1655,7 +2117,13 @@ function App() {
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('long_short_ratio')}>L/S Ratio</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('funding_rate')}>Funding Rate</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('open_interest_notional')}>OI Notional</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_win_probability')}>Win%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_entry_price')}>Entry</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_take_profit')}>TP</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_stop_loss')}>SL</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_order_type')}>Signal Type</button></th>
                   <th>Trend</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1663,14 +2131,33 @@ function App() {
                   const trend = getLiqTrend(row)
                   return (
                   <tr key={row.symbol} className={trend === 'LONG' ? 'row-long' : 'row-short'}>
-                    <td>{row.symbol}</td>
+                    <td>{renderSymbolJump(row.symbol, row.mark_price)}</td>
                     <td>{row.mark_price.toFixed(row.mark_price >= 100 ? 2 : 6)}</td>
                     <td>{row.est_liq_zone_price.toFixed(row.est_liq_zone_price >= 100 ? 2 : 6)}</td>
                     <td>{Math.round(row.est_liq_zone_value).toLocaleString()}</td>
                     <td>{row.long_short_ratio.toFixed(3)}</td>
                     <td>{(row.funding_rate * 100).toFixed(4)}%</td>
                     <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
+                    <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
+                    <td>{typeof row.signal_entry_price === 'number' ? row.signal_entry_price.toFixed(row.signal_entry_price >= 100 ? 2 : 6) : '-'}</td>
+                    <td>{typeof row.signal_take_profit === 'number' ? row.signal_take_profit.toFixed(row.signal_take_profit >= 100 ? 2 : 6) : '-'}</td>
+                    <td>{typeof row.signal_stop_loss === 'number' ? row.signal_stop_loss.toFixed(row.signal_stop_loss >= 100 ? 2 : 6) : '-'}</td>
+                    <td>{row.signal_order_type ?? '-'}</td>
                     <td><span className={trend === 'LONG' ? 'pill-long' : 'pill-short'}>{trend}</span></td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn-inline"
+                        disabled={isOpeningMarketOrder || !canOpenFromLiq(row)}
+                        onClick={() => {
+                          openFromLiqRow(row).catch((err) => {
+                            setError(err instanceof Error ? err.message : 'Unknown error')
+                          })
+                        }}
+                      >
+                        {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
+                      </button>
+                    </td>
                   </tr>
                 )})}
               </tbody>

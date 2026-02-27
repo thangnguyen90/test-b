@@ -6,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
 from app.models.paper_trades import (
+    PaperTradeDailySummary,
+    PaperTradeDailySummaryResponse,
     PaperMarketOpenRequest,
     PaperTrade,
     PaperTradeListResponse,
@@ -14,7 +16,7 @@ from app.models.paper_trades import (
 )
 from app.services.binance_client import BinanceFuturesClient
 from app.services.mysql_trade_repo import MySQLTradeRepository
-from app.services.risk_manager import normalize_tp_sl
+from app.services.risk_manager import calc_margin_risk_pct, normalize_tp_sl
 
 
 def _parse_dt(value: object) -> datetime | None:
@@ -38,6 +40,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/open", self.get_open, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
+        self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
         self.router.add_api_route("/market-open", self.market_open, methods=["POST"], response_model=PaperTrade)
 
     def bind_repo(self, repo: MySQLTradeRepository | None) -> None:
@@ -85,26 +88,33 @@ class PaperTradeAPI:
         stats = PaperTradeStats(**payload)
         return PaperTradeStatsResponse(stats=stats)
 
+    def get_daily_summary(self, days: int = Query(default=30, ge=1, le=365)) -> PaperTradeDailySummaryResponse:
+        repo = self._require_repo()
+        rows = repo.daily_summary(days=days)
+        return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
+
     def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._require_repo()
         if repo.has_open_trade(symbol=req.symbol, side=req.side):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
 
-        try:
-            ticker = self.market_client.fetch_ticker(req.symbol)
-            market_price = ticker.get("last") or ticker.get("close")
-            if market_price is None:
-                bid = ticker.get("bid")
-                ask = ticker.get("ask")
-                if bid is not None and ask is not None:
-                    market_price = (bid + ask) / 2
-            if market_price is None:
-                rows = self.market_client.fetch_ohlcv(req.symbol, timeframe="1m", limit=2)
-                market_price = rows[-1][4] if rows else None
-            if market_price is None:
-                raise RuntimeError("No market price")
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
+        market_price = req.entry_price
+        if market_price is None:
+            try:
+                ticker = self.market_client.fetch_ticker(req.symbol)
+                market_price = ticker.get("last") or ticker.get("close")
+                if market_price is None:
+                    bid = ticker.get("bid")
+                    ask = ticker.get("ask")
+                    if bid is not None and ask is not None:
+                        market_price = (bid + ask) / 2
+                if market_price is None:
+                    rows = self.market_client.fetch_ohlcv(req.symbol, timeframe="1m", limit=2)
+                    market_price = rows[-1][4] if rows else None
+                if market_price is None:
+                    raise RuntimeError("No market price")
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
         normalized_tp, normalized_sl = normalize_tp_sl(
             side=req.side,
@@ -114,6 +124,21 @@ class PaperTradeAPI:
             min_sl_pct=settings.paper_trade_min_sl_pct,
             min_rr=settings.paper_trade_min_rr,
         )
+        leverage = req.leverage or settings.paper_trade_leverage
+        risk_pct = calc_margin_risk_pct(
+            side=req.side,
+            entry_price=float(market_price),
+            stop_loss=normalized_sl,
+            leverage=leverage,
+        )
+        if risk_pct > settings.paper_trade_max_risk_pct:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Risk too high for {req.symbol}: {risk_pct:.2f}% > "
+                    f"max {settings.paper_trade_max_risk_pct:.2f}% (margin risk)"
+                ),
+            )
 
         trade_id = repo.create_open_trade(
             {
@@ -125,7 +150,7 @@ class PaperTradeAPI:
                 "take_profit": normalized_tp,
                 "stop_loss": normalized_sl,
                 "quantity": req.quantity or settings.paper_trade_quantity,
-                "leverage": req.leverage or settings.paper_trade_leverage,
+                "leverage": leverage,
             }
         )
         rows = repo.list_recent_trades(limit=1)

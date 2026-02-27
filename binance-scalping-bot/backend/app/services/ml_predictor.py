@@ -12,7 +12,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
-from app.services.data_pipeline import DEFAULT_SYMBOLS, FEATURE_COLUMNS, DataPipeline
+from app.core.config import settings
+from app.services.data_pipeline import DEFAULT_SYMBOLS, FEATURE_COLUMNS, DataPipeline, PreparedData
+from app.services.mysql_trade_repo import MySQLTradeRepository
 
 
 @dataclass
@@ -63,6 +65,14 @@ class MLPredictor:
             rr_ratio=rr_ratio,
         )
 
+        feedback_rows = self._load_feedback_rows(limit=settings.ml_feedback_train_limit)
+        feedback_prepared = self._build_feedback_dataset(feedback_rows)
+        if not feedback_prepared.features.empty:
+            prepared = PreparedData(
+                features=pd.concat([prepared.features, feedback_prepared.features], ignore_index=True),
+                labels=pd.concat([prepared.labels, feedback_prepared.labels], ignore_index=True),
+            )
+
         if prepared.features.empty or prepared.labels.nunique() < 2:
             return {
                 "trained": False,
@@ -71,18 +81,28 @@ class MLPredictor:
                 "accuracy": None,
                 "roc_auc": None,
                 "trained_at": None,
+                "feedback_samples": int(len(feedback_prepared.labels)),
             }
 
         X = prepared.features[self.feature_columns]
         y = prepared.labels
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=0.2,
-            random_state=42,
-            stratify=y,
-        )
+        try:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=0.2,
+                random_state=42,
+                stratify=y,
+            )
+        except ValueError:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X,
+                y,
+                test_size=0.2,
+                random_state=42,
+                stratify=None,
+            )
 
         model = RandomForestClassifier(
             n_estimators=350,
@@ -120,6 +140,7 @@ class MLPredictor:
             "accuracy": self.accuracy,
             "roc_auc": self.roc_auc,
             "trained_at": self.trained_at,
+            "feedback_samples": int(len(feedback_prepared.labels)),
         }
 
     def status(self) -> dict:
@@ -172,3 +193,62 @@ class MLPredictor:
             stop_loss=round(float(stop_loss), 6),
             take_profit=round(float(take_profit), 6),
         )
+
+    def _load_feedback_rows(self, limit: int) -> list[dict]:
+        if not settings.mysql_enabled:
+            return []
+        try:
+            repo = MySQLTradeRepository(
+                host=settings.mysql_host,
+                port=settings.mysql_port,
+                user=settings.mysql_user,
+                password=settings.mysql_password,
+                database=settings.mysql_database,
+            )
+            return repo.list_feedback(limit=limit)
+        except Exception:
+            return []
+
+    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> PreparedData:
+        if not feedback_rows:
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int))
+
+        feature_rows: list[pd.Series] = []
+        labels: list[int] = []
+        symbol_cache: dict[str, pd.Series | None] = {}
+
+        for row in feedback_rows:
+            symbol = str(row.get("symbol") or "")
+            side = str(row.get("side") or "")
+            result = row.get("result")
+            if not symbol or result is None:
+                continue
+
+            label = int(result)
+            if label not in (0, 1):
+                continue
+
+            if symbol not in symbol_cache:
+                try:
+                    symbol_cache[symbol] = self.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
+                except Exception:
+                    symbol_cache[symbol] = None
+
+            feature_row = symbol_cache[symbol]
+            if feature_row is None:
+                continue
+
+            sample = feature_row.copy()
+            if side == "LONG":
+                sample["setup_side"] = 1.0
+            elif side == "SHORT":
+                sample["setup_side"] = 0.0
+            feature_rows.append(sample[self.feature_columns].astype(float))
+            labels.append(label)
+
+        if not feature_rows:
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int))
+
+        features = pd.DataFrame(feature_rows).reset_index(drop=True)
+        labels_series = pd.Series(labels, dtype=int)
+        return PreparedData(features=features, labels=labels_series)

@@ -26,6 +26,8 @@ class BinanceFuturesClient:
         exchange = self._get_exchange()
         return exchange.fetch_ticker(symbol=symbol)
 
-    def fetch_tickers(self, symbols: list[str]) -> dict[str, Any]:
+    def fetch_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
         exchange = self._get_exchange()
-        return exchange.fetch_tickers(symbols=symbols)
+        if symbols:
+            return exchange.fetch_tickers(symbols=symbols)
+        return exchange.fetch_tickers()

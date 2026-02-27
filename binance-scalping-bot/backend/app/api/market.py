@@ -3,6 +3,7 @@ import time
 from fastapi import APIRouter, HTTPException
 
 from app.api.signals import get_cached_symbols_snapshot
+from app.deps import price_stream
 from app.services.binance_client import BinanceFuturesClient
 
 router = APIRouter(prefix="/api/v1/market", tags=["market"])
@@ -58,7 +59,16 @@ def get_binance_futures_symbols() -> dict:
 
 
 @router.get("/price")
-def get_symbol_price(symbol: str) -> dict:
+async def get_symbol_price(symbol: str) -> dict:
+    stream_price, stream_ts = await price_stream.get_price(symbol=symbol)
+    if stream_price is not None:
+        return {
+            "symbol": symbol,
+            "price": float(stream_price),
+            "timestamp": stream_ts,
+            "source": "binance_stream",
+        }
+
     ticker_error: Exception | None = None
     try:
         ticker = _client.fetch_ticker(symbol=symbol)
@@ -97,6 +107,42 @@ def get_symbol_price(symbol: str) -> dict:
 
     error_text = f"ticker_error={ticker_error}; ohlcv_error=empty_ohlcv"
     raise HTTPException(status_code=503, detail=f"Cannot fetch price for {symbol}: {error_text}")
+
+
+@router.get("/prices")
+async def get_symbols_prices(symbols: str) -> dict:
+    target_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not target_symbols:
+        return {"count": 0, "prices": {}, "timestamp": None, "source": "empty"}
+
+    prices, stamp = await price_stream.get_prices(target_symbols)
+    missing = [sym for sym in target_symbols if sym not in prices]
+    if missing:
+        try:
+            tickers = _client.fetch_tickers(missing)
+            if isinstance(tickers, dict):
+                for symbol in missing:
+                    ticker = tickers.get(symbol)
+                    if not isinstance(ticker, dict):
+                        continue
+                    px = ticker.get("last") or ticker.get("close")
+                    if px is None:
+                        bid = ticker.get("bid")
+                        ask = ticker.get("ask")
+                        if bid is not None and ask is not None:
+                            px = (bid + ask) / 2
+                    if px is not None:
+                        prices[symbol] = float(px)
+        except Exception:
+            pass
+
+    return {
+        "count": len(prices),
+        "prices": prices,
+        "timestamp": stamp,
+        "missing": [sym for sym in target_symbols if sym not in prices],
+        "source": "stream+fallback",
+    }
 
 
 @router.get("/klines")

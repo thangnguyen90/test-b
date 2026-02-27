@@ -516,6 +516,16 @@ td {
   border: 1px solid #e7b2b2;
 }
 
+.pnl-pos {
+  color: #0f5c36;
+  font-weight: 700;
+}
+
+.pnl-neg {
+  color: #8b1f1f;
+  font-weight: 700;
+}
+
 .error {
   margin: 0.6rem 0 0;
   color: #a7262f;

@@ -30,3 +30,17 @@ def normalize_tp_sl(
         normalized_tp = entry - tp_distance
 
     return normalized_tp, normalized_sl
+
+
+def calc_margin_risk_pct(side: str, entry_price: float, stop_loss: float, leverage: int) -> float:
+    entry = float(entry_price)
+    sl = float(stop_loss)
+    lev = max(1, int(leverage))
+    if entry <= 0:
+        return 0.0
+
+    if side == "LONG":
+        move = max(0.0, (entry - sl) / entry)
+    else:
+        move = max(0.0, (sl - entry) / entry)
+    return move * lev * 100
