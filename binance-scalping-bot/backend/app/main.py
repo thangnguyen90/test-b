@@ -7,6 +7,7 @@ from starlette.websockets import WebSocketState
 
 from app.api.market import router as market_router
 from app.api.ml import router as ml_router
+from app.api.analytics import router as analytics_router
 from app.api.orders import router as orders_router
 from app.api.paper_trades import paper_trade_api
 from app.api.paper_trades import router as paper_trades_router
@@ -36,6 +37,7 @@ app.include_router(orders_router)
 app.include_router(signals_router)
 app.include_router(ml_router)
 app.include_router(market_router)
+app.include_router(analytics_router)
 app.include_router(paper_trades_router)
 
 
@@ -60,6 +62,8 @@ async def on_startup() -> None:
                 quantity=settings.paper_trade_quantity,
                 leverage=settings.paper_trade_leverage,
                 poll_interval_sec=settings.paper_trade_poll_interval_sec,
+                min_sl_pct=settings.paper_trade_min_sl_pct,
+                min_rr=settings.paper_trade_min_rr,
             )
             await paper_trade_engine.start()
         except Exception:

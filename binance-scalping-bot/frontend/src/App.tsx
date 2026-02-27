@@ -147,6 +147,36 @@ type PaperTradeStats = {
   avg_pnl: number
 }
 
+type VolatilityItem = {
+  symbol: string
+  move_pct: number
+  abs_move_pct: number
+  from_price: number
+  to_price: number
+  days: number
+}
+
+type LiquidationOverviewItem = {
+  symbol: string
+  mark_price: number
+  funding_rate: number
+  long_short_ratio: number
+  open_interest_notional: number
+  est_liq_zone_price: number
+  est_liq_zone_value: number
+}
+
+type SortDirection = 'asc' | 'desc'
+
+type PaperMarketOpenRequest = {
+  symbol: string
+  side: 'LONG' | 'SHORT'
+  signal_win_probability: number
+  effective_win_probability?: number
+  take_profit: number
+  stop_loss: number
+}
+
 const API_BASE = 'http://127.0.0.1:8000'
 const SIGNALS_WS_URL = 'ws://127.0.0.1:8000/ws/signals?min_win=0.7&max_symbols=80&interval_sec=12'
 const FALLBACK_COINS = [
@@ -280,6 +310,10 @@ function calcEMA(series: number[], period: number): Array<number | null> {
   return out
 }
 
+function canonicalSymbol(symbol: string): string {
+  return symbol.replace(':USDT', '').trim().toUpperCase()
+}
+
 function buildHeatmap(
   coin: string,
   basePrice: number,
@@ -287,8 +321,8 @@ function buildHeatmap(
   timeframe: string,
   pastSeriesInput: number[],
 ): HeatmapData {
-  const rows = 320
-  const cols = 980
+  const rows = 260
+  const cols = 760
   const currentCol = Math.floor(cols * 0.72)
   const series: number[] = []
   const seed = hashText(`${coin}:${threshold}:${timeframe}`)
@@ -548,6 +582,8 @@ function LiquidationMapCanvas({
 
 function App() {
   const mapSectionRef = useRef<HTMLElement | null>(null)
+  const selectedCoinRef = useRef<string>('BTC/USDT')
+  const symbolReqIdRef = useRef(0)
   const [health, setHealth] = useState<Health | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
@@ -574,12 +610,28 @@ function App() {
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
+  const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
+  const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
+  const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
+  const [liqOverview, setLiqOverview] = useState<LiquidationOverviewItem[]>([])
+  const [volSort, setVolSort] = useState<{ key: keyof VolatilityItem; direction: SortDirection }>({
+    key: 'abs_move_pct',
+    direction: 'desc',
+  })
+  const [liqSort, setLiqSort] = useState<{ key: keyof LiquidationOverviewItem; direction: SortDirection }>({
+    key: 'est_liq_zone_value',
+    direction: 'desc',
+  })
 
   const [selectedCoin, setSelectedCoin] = useState('BTC/USDT')
   const [searchCoin, setSearchCoin] = useState('')
   const [timeframe, setTimeframe] = useState('12h')
   const [threshold, setThreshold] = useState(0.62)
   const [paletteId, setPaletteId] = useState(PALETTES[0].id)
+
+  useEffect(() => {
+    selectedCoinRef.current = selectedCoin
+  }, [selectedCoin])
 
   const activePalette = useMemo(
     () => PALETTES.find((p) => p.id === paletteId) ?? PALETTES[0],
@@ -670,6 +722,61 @@ function App() {
     }
   }, [hoverInfo, marketPrice, chartBasePrice, timeframe, heatmapData.cols, heatmapData.currentCol])
 
+  const sortedVolatility = useMemo(() => {
+    const rows = [...topVolatility]
+    const { key, direction } = volSort
+    rows.sort((a, b) => {
+      const av = a[key]
+      const bv = b[key]
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return direction === 'asc' ? av - bv : bv - av
+      }
+      return direction === 'asc'
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av))
+    })
+    return rows
+  }, [topVolatility, volSort])
+
+  const sortedLiqOverview = useMemo(() => {
+    const rows = [...liqOverview]
+    const { key, direction } = liqSort
+    rows.sort((a, b) => {
+      const av = a[key]
+      const bv = b[key]
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return direction === 'asc' ? av - bv : bv - av
+      }
+      return direction === 'asc'
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av))
+    })
+    return rows
+  }, [liqOverview, liqSort])
+
+  function toggleVolSort(key: keyof VolatilityItem) {
+    setVolSort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: 'desc' }
+    })
+  }
+
+  function toggleLiqSort(key: keyof LiquidationOverviewItem) {
+    setLiqSort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: 'desc' }
+    })
+  }
+
+  function getLiqTrend(row: LiquidationOverviewItem): 'LONG' | 'SHORT' {
+    if (row.est_liq_zone_price >= row.mark_price) return 'LONG'
+    return 'SHORT'
+  }
+
   function openSymbolOnChart(symbol: string, hintPrice?: number) {
     setError('')
     setHoverInfo(null)
@@ -697,7 +804,10 @@ function App() {
       `${API_BASE}/api/v1/signals/latest?symbol=${encodeURIComponent(symbol)}&mark_price=${markPrice}`,
     )
     if (!response.ok) throw new Error('Signal API failed')
-    setSignal(await response.json())
+    const payload = await response.json()
+    if (canonicalSymbol(symbol) === canonicalSymbol(selectedCoinRef.current)) {
+      setSignal(payload)
+    }
   }
 
   async function fetchPendingOrders() {
@@ -711,12 +821,12 @@ function App() {
     if (!response.ok) throw new Error('Cannot fetch Binance Futures symbols')
     const data = (await response.json()) as SymbolListResponse
     if (!Array.isArray(data.symbols) || data.symbols.length === 0) return
-    setCoins(data.symbols)
+    setCoins((prev) => {
+      const merged = [...prev, ...data.symbols]
+      return Array.from(new Set(merged))
+    })
     setSymbolsSource('binance')
     setSymbolsStatus(`Binance symbols loaded: ${data.symbols.length}`)
-    if (!data.symbols.includes(selectedCoin)) {
-      setSelectedCoin(data.symbols[0])
-    }
   }
 
   async function fetchMarketPriceFallback(symbol = selectedCoin): Promise<number> {
@@ -725,8 +835,10 @@ function App() {
     )
     if (!response.ok) throw new Error(`Cannot fetch market price for ${symbol}`)
     const data = (await response.json()) as MarketPriceResponse
-    setMarketPrice(data.price)
-    setMarketPriceTime(data.timestamp)
+    if (canonicalSymbol(symbol) === canonicalSymbol(selectedCoinRef.current)) {
+      setMarketPrice(data.price)
+      setMarketPriceTime(data.timestamp)
+    }
     return data.price
   }
 
@@ -737,7 +849,9 @@ function App() {
     if (!response.ok) throw new Error(`Cannot fetch klines for ${symbol}`)
     const data = (await response.json()) as KlinesResponse
     const closes = (data.candles ?? []).map((c) => c.close).filter((x) => Number.isFinite(x))
-    if (closes.length > 10) setKlineSeries(closes)
+    if (closes.length > 10 && canonicalSymbol(symbol) === canonicalSymbol(selectedCoinRef.current)) {
+      setKlineSeries(closes)
+    }
   }
 
   async function fetchHighWinSignals() {
@@ -757,16 +871,66 @@ function App() {
       fetch(`${API_BASE}/api/v1/paper-trades/open`),
       fetch(`${API_BASE}/api/v1/paper-trades/history?limit=120`),
     ])
-    if (!statsRes.ok || !openRes.ok || !historyRes.ok) {
-      throw new Error('Paper trading stats API unavailable')
+    const errors: string[] = []
+
+    if (statsRes.ok) {
+      const statsPayload = await statsRes.json() as { stats: PaperTradeStats }
+      setPaperStats(statsPayload.stats ?? null)
+    } else {
+      errors.push(`stats:${statsRes.status}`)
     }
 
-    const statsPayload = await statsRes.json() as { stats: PaperTradeStats }
-    const openPayload = await openRes.json() as { items: PaperTrade[] }
-    const historyPayload = await historyRes.json() as { items: PaperTrade[] }
-    setPaperStats(statsPayload.stats ?? null)
-    setPaperOpenTrades(openPayload.items ?? [])
-    setPaperHistory(historyPayload.items ?? [])
+    if (openRes.ok) {
+      const openPayload = await openRes.json() as { items: PaperTrade[] }
+      setPaperOpenTrades(openPayload.items ?? [])
+    } else {
+      errors.push(`open:${openRes.status}`)
+    }
+
+    if (historyRes.ok) {
+      const historyPayload = await historyRes.json() as { items: PaperTrade[] }
+      setPaperHistory(historyPayload.items ?? [])
+    } else {
+      errors.push(`history:${historyRes.status}`)
+    }
+
+    if (errors.length > 0) {
+      throw new Error(`Paper trading partial failure (${errors.join(', ')})`)
+    }
+  }
+
+  async function fetchTopVolatility(days: 1 | 3 | 5 | 7 = volDays) {
+    const response = await fetch(`${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`)
+    if (!response.ok) throw new Error('Cannot fetch top volatility')
+    const payload = await response.json() as { items: VolatilityItem[] }
+    setTopVolatility(payload.items ?? [])
+  }
+
+  async function fetchLiqOverview() {
+    const response = await fetch(`${API_BASE}/api/v1/analytics/liquidation-overview?limit=30`)
+    if (!response.ok) throw new Error('Cannot fetch liquidation overview')
+    const payload = await response.json() as { items: LiquidationOverviewItem[] }
+    setLiqOverview(payload.items ?? [])
+  }
+
+  async function openPaperMarketOrder(input: PaperMarketOpenRequest) {
+    setIsOpeningMarketOrder(true)
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/paper-trades/market-open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      })
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`Market open failed: ${text}`)
+      }
+      await fetchPaperTradingStats().catch(() => {
+        // Keep UI responsive even if stats refresh fails once.
+      })
+    } finally {
+      setIsOpeningMarketOrder(false)
+    }
   }
 
   async function createDemoPendingOrder() {
@@ -838,15 +1002,19 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const reqId = ++symbolReqIdRef.current
     const refreshForSymbol = async () => {
       try {
+        const symbol = selectedCoin
         await Promise.all([
-          fetchSignal(selectedCoin, marketPrice ?? chartBasePrice),
-          fetchKlines(selectedCoin),
+          fetchSignal(symbol, marketPrice ?? chartBasePrice),
+          fetchKlines(symbol),
         ])
+        if (reqId !== symbolReqIdRef.current) return
         setError('')
       } catch (err) {
         // Keep chart running even if one request fails on symbol switch.
+        if (reqId !== symbolReqIdRef.current) return
         setError(err instanceof Error ? err.message : 'Unknown error')
       }
     }
@@ -870,6 +1038,28 @@ function App() {
       window.clearInterval(timer)
     }
   }, [showPaperScreen])
+
+  useEffect(() => {
+    fetchTopVolatility(volDays).catch(() => {
+      // Keep previous volatility table on request failure.
+    })
+  }, [volDays])
+
+  useEffect(() => {
+    fetchLiqOverview().catch(() => {
+      // Keep previous liquidation overview table on request failure.
+    })
+
+    const timer = window.setInterval(() => {
+      fetchLiqOverview().catch(() => {
+        // Keep previous liquidation overview on periodic refresh failure.
+      })
+    }, 45000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [])
 
   useEffect(() => {
     let socket: WebSocket | null = null
@@ -964,6 +1154,9 @@ function App() {
         try {
           const msg = JSON.parse(event.data) as PriceStreamMessage
           if (msg.type === 'price' && typeof msg.price === 'number') {
+            if (canonicalSymbol(msg.symbol ?? selectedCoin) !== canonicalSymbol(selectedCoinRef.current)) {
+              return
+            }
             setMarketPrice(msg.price)
             setMarketPriceTime(msg.timestamp ?? null)
             return
@@ -1196,7 +1389,11 @@ function App() {
         </div>
 
         <div className="map-header">
-          <h2>{selectedCoin} Liquidation Map</h2>
+          <h2>
+            {selectedCoin} Liquidation Map
+            {' | Price: '}
+            {marketPrice != null ? marketPrice.toFixed(marketPrice >= 100 ? 2 : 6) : '...'}
+          </h2>
           <span className={`badge ${connectionStatus === 'Live' ? 'success' : 'warn'}`}>{connectionStatus}</span>
         </div>
 
@@ -1257,9 +1454,29 @@ function App() {
             <p><strong>Entry:</strong> {signal?.predicted_entry_price ?? '-'}</p>
             <p><strong>TP:</strong> {signal?.take_profit ?? '-'}</p>
             <p><strong>SL:</strong> {signal?.stop_loss ?? '-'}</p>
-            <button onClick={createDemoPendingOrder} disabled={!signal || isLoadingOrder}>
-              {isLoadingOrder ? 'Submitting...' : 'Create Demo Pending Order'}
-            </button>
+            <div className="action-row">
+              <button onClick={createDemoPendingOrder} disabled={!signal || isLoadingOrder}>
+                {isLoadingOrder ? 'Submitting...' : 'Create Demo Pending Order'}
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  if (!signal) return
+                  openPaperMarketOrder({
+                    symbol: signal.symbol,
+                    side: signal.side,
+                    signal_win_probability: signal.win_probability,
+                    take_profit: signal.take_profit,
+                    stop_loss: signal.stop_loss,
+                  }).catch((err) => {
+                    setError(err instanceof Error ? err.message : 'Unknown error')
+                  })
+                }}
+                disabled={!signal || isOpeningMarketOrder}
+              >
+                {isOpeningMarketOrder ? 'Opening...' : 'Open Paper Market Now'}
+              </button>
+            </div>
           </div>
         </article>
 
@@ -1324,6 +1541,7 @@ function App() {
                   <th>Entry</th>
                   <th>TP</th>
                   <th>SL</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1344,8 +1562,117 @@ function App() {
                     <td>{item.predicted_entry_price}</td>
                     <td>{item.take_profit}</td>
                     <td>{item.stop_loss}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn-inline"
+                        disabled={isOpeningMarketOrder}
+                        onClick={() => {
+                          openPaperMarketOrder({
+                            symbol: item.symbol,
+                            side: item.side,
+                            signal_win_probability: item.win_probability,
+                            take_profit: item.take_profit,
+                            stop_loss: item.stop_loss,
+                          }).catch((err) => {
+                            setError(err instanceof Error ? err.message : 'Unknown error')
+                          })
+                        }}
+                      >
+                        {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
+                      </button>
+                    </td>
                   </tr>
                 ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>Top Volatility Coins</h2>
+          <div className="tab-row">
+            {[1, 3, 5, 7].map((d) => (
+              <button
+                key={d}
+                type="button"
+                className={`tab-btn ${volDays === d ? 'tab-btn-active' : ''}`}
+                onClick={() => setVolDays(d as 1 | 3 | 5 | 7)}
+              >
+                {d}D
+              </button>
+            ))}
+          </div>
+        </header>
+        <div className="content table-wrap">
+          {topVolatility.length === 0 ? (
+            <p>No volatility data available.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('symbol')}>Symbol</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('move_pct')}>Move%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('abs_move_pct')}>Abs Move%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('from_price')}>From</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('to_price')}>To</button></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedVolatility.map((row) => (
+                  <tr key={`${row.symbol}-${row.days}`}>
+                    <td>{row.symbol}</td>
+                    <td>{row.move_pct.toFixed(2)}</td>
+                    <td>{row.abs_move_pct.toFixed(2)}</td>
+                    <td>{row.from_price}</td>
+                    <td>{row.to_price}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>Liquidation Zone + Long/Short + Funding</h2>
+          <span className="badge neutral">Estimated Zone</span>
+        </header>
+        <div className="content table-wrap">
+          {liqOverview.length === 0 ? (
+            <p>No liquidation overview data available.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('symbol')}>Symbol</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('mark_price')}>Mark</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('est_liq_zone_price')}>Est Liq Zone Price</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('est_liq_zone_value')}>Est Liq Zone Value</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('long_short_ratio')}>L/S Ratio</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('funding_rate')}>Funding Rate</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('open_interest_notional')}>OI Notional</button></th>
+                  <th>Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedLiqOverview.map((row) => {
+                  const trend = getLiqTrend(row)
+                  return (
+                  <tr key={row.symbol} className={trend === 'LONG' ? 'row-long' : 'row-short'}>
+                    <td>{row.symbol}</td>
+                    <td>{row.mark_price.toFixed(row.mark_price >= 100 ? 2 : 6)}</td>
+                    <td>{row.est_liq_zone_price.toFixed(row.est_liq_zone_price >= 100 ? 2 : 6)}</td>
+                    <td>{Math.round(row.est_liq_zone_value).toLocaleString()}</td>
+                    <td>{row.long_short_ratio.toFixed(3)}</td>
+                    <td>{(row.funding_rate * 100).toFixed(4)}%</td>
+                    <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
+                    <td><span className={trend === 'LONG' ? 'pill-long' : 'pill-short'}>{trend}</span></td>
+                  </tr>
+                )})}
               </tbody>
             </table>
           )}

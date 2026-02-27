@@ -44,6 +44,8 @@ class Settings(BaseModel):
     paper_trade_quantity: float = float(os.getenv("PAPER_TRADE_QUANTITY", "0.01"))
     paper_trade_leverage: int = int(os.getenv("PAPER_TRADE_LEVERAGE", "5"))
     paper_trade_poll_interval_sec: float = float(os.getenv("PAPER_TRADE_POLL_INTERVAL_SEC", "6"))
+    paper_trade_min_sl_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_PCT", "0.004"))
+    paper_trade_min_rr: float = float(os.getenv("PAPER_TRADE_MIN_RR", "1.5"))
 
 
 settings = Settings()

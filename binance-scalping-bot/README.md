@@ -103,6 +103,16 @@ curl http://127.0.0.1:8000/api/v1/paper-trades/open
 curl "http://127.0.0.1:8000/api/v1/paper-trades/history?limit=100"
 ```
 
+### Analytics tables
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/analytics/top-volatility?days=1&limit=30"
+curl "http://127.0.0.1:8000/api/v1/analytics/top-volatility?days=3&limit=30"
+curl "http://127.0.0.1:8000/api/v1/analytics/top-volatility?days=5&limit=30"
+curl "http://127.0.0.1:8000/api/v1/analytics/top-volatility?days=7&limit=30"
+curl "http://127.0.0.1:8000/api/v1/analytics/liquidation-overview?limit=30"
+```
+
 ### Tạo lệnh pending demo
 
 ```bash
@@ -158,6 +168,8 @@ PAPER_TRADE_MIN_WIN=0.75
 PAPER_TRADE_QUANTITY=0.01
 PAPER_TRADE_LEVERAGE=5
 PAPER_TRADE_POLL_INTERVAL_SEC=6
+PAPER_TRADE_MIN_SL_PCT=0.004
+PAPER_TRADE_MIN_RR=1.5
 ```
 
 ## 9) Troubleshooting nhanh

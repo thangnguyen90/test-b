@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PaperTrade(BaseModel):
@@ -40,3 +40,14 @@ class PaperTradeListResponse(BaseModel):
 
 class PaperTradeStatsResponse(BaseModel):
     stats: PaperTradeStats
+
+
+class PaperMarketOpenRequest(BaseModel):
+    symbol: str
+    side: str = Field(pattern="^(LONG|SHORT)$")
+    signal_win_probability: float = Field(ge=0, le=1)
+    effective_win_probability: Optional[float] = Field(default=None, ge=0, le=1)
+    take_profit: float = Field(gt=0)
+    stop_loss: float = Field(gt=0)
+    quantity: Optional[float] = Field(default=None, gt=0)
+    leverage: Optional[int] = Field(default=None, ge=1, le=125)

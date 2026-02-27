@@ -8,6 +8,7 @@ from app.api.signals import get_scan_snapshot
 from app.services.binance_client import BinanceFuturesClient
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.risk_manager import normalize_tp_sl
 
 
 class PaperTradingEngine:
@@ -19,6 +20,8 @@ class PaperTradingEngine:
         quantity: float = 0.01,
         leverage: int = 5,
         poll_interval_sec: float = 6.0,
+        min_sl_pct: float = 0.004,
+        min_rr: float = 1.5,
     ) -> None:
         self.repo = repo
         self.predictor = predictor
@@ -27,6 +30,8 @@ class PaperTradingEngine:
         self.quantity = quantity
         self.leverage = leverage
         self.poll_interval_sec = max(2.0, poll_interval_sec)
+        self.min_sl_pct = min_sl_pct
+        self.min_rr = min_rr
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -90,6 +95,15 @@ class PaperTradingEngine:
             if not touched:
                 continue
 
+            normalized_tp, normalized_sl = normalize_tp_sl(
+                side=side,
+                entry_price=entry,
+                take_profit=tp,
+                stop_loss=sl,
+                min_sl_pct=self.min_sl_pct,
+                min_rr=self.min_rr,
+            )
+
             self.repo.create_open_trade(
                 {
                     "symbol": symbol,
@@ -97,8 +111,8 @@ class PaperTradingEngine:
                     "signal_win_probability": raw_prob,
                     "effective_win_probability": effective_prob,
                     "entry_price": entry,
-                    "take_profit": tp,
-                    "stop_loss": sl,
+                    "take_profit": normalized_tp,
+                    "stop_loss": normalized_sl,
                     "quantity": self.quantity,
                     "leverage": self.leverage,
                 }
