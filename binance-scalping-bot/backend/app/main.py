@@ -1,11 +1,9 @@
 import asyncio
-import json
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
-import websockets
 
 from app.api.market import router as market_router
 from app.api.ml import router as ml_router
@@ -39,27 +37,6 @@ app.include_router(ml_router)
 app.include_router(market_router)
 app.include_router(analytics_router)
 app.include_router(paper_trades_router)
-
-
-def _to_ws_symbol(symbol: str) -> str:
-    # BTC/USDT or BTC/USDT:USDT -> btcusdt
-    return symbol.replace(":USDT", "").replace("/", "").lower().strip()
-
-
-def _from_ws_symbol(symbol: str) -> str:
-    text = symbol.upper().strip()
-    if text.endswith("USDT") and len(text) > 4:
-        return f"{text[:-4]}/USDT"
-    return text
-
-
-def _ts_ms_to_iso(ms: int | None) -> str | None:
-    if ms is None:
-        return None
-    try:
-        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
-    except Exception:
-        return None
 
 
 @app.on_event("startup")
@@ -141,7 +118,11 @@ async def signals_socket(
     try:
         while websocket.client_state == WebSocketState.CONNECTED:
             try:
-                payload = get_scan_snapshot(min_win=min_win, max_symbols=max_symbols)
+                payload = await asyncio.to_thread(
+                    get_scan_snapshot,
+                    min_win=min_win,
+                    max_symbols=max_symbols,
+                )
                 await websocket.send_json({"type": "signals_scan", "data": payload})
             except Exception as exc:
                 await websocket.send_json(
@@ -163,10 +144,8 @@ async def price_socket(
 ) -> None:
     await websocket.accept()
     poll_interval = min(max(interval_sec, 0.6), 5.0)
-    ws_symbol = _to_ws_symbol(symbol)
-    ws_url = f"wss://fstream.binance.com/ws/{ws_symbol}@markPrice@1s"
 
-    async def _fallback_loop() -> None:
+    try:
         while websocket.client_state == WebSocketState.CONNECTED:
             price, timestamp = await price_stream.get_price(symbol=symbol)
             if price is not None:
@@ -174,45 +153,24 @@ async def price_socket(
                     {
                         "type": "price",
                         "symbol": symbol,
-                        "price": price,
-                        "source": "miniTicker_cache",
+                        "price": float(price),
+                        "source": "stream_cache",
                         "timestamp": timestamp,
                     }
                 )
-            await asyncio.sleep(poll_interval)
-
-    try:
-        async with websockets.connect(ws_url, ping_interval=15, ping_timeout=15, close_timeout=5) as upstream:
-            while websocket.client_state == WebSocketState.CONNECTED:
-                raw = await upstream.recv()
-                payload = json.loads(raw)
-                if payload.get("e") != "markPriceUpdate":
-                    continue
-                px = payload.get("p")
-                if px is None:
-                    continue
+            else:
                 await websocket.send_json(
                     {
-                        "type": "price",
-                        "symbol": _from_ws_symbol(str(payload.get("s") or ws_symbol)),
-                        "price": float(px),
-                        "source": "markPrice",
-                        "timestamp": _ts_ms_to_iso(payload.get("E")),
-                        "funding_rate": float(payload["r"]) if payload.get("r") is not None else None,
+                        "type": "price_error",
+                        "symbol": symbol,
+                        "error": "No price in stream cache yet",
                     }
                 )
+            await asyncio.sleep(poll_interval)
     except WebSocketDisconnect:
         return
-    except Exception as exc:
-        if websocket.client_state == WebSocketState.CONNECTED:
-            await websocket.send_json(
-                {
-                    "type": "price_error",
-                    "symbol": symbol,
-                    "error": f"markPrice stream unavailable, fallback to cache: {exc}",
-                }
-            )
-            await _fallback_loop()
+    except Exception:
+        return
 
 
 @app.websocket("/ws/prices")
@@ -226,16 +184,8 @@ async def prices_socket(
     target_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
     if not target_symbols:
         target_symbols = ["BTC/USDT"]
-    requested_by_ws_symbol: dict[str, list[str]] = {}
-    for sym in target_symbols:
-        ws_sym = _to_ws_symbol(sym)
-        requested_by_ws_symbol.setdefault(ws_sym, []).append(sym)
 
-    ws_streams = [f"{ws_sym}@markPrice@1s" for ws_sym in sorted(set(requested_by_ws_symbol.keys()))]
-    ws_url = f"wss://fstream.binance.com/stream?streams={'/'.join(ws_streams)}"
-    latest: dict[str, float] = {}
-
-    async def _fallback_loop() -> None:
+    try:
         while websocket.client_state == WebSocketState.CONNECTED:
             prices, stamp = await price_stream.get_prices(target_symbols)
             await websocket.send_json(
@@ -244,45 +194,11 @@ async def prices_socket(
                     "symbols": target_symbols,
                     "prices": prices,
                     "timestamp": stamp,
-                    "source": "miniTicker_cache",
+                    "source": "stream_cache",
                 }
             )
             await asyncio.sleep(poll_interval)
-
-    try:
-        async with websockets.connect(ws_url, ping_interval=15, ping_timeout=15, close_timeout=5) as upstream:
-            while websocket.client_state == WebSocketState.CONNECTED:
-                raw = await upstream.recv()
-                msg = json.loads(raw)
-                stream_data = msg.get("data") if isinstance(msg, dict) else None
-                if not isinstance(stream_data, dict):
-                    continue
-                if stream_data.get("e") != "markPriceUpdate":
-                    continue
-                ws_symbol_from_stream = str(stream_data.get("s") or "").lower().strip()
-                price_raw = stream_data.get("p")
-                if ws_symbol_from_stream and price_raw is not None:
-                    px = float(price_raw)
-                    for requested_symbol in requested_by_ws_symbol.get(ws_symbol_from_stream, []):
-                        latest[requested_symbol] = px
-                await websocket.send_json(
-                    {
-                        "type": "prices",
-                        "symbols": target_symbols,
-                        "prices": latest,
-                        "timestamp": _ts_ms_to_iso(stream_data.get("E")),
-                        "source": "markPrice",
-                    }
-                )
     except WebSocketDisconnect:
         return
-    except Exception as exc:
-        if websocket.client_state == WebSocketState.CONNECTED:
-            await websocket.send_json(
-                {
-                    "type": "prices_error",
-                    "symbols": target_symbols,
-                    "error": f"markPrice stream unavailable, fallback to cache: {exc}",
-                }
-            )
-            await _fallback_loop()
+    except Exception:
+        return

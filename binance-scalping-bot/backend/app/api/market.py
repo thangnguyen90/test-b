@@ -145,6 +145,12 @@ async def get_symbols_prices(symbols: str) -> dict:
     }
 
 
+@router.get("/stream-status")
+async def get_stream_status() -> dict:
+    status = await price_stream.status(sample_symbols=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    return {"source": "price_stream", **status}
+
+
 @router.get("/klines")
 def get_klines(symbol: str, timeframe: str = "5m", limit: int = 1000) -> dict:
     safe_limit = max(100, min(limit, 1500))

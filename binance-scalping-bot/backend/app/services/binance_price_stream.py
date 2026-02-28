@@ -37,13 +37,20 @@ class BinancePriceStream:
                 pass
 
     async def _loop(self) -> None:
-        # Futures all mini-ticker stream: pushes approx 1s updates.
-        url = "wss://fstream.binance.com/ws/!miniTicker@arr"
+        # Prefer all-bookTicker (fastest), fallback to markPrice/miniTicker.
+        urls = [
+            "wss://fstream.binance.com/ws/!bookTicker",
+            "wss://fstream.binance.com/ws/!markPrice@arr@1s",
+            "wss://fstream.binance.com/ws/!miniTicker@arr",
+        ]
         backoff = 1.0
+        url_index = 0
         while self._running:
             try:
+                url = urls[url_index % len(urls)]
                 async with websockets.connect(url, ping_interval=15, ping_timeout=15, close_timeout=5) as ws:
                     backoff = 1.0
+                    url_index = 0
                     async for message in ws:
                         if not self._running:
                             break
@@ -51,6 +58,7 @@ class BinancePriceStream:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                url_index += 1
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 20.0)
 
@@ -59,29 +67,60 @@ class BinancePriceStream:
             payload = json.loads(raw)
         except Exception:
             return
-        if not isinstance(payload, list):
+        if isinstance(payload, dict):
+            rows = [payload]
+        elif isinstance(payload, list):
+            rows = payload
+        else:
             return
-        stamp = datetime.now(timezone.utc).isoformat()
         updates: dict[str, float] = {}
-        for row in payload:
+        stamps: dict[str, str] = {}
+        for row in rows:
             if not isinstance(row, dict):
                 continue
             s = row.get("s")
-            c = row.get("c")
-            if not s or c is None:
+            if not s:
                 continue
-            try:
-                px = float(c)
-            except Exception:
+            px: float | None = None
+            # bookTicker: use mid price of best bid/ask for fastest movement
+            bid_raw = row.get("b")
+            ask_raw = row.get("a")
+            if bid_raw is not None and ask_raw is not None:
+                try:
+                    px = (float(bid_raw) + float(ask_raw)) / 2.0
+                except Exception:
+                    px = None
+            # markPrice stream uses 'p'
+            if px is None and row.get("p") is not None:
+                try:
+                    px = float(row.get("p"))
+                except Exception:
+                    px = None
+            # miniTicker uses 'c'
+            if px is None and row.get("c") is not None:
+                try:
+                    px = float(row.get("c"))
+                except Exception:
+                    px = None
+            if px is None:
                 continue
-            updates[_normalize_symbol(str(s))] = px
+            key = _normalize_symbol(str(s))
+            updates[key] = px
+            event_ms = row.get("E")
+            if event_ms is not None:
+                try:
+                    stamps[key] = datetime.fromtimestamp(float(event_ms) / 1000, tz=timezone.utc).isoformat()
+                except Exception:
+                    stamps[key] = datetime.now(timezone.utc).isoformat()
+            else:
+                stamps[key] = datetime.now(timezone.utc).isoformat()
         if not updates:
             return
 
         async with self._lock:
             for key, px in updates.items():
                 self._prices[key] = px
-                self._updated_at[key] = stamp
+                self._updated_at[key] = stamps.get(key, datetime.now(timezone.utc).isoformat())
 
     async def get_price(self, symbol: str) -> tuple[float | None, str | None]:
         key = _normalize_symbol(symbol)
@@ -101,3 +140,14 @@ class BinancePriceStream:
                 if stamp:
                     timestamp = stamp
         return out, timestamp
+
+    async def status(self, sample_symbols: list[str] | None = None) -> dict[str, Any]:
+        sample = sample_symbols or ["BTC/USDT", "ETH/USDT"]
+        prices, timestamp = await self.get_prices(sample)
+        async with self._lock:
+            total_cached = len(self._prices)
+        return {
+            "cached_symbols": total_cached,
+            "sample_prices": prices,
+            "last_timestamp": timestamp,
+        }

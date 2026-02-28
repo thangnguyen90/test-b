@@ -69,7 +69,7 @@ class PaperTradingEngine:
             await asyncio.sleep(self.poll_interval_sec)
 
     async def _run_once(self) -> None:
-        snapshot = get_scan_snapshot(min_win=0.7, max_symbols=100)
+        snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
         signals = snapshot.get("signals", [])
         open_trades = self.repo.list_open_trades()
 
@@ -78,7 +78,7 @@ class PaperTradingEngine:
             symbol = str(trade.get("symbol") or "")
             if symbol:
                 price_symbols.add(symbol)
-        market_prices = self._resolve_market_prices(list(price_symbols))
+        market_prices = await asyncio.to_thread(self._resolve_market_prices, list(price_symbols))
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
         for item in signals:
@@ -97,7 +97,9 @@ class PaperTradingEngine:
             if entry <= 0 or tp <= 0 or sl <= 0:
                 continue
 
-            market_price = market_prices.get(symbol) or self._resolve_market_price(symbol)
+            market_price = market_prices.get(symbol)
+            if market_price is None:
+                market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
             if market_price is None:
                 continue
 
@@ -147,7 +149,9 @@ class PaperTradingEngine:
         for trade in open_trades:
             symbol = str(trade["symbol"])
             side = str(trade["side"])
-            price = market_prices.get(symbol) or self._resolve_market_price(symbol)
+            price = market_prices.get(symbol)
+            if price is None:
+                price = await asyncio.to_thread(self._resolve_market_price, symbol)
             if price is None:
                 continue
 
