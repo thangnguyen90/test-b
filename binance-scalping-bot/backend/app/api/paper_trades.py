@@ -19,8 +19,8 @@ from app.services.binance_client import BinanceFuturesClient
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
+    calc_estimated_margin_ratio_pct,
     calc_min_sl_pct_from_loss,
-    calc_margin_risk_pct,
     calc_margin_usdt,
     calc_quantity_from_order_usdt,
     normalize_tp_sl,
@@ -84,6 +84,7 @@ class PaperTradeAPI:
             id=int(row["id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
+            entry_type=str(row.get("entry_type") or "LIMIT"),
             signal_win_probability=float(row["signal_win_probability"]),
             effective_win_probability=float(row.get("effective_win_probability") or row["signal_win_probability"]),
             entry_price=entry_price,
@@ -119,6 +120,9 @@ class PaperTradeAPI:
         payload["margin_usdt"] = settings.paper_trade_margin_usdt if settings.paper_trade_margin_usdt > 0 else (
             settings.paper_trade_order_usdt / max(1, settings.paper_trade_leverage)
         )
+        payload["leverage"] = settings.paper_trade_leverage
+        payload["maint_margin_rate"] = settings.paper_trade_maint_margin_rate
+        payload["max_risk_pct"] = settings.paper_trade_max_risk_pct
         stats = PaperTradeStats(**payload)
         return PaperTradeStatsResponse(stats=stats)
 
@@ -172,20 +176,19 @@ class PaperTradeAPI:
             atr_value=self._resolve_symbol_atr(req.symbol),
             sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
             min_rr=settings.paper_trade_min_rr,
+            max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
         )
         leverage = req.leverage or settings.paper_trade_leverage
-        risk_pct = calc_margin_risk_pct(
-            side=req.side,
-            entry_price=float(market_price),
-            stop_loss=normalized_sl,
+        risk_pct = calc_estimated_margin_ratio_pct(
             leverage=leverage,
+            maint_margin_rate=settings.paper_trade_maint_margin_rate,
         )
         if risk_pct > settings.paper_trade_max_risk_pct:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"Risk too high for {req.symbol}: {risk_pct:.2f}% > "
-                    f"max {settings.paper_trade_max_risk_pct:.2f}% (margin risk)"
+                    f"max {settings.paper_trade_max_risk_pct:.2f}% (est. margin ratio)"
                 ),
             )
 
@@ -210,6 +213,7 @@ class PaperTradeAPI:
             {
                 "symbol": req.symbol,
                 "side": req.side,
+                "entry_type": "MARKET",
                 "signal_win_probability": req.signal_win_probability,
                 "effective_win_probability": req.effective_win_probability or req.signal_win_probability,
                 "entry_price": float(market_price),

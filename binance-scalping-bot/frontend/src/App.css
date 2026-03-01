@@ -531,6 +531,42 @@ td {
   color: #a7262f;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 17, 24, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 1rem;
+}
+
+.modal-card {
+  width: min(560px, 100%);
+  background: #fffdfa;
+  border: 1px solid #d8d0c1;
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: 0 14px 34px rgba(12, 16, 24, 0.25);
+}
+
+.modal-card h3 {
+  margin: 0 0 0.45rem;
+}
+
+.modal-card p {
+  margin: 0.22rem 0;
+  color: #455568;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.8rem;
+}
+
 @media (min-width: 760px) {
   .search-row {
     grid-template-columns: 1.5fr 1fr 0.6fr;

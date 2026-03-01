@@ -15,7 +15,13 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 from app.core.config import BASE_DIR, settings
-from app.services.data_pipeline import DEFAULT_SYMBOLS, FEATURE_COLUMNS, DataPipeline, PreparedData
+from app.services.data_pipeline import (
+    BASE_FEATURE_COLUMNS,
+    DEFAULT_SYMBOLS,
+    FEATURE_COLUMNS,
+    DataPipeline,
+    PreparedData,
+)
 from app.services.mysql_trade_repo import MySQLTradeRepository
 
 
@@ -34,7 +40,8 @@ class MLPredictor:
         self.model_path = Path(model_path)
         self.pipeline = pipeline or DataPipeline()
         self.model: RandomForestClassifier | None = None
-        self.feature_columns = FEATURE_COLUMNS
+        self.preferred_feature_columns = FEATURE_COLUMNS if settings.ml_use_liquidation_features else BASE_FEATURE_COLUMNS
+        self.feature_columns = list(self.preferred_feature_columns)
         self.trained_at: datetime | None = None
         self.accuracy: float | None = None
         self.roc_auc: float | None = None
@@ -46,6 +53,9 @@ class MLPredictor:
         self.last_train_duration_sec: float | None = None
         self.last_train_result: str | None = None
         self.last_train_error: str | None = None
+        self.last_side_long_samples: int = 0
+        self.last_side_short_samples: int = 0
+        self.last_side_balanced: bool = False
         self.train_log_path = BASE_DIR / ".runtime" / "ml_train.log"
         self.train_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_model_if_exists()
@@ -145,8 +155,17 @@ class MLPredictor:
                 )
                 return result
 
+            train_feature_columns = [c for c in self.preferred_feature_columns if c in prepared.features.columns]
+            if not train_feature_columns:
+                train_feature_columns = [c for c in self.feature_columns if c in prepared.features.columns]
+            if not train_feature_columns:
+                raise RuntimeError("No valid feature columns for training")
+            self.feature_columns = list(train_feature_columns)
             X = prepared.features[self.feature_columns]
             y = prepared.labels
+            side_long_raw, side_short_raw = self._count_side_samples(X)
+            X, y, side_balanced = self._rebalance_side_samples(X, y)
+            side_long_used, side_short_used = self._count_side_samples(X)
 
             try:
                 X_train, X_test, y_train, y_test = train_test_split(
@@ -181,6 +200,9 @@ class MLPredictor:
             self.roc_auc = float(roc_auc_score(y_test, prob))
             self.model = model
             self.trained_at = datetime.now(timezone.utc)
+            self.last_side_long_samples = side_long_used
+            self.last_side_short_samples = side_short_used
+            self.last_side_balanced = side_balanced
 
             self.model_path.parent.mkdir(parents=True, exist_ok=True)
             joblib.dump(
@@ -202,6 +224,11 @@ class MLPredictor:
                 "roc_auc": self.roc_auc,
                 "trained_at": self.trained_at,
                 "feedback_samples": int(len(feedback_prepared.labels)),
+                "side_long_samples_raw": int(side_long_raw),
+                "side_short_samples_raw": int(side_short_raw),
+                "side_long_samples_used": int(side_long_used),
+                "side_short_samples_used": int(side_short_used),
+                "side_balanced": side_balanced,
             }
             self._finish_train(
                 result="SUCCESS",
@@ -241,6 +268,11 @@ class MLPredictor:
             "last_train_duration_sec": self.last_train_duration_sec,
             "last_train_result": self.last_train_result,
             "last_train_error": self.last_train_error,
+            "last_side_long_samples": self.last_side_long_samples,
+            "last_side_short_samples": self.last_side_short_samples,
+            "last_side_balanced": self.last_side_balanced,
+            "liquidation_features_enabled": settings.ml_use_liquidation_features,
+            "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
         }
 
@@ -295,9 +327,22 @@ class MLPredictor:
             try:
                 row = self.pipeline.build_latest_feature_row(symbol=symbol)
                 if row is not None:
-                    row_df = pd.DataFrame([row])[self.feature_columns]
-                    win_prob = float(self.model.predict_proba(row_df)[0][1])
-                    side = "LONG" if row.get("setup_side", 1.0) >= 0.5 else "SHORT"
+                    # Evaluate both LONG and SHORT setup_side so side selection is model-driven,
+                    # instead of being locked by the current heuristic setup_side.
+                    row_long = row.copy()
+                    row_short = row.copy()
+                    row_long["setup_side"] = 1.0
+                    row_short["setup_side"] = 0.0
+                    row_df = pd.DataFrame([row_long, row_short])[self.feature_columns]
+                    probs = self.model.predict_proba(row_df)[:, 1]
+                    long_prob = float(probs[0])
+                    short_prob = float(probs[1])
+                    if long_prob >= short_prob:
+                        side = "LONG"
+                        win_prob = long_prob
+                    else:
+                        side = "SHORT"
+                        win_prob = short_prob
                     entry_price = float(row.get("close_m5", mark_price))
                     atr = float(row.get("atr14_m5", atr))
                     return self._to_signal(symbol, side, win_prob, entry_price, atr)
@@ -309,14 +354,54 @@ class MLPredictor:
         return self._to_signal(symbol, side, win_prob, entry_price, atr)
 
     @staticmethod
-    def _to_signal(symbol: str, side: str, win_prob: float, entry: float, atr: float) -> SignalResult:
+    def _count_side_samples(features: pd.DataFrame) -> tuple[int, int]:
+        if "setup_side" not in features.columns:
+            return 0, 0
+        side = pd.to_numeric(features["setup_side"], errors="coerce")
+        long_count = int((side >= 0.5).sum())
+        short_count = int((side < 0.5).sum())
+        return long_count, short_count
+
+    @staticmethod
+    def _rebalance_side_samples(
+        features: pd.DataFrame,
+        labels: pd.Series,
+    ) -> tuple[pd.DataFrame, pd.Series, bool]:
+        if "setup_side" not in features.columns:
+            return features, labels, False
+
+        side = pd.to_numeric(features["setup_side"], errors="coerce")
+        long_idx = features.index[side >= 0.5].to_numpy()
+        short_idx = features.index[side < 0.5].to_numpy()
+        if len(long_idx) == 0 or len(short_idx) == 0:
+            return features, labels, False
+
+        if len(long_idx) == len(short_idx):
+            return features, labels, False
+
+        rng = np.random.default_rng(42)
+        if len(long_idx) > len(short_idx):
+            extra = rng.choice(short_idx, size=len(long_idx) - len(short_idx), replace=True)
+        else:
+            extra = rng.choice(long_idx, size=len(short_idx) - len(long_idx), replace=True)
+
+        final_idx = np.concatenate([features.index.to_numpy(), extra])
+        rng.shuffle(final_idx)
+        re_features = features.loc[final_idx].reset_index(drop=True)
+        re_labels = labels.loc[final_idx].reset_index(drop=True)
+        return re_features, re_labels, True
+
+    def _to_signal(self, symbol: str, side: str, win_prob: float, entry: float, atr: float) -> SignalResult:
         rr = 1.5
+        max_tp_distance = entry * (max(0.0, settings.paper_trade_max_tp_pct) / 100.0)
+        base_tp_distance = atr * rr
+        tp_distance = min(base_tp_distance, max_tp_distance) if max_tp_distance > 0 else base_tp_distance
         if side == "LONG":
             stop_loss = entry - atr
-            take_profit = entry + (atr * rr)
+            take_profit = entry + tp_distance
         else:
             stop_loss = entry + atr
-            take_profit = entry - (atr * rr)
+            take_profit = entry - tp_distance
 
         return SignalResult(
             symbol=symbol,

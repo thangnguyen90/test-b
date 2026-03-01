@@ -11,8 +11,8 @@ from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
+    calc_estimated_margin_ratio_pct,
     calc_min_sl_pct_from_loss,
-    calc_margin_risk_pct,
     calc_margin_usdt,
     calc_quantity_from_order_usdt,
     normalize_tp_sl,
@@ -38,6 +38,7 @@ class PaperTradingEngine:
         sl_atr_timeframe: str = "5m",
         sl_atr_limit: int = 120,
         min_rr: float = 1.5,
+        maint_margin_rate: float = 0.02,
         max_risk_pct: float = 12.0,
         max_hold_minutes: int = 120,
         disable_sl: bool = False,
@@ -60,6 +61,7 @@ class PaperTradingEngine:
         self.sl_atr_timeframe = sl_atr_timeframe or "5m"
         self.sl_atr_limit = max(30, min(500, int(sl_atr_limit)))
         self.min_rr = min_rr
+        self.maint_margin_rate = max(0.0, maint_margin_rate)
         self.max_risk_pct = max(0.0, max_risk_pct)
         self.max_hold_minutes = max(1, max_hold_minutes)
         self.disable_sl = disable_sl
@@ -156,12 +158,11 @@ class PaperTradingEngine:
                 atr_value=await self._resolve_symbol_atr(symbol),
                 sl_atr_multiplier=self.sl_atr_multiplier,
                 min_rr=self.min_rr,
+                max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
             )
-            risk_pct = calc_margin_risk_pct(
-                side=side,
-                entry_price=entry,
-                stop_loss=normalized_sl,
+            risk_pct = calc_estimated_margin_ratio_pct(
                 leverage=self.leverage,
+                maint_margin_rate=self.maint_margin_rate,
             )
             if risk_pct > self.max_risk_pct:
                 continue
@@ -179,6 +180,7 @@ class PaperTradingEngine:
                 {
                     "symbol": symbol,
                     "side": side,
+                    "entry_type": "LIMIT",
                     "signal_win_probability": raw_prob,
                     "effective_win_probability": effective_prob,
                     "entry_price": entry,

@@ -17,6 +17,11 @@ class TrainResponse(BaseModel):
     roc_auc: float | None
     trained_at: datetime | None
     feedback_samples: int = 0
+    side_long_samples_raw: int = 0
+    side_short_samples_raw: int = 0
+    side_long_samples_used: int = 0
+    side_short_samples_used: int = 0
+    side_balanced: bool = False
 
 
 class ModelStatus(BaseModel):
@@ -41,4 +46,9 @@ class ModelStatus(BaseModel):
     last_train_duration_sec: float | None = None
     last_train_result: str | None = None
     last_train_error: str | None = None
+    last_side_long_samples: int = 0
+    last_side_short_samples: int = 0
+    last_side_balanced: bool = False
+    liquidation_features_enabled: bool = False
+    preferred_feature_count: int = 0
     train_log_path: str | None = None

@@ -130,6 +130,7 @@ type PaperTrade = {
   id: number
   symbol: string
   side: 'LONG' | 'SHORT'
+  entry_type?: 'LIMIT' | 'MARKET' | string
   signal_win_probability: number
   effective_win_probability: number
   entry_price: number
@@ -161,6 +162,25 @@ type PaperTradeStats = {
   avg_pnl_pct: number
   order_usdt: number
   margin_usdt: number
+  leverage: number
+  maint_margin_rate: number
+  max_risk_pct: number
+  market_closed_trades: number
+  market_win_trades: number
+  market_win_rate: number
+  market_loss_trades: number
+  market_total_pnl: number
+  market_avg_pnl: number
+  market_total_pnl_pct: number
+  market_avg_pnl_pct: number
+  limit_closed_trades: number
+  limit_win_trades: number
+  limit_win_rate: number
+  limit_loss_trades: number
+  limit_total_pnl: number
+  limit_avg_pnl: number
+  limit_total_pnl_pct: number
+  limit_avg_pnl_pct: number
 }
 
 type DailyTradeSummary = {
@@ -267,6 +287,7 @@ const AUTO_LIQ_MIN_WIN = 0.7
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const SIGNAL_RISK_LEVERAGE = 5
+const DEFAULT_MAINT_MARGIN_RATE = 0.02
 const FALLBACK_COINS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT',
   'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'SUI/USDT', 'TON/USDT', 'NEAR/USDT',
@@ -428,17 +449,12 @@ function calcPnlPct(
   return movePct * leverage * 100
 }
 
-function calcSignalRiskPct(
-  side: 'LONG' | 'SHORT',
-  entryPrice: number,
-  stopLoss: number,
+function calcSignalMarginRatioPct(
   leverage = SIGNAL_RISK_LEVERAGE,
+  maintMarginRate = DEFAULT_MAINT_MARGIN_RATE,
 ): number | null {
-  if (entryPrice <= 0 || stopLoss <= 0 || leverage <= 0) return null
-  const move = side === 'LONG'
-    ? (entryPrice - stopLoss) / entryPrice
-    : (stopLoss - entryPrice) / entryPrice
-  return Math.max(0, move * leverage * 100)
+  if (leverage <= 0 || maintMarginRate < 0) return null
+  return leverage * maintMarginRate * 100
 }
 
 function calcMarginUsdt(entryPrice: number, quantity: number, leverage: number): number | null {
@@ -770,6 +786,7 @@ function App() {
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
   const [closingTradeId, setClosingTradeId] = useState<number | null>(null)
+  const [closeModalTrade, setCloseModalTrade] = useState<PaperTrade | null>(null)
   const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
   const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
   const [liqOverview, setLiqOverview] = useState<LiquidationOverviewItem[]>([])
@@ -1254,6 +1271,25 @@ function App() {
     }
   }
 
+  function requestCloseTrade(row: PaperTrade) {
+    setCloseModalTrade(row)
+  }
+
+  async function confirmCloseTrade(mode: 'by_pnl' | 'force_loss' | 'force_win') {
+    if (!closeModalTrade) return
+    const payload: PaperManualCloseRequest =
+      mode === 'force_loss' ? { force_result: 0 }
+        : mode === 'force_win' ? { force_result: 1 }
+          : {}
+    const tradeId = closeModalTrade.id
+    setCloseModalTrade(null)
+    try {
+      await closePaperTrade(tradeId, payload)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    }
+  }
+
   async function createDemoPendingOrder() {
     if (!signal) return
 
@@ -1444,6 +1480,8 @@ function App() {
             return
           }
           if (payload.type !== 'prices' || !payload.prices) return
+          setPaperPriceWsStatus('live')
+          stopFallback()
           setPaperLivePrices((prev) => ({ ...prev, ...payload.prices }))
           if (payload.timestamps && Object.keys(payload.timestamps).length > 0) {
             setPaperLivePriceTime((prev) => ({ ...prev, ...payload.timestamps! }))
@@ -1613,6 +1651,8 @@ function App() {
             if (canonicalSymbol(msg.symbol ?? selectedCoin) !== canonicalSymbol(selectedCoinRef.current)) {
               return
             }
+            setPriceWsStatus('live')
+            stopFallback()
             setMarketPrice(msg.price)
             setMarketPriceTime(msg.timestamp ?? null)
             return
@@ -1696,10 +1736,56 @@ function App() {
             <div className="stats-item"><strong>Win Rate:</strong> {paperStats ? `${(paperStats.win_rate * 100).toFixed(2)}%` : '0%'}</div>
             <div className="stats-item"><strong>Order Value:</strong> {paperStats && typeof paperStats.order_usdt === 'number' ? `${paperStats.order_usdt.toFixed(2)} USDT` : '-'}</div>
             <div className="stats-item"><strong>Margin:</strong> {paperStats && typeof paperStats.margin_usdt === 'number' ? `${paperStats.margin_usdt.toFixed(2)} USDT` : '-'}</div>
+            <div className="stats-item"><strong>Leverage:</strong> {paperStats && typeof paperStats.leverage === 'number' ? `${paperStats.leverage}x` : '-'}</div>
+            <div className="stats-item"><strong>Maint. Margin Rate:</strong> {paperStats && typeof paperStats.maint_margin_rate === 'number' ? `${(paperStats.maint_margin_rate * 100).toFixed(2)}%` : '-'}</div>
             <div className="stats-item"><strong>Total PnL:</strong> {paperStats ? `${paperStats.total_pnl.toFixed(4)} USDT` : '0.0000 USDT'}</div>
             <div className="stats-item"><strong>Avg PnL:</strong> {paperStats ? `${paperStats.avg_pnl.toFixed(4)} USDT` : '0.0000 USDT'}</div>
             <div className="stats-item"><strong>Total PnL%:</strong> {paperStats && typeof paperStats.total_pnl_pct === 'number' ? `${paperStats.total_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
             <div className="stats-item"><strong>Avg PnL%:</strong> {paperStats && typeof paperStats.avg_pnl_pct === 'number' ? `${paperStats.avg_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
+            <div className="stats-item"><strong>Market Win Rate:</strong> {paperStats ? `${(paperStats.market_win_rate * 100).toFixed(2)}% (${paperStats.market_closed_trades})` : '0.00%'}</div>
+            <div className="stats-item"><strong>Limit Win Rate:</strong> {paperStats ? `${(paperStats.limit_win_rate * 100).toFixed(2)}% (${paperStats.limit_closed_trades})` : '0.00%'}</div>
+          </div>
+          <h3 className="section-title">Entry Type Breakdown</h3>
+          <div className="content table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Closed</th>
+                  <th>Win</th>
+                  <th>Loss</th>
+                  <th>Win Rate</th>
+                  <th>Total PnL (USDT)</th>
+                  <th>Avg PnL (USDT)</th>
+                  <th>Total PnL%</th>
+                  <th>Avg PnL%</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>MARKET</td>
+                  <td>{paperStats?.market_closed_trades ?? 0}</td>
+                  <td>{paperStats?.market_win_trades ?? 0}</td>
+                  <td>{paperStats?.market_loss_trades ?? 0}</td>
+                  <td>{paperStats ? `${(paperStats.market_win_rate * 100).toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? paperStats.market_total_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? paperStats.market_avg_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? `${paperStats.market_total_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? `${paperStats.market_avg_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                </tr>
+                <tr>
+                  <td>LIMIT</td>
+                  <td>{paperStats?.limit_closed_trades ?? 0}</td>
+                  <td>{paperStats?.limit_win_trades ?? 0}</td>
+                  <td>{paperStats?.limit_loss_trades ?? 0}</td>
+                  <td>{paperStats ? `${(paperStats.limit_win_rate * 100).toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? paperStats.limit_total_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? paperStats.limit_avg_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? `${paperStats.limit_total_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? `${paperStats.limit_avg_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
 
           <h3 className="section-title">Open Paper Trades</h3>
@@ -1714,6 +1800,7 @@ function App() {
                     <th>Symbol</th>
                     <th>uPnL (USDT)</th>
                     <th>uPnL% (Margin)</th>
+                    <th>Type</th>
                     <th>Side</th>
                     <th>Entry</th>
                     <th>Mark (WS)</th>
@@ -1755,6 +1842,7 @@ function App() {
                           </span>
                         ) : '-'}
                       </td>
+                      <td>{row.entry_type ?? '-'}</td>
                       <td>{row.side}</td>
                       <td>{row.entry_price}</td>
                       <td>{typeof mark === 'number' ? mark : '-'}</td>
@@ -1770,12 +1858,10 @@ function App() {
                           className="btn-inline btn-secondary"
                           disabled={closingTradeId === row.id}
                           onClick={() => {
-                            closePaperTrade(row.id, { force_result: 0 }).catch((err) => {
-                              setError(err instanceof Error ? err.message : 'Unknown error')
-                            })
+                            requestCloseTrade(row)
                           }}
                         >
-                          {closingTradeId === row.id ? 'Closing...' : 'Close Wrong'}
+                          {closingTradeId === row.id ? 'Closing...' : 'Close...'}
                         </button>
                       </td>
                     </tr>
@@ -1798,6 +1884,7 @@ function App() {
                     <th>Symbol</th>
                     <th>PnL (USDT)</th>
                     <th>PnL% (Margin)</th>
+                    <th>Type</th>
                     <th>Side</th>
                     <th>Status</th>
                     <th>Entry</th>
@@ -1833,6 +1920,7 @@ function App() {
                             </span>
                           ) : '-'}
                         </td>
+                        <td>{row.entry_type ?? '-'}</td>
                         <td>{row.side}</td>
                         <td>{row.status}</td>
                         <td>{row.entry_price}</td>
@@ -2050,13 +2138,12 @@ function App() {
             </p>
             <p><strong>Win Probability:</strong> {signal ? `${(signal.win_probability * 100).toFixed(2)}%` : '-'}</p>
             <p>
-              <strong>Signal Risk%:</strong>{' '}
+              <strong>Signal Margin Ratio%:</strong>{' '}
               {signal ? (
                 <span className="pnl-neg">
-                  {(calcSignalRiskPct(
-                    signal.side,
-                    signal.predicted_entry_price,
-                    signal.stop_loss,
+                  {(calcSignalMarginRatioPct(
+                    paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE,
+                    paperStats?.maint_margin_rate ?? DEFAULT_MAINT_MARGIN_RATE,
                   ) ?? 0).toFixed(2)}%
                 </span>
               ) : '-'}
@@ -2153,7 +2240,7 @@ function App() {
                   <th>Symbol</th>
                   <th>Side</th>
                   <th>Win%</th>
-                  <th>Risk%</th>
+                  <th>Signal Margin Ratio%</th>
                   <th>Entry</th>
                   <th>TP</th>
                   <th>SL</th>
@@ -2170,10 +2257,9 @@ function App() {
                     <td>{(item.win_probability * 100).toFixed(2)}</td>
                     <td>
                       <span className="pnl-neg">
-                        {(calcSignalRiskPct(
-                          item.side,
-                          item.predicted_entry_price,
-                          item.stop_loss,
+                        {(calcSignalMarginRatioPct(
+                          paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE,
+                          paperStats?.maint_margin_rate ?? DEFAULT_MAINT_MARGIN_RATE,
                         ) ?? 0).toFixed(2)}%
                       </span>
                     </td>
@@ -2358,20 +2444,23 @@ function App() {
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('long_short_ratio')}>L/S Ratio</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('funding_rate')}>Funding Rate</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('open_interest_notional')}>OI Notional</button></th>
+                  <th>ML Side</th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_win_probability')}>Win%</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_entry_price')}>Entry</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_take_profit')}>TP</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_stop_loss')}>SL</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_order_type')}>Signal Type</button></th>
-                  <th>Trend</th>
+                  <th>Liq Trend</th>
                   <th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {sortedLiqOverview.map((row) => {
                   const trend = getLiqTrend(row)
+                  const mlSide = row.signal_side ?? null
+                  const rowSide = mlSide ?? trend
                   return (
-                  <tr key={row.symbol} className={trend === 'LONG' ? 'row-long' : 'row-short'}>
+                  <tr key={row.symbol} className={rowSide === 'LONG' ? 'row-long' : 'row-short'}>
                     <td>{renderSymbolJump(row.symbol, row.mark_price)}</td>
                     <td>{row.mark_price.toFixed(row.mark_price >= 100 ? 2 : 6)}</td>
                     <td>{row.est_liq_zone_price.toFixed(row.est_liq_zone_price >= 100 ? 2 : 6)}</td>
@@ -2379,6 +2468,11 @@ function App() {
                     <td>{row.long_short_ratio.toFixed(3)}</td>
                     <td>{(row.funding_rate * 100).toFixed(4)}%</td>
                     <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
+                    <td>
+                      {mlSide ? (
+                        <span className={mlSide === 'LONG' ? 'pill-long' : 'pill-short'}>{mlSide}</span>
+                      ) : '-'}
+                    </td>
                     <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
                     <td>{typeof row.signal_entry_price === 'number' ? row.signal_entry_price.toFixed(row.signal_entry_price >= 100 ? 2 : 6) : '-'}</td>
                     <td>{typeof row.signal_take_profit === 'number' ? row.signal_take_profit.toFixed(row.signal_take_profit >= 100 ? 2 : 6) : '-'}</td>
@@ -2459,6 +2553,50 @@ function App() {
           <p><strong>Train Log:</strong> <code>{mlStatus?.train_log_path ?? '-'}</code></p>
         </div>
       </section>
+
+      {closeModalTrade ? (
+        <div className="modal-backdrop" onClick={() => setCloseModalTrade(null)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <h3>Close Trade #{closeModalTrade.id}</h3>
+            <p><strong>Symbol:</strong> {closeModalTrade.symbol}</p>
+            <p><strong>Side:</strong> {closeModalTrade.side}</p>
+            <p><strong>Mode:</strong> choose how to label this close result for training.</p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={closingTradeId === closeModalTrade.id}
+                onClick={() => { confirmCloseTrade('by_pnl').catch(() => undefined) }}
+              >
+                Close By PnL
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={closingTradeId === closeModalTrade.id}
+                onClick={() => { confirmCloseTrade('force_loss').catch(() => undefined) }}
+              >
+                Force LOSS
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={closingTradeId === closeModalTrade.id}
+                onClick={() => { confirmCloseTrade('force_win').catch(() => undefined) }}
+              >
+                Force WIN
+              </button>
+              <button
+                type="button"
+                disabled={closingTradeId === closeModalTrade.id}
+                onClick={() => setCloseModalTrade(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {error ? <p className="error">{error}</p> : null}
     </main>

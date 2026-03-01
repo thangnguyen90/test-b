@@ -44,6 +44,7 @@ class MySQLTradeRepository:
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         symbol VARCHAR(64) NOT NULL,
                         side VARCHAR(10) NOT NULL,
+                        entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT',
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
                         entry_price DOUBLE NOT NULL,
@@ -90,6 +91,19 @@ class MySQLTradeRepository:
                     cur.execute("ALTER TABLE paper_trades ADD COLUMN close_reason VARCHAR(32) NULL AFTER close_price")
                 cur.execute(
                     """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='entry_type'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT' AFTER side"
+                    )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS ml_feedback (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         paper_trade_id BIGINT NOT NULL,
@@ -113,14 +127,15 @@ class MySQLTradeRepository:
                 cur.execute(
                     """
                     INSERT INTO paper_trades (
-                        symbol, side, signal_win_probability, effective_win_probability,
+                        symbol, side, entry_type, signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss, quantity, margin_usdt, leverage,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
                         payload["side"],
+                        payload.get("entry_type", "LIMIT"),
                         payload["signal_win_probability"],
                         payload["effective_win_probability"],
                         payload["entry_price"],
@@ -244,6 +259,72 @@ class MySQLTradeRepository:
                         SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) AS closed_trades,
                         SUM(CASE WHEN status='CLOSED' AND result=1 THEN 1 ELSE 0 END) AS win_trades,
                         SUM(CASE WHEN status='CLOSED' AND result=0 THEN 1 ELSE 0 END) AS loss_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='MARKET' THEN 1 ELSE 0 END) AS market_closed_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='MARKET' AND result=1 THEN 1 ELSE 0 END) AS market_win_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='MARKET' AND result=0 THEN 1 ELSE 0 END) AS market_loss_trades,
+                        COALESCE(SUM(CASE WHEN status='CLOSED' AND entry_type='MARKET' THEN pnl ELSE 0 END), 0) AS market_total_pnl,
+                        COALESCE(AVG(CASE WHEN status='CLOSED' AND entry_type='MARKET' THEN pnl ELSE NULL END), 0) AS market_avg_pnl,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='MARKET' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS market_total_pnl_pct,
+                        COALESCE(
+                            AVG(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='MARKET' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE NULL
+                                        END
+                                    ELSE NULL
+                                END
+                            ),
+                            0
+                        ) AS market_avg_pnl_pct,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='LIMIT' THEN 1 ELSE 0 END) AS limit_closed_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='LIMIT' AND result=1 THEN 1 ELSE 0 END) AS limit_win_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='LIMIT' AND result=0 THEN 1 ELSE 0 END) AS limit_loss_trades,
+                        COALESCE(SUM(CASE WHEN status='CLOSED' AND entry_type='LIMIT' THEN pnl ELSE 0 END), 0) AS limit_total_pnl,
+                        COALESCE(AVG(CASE WHEN status='CLOSED' AND entry_type='LIMIT' THEN pnl ELSE NULL END), 0) AS limit_avg_pnl,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='LIMIT' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS limit_total_pnl_pct,
+                        COALESCE(
+                            AVG(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='LIMIT' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE NULL
+                                        END
+                                    ELSE NULL
+                                END
+                            ),
+                            0
+                        ) AS limit_avg_pnl_pct,
                         COALESCE(SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END), 0) AS total_pnl,
                         COALESCE(AVG(CASE WHEN status='CLOSED' THEN pnl ELSE NULL END), 0) AS avg_pnl,
                         COALESCE(
@@ -281,7 +362,13 @@ class MySQLTradeRepository:
 
         closed = int(row.get("closed_trades") or 0)
         wins = int(row.get("win_trades") or 0)
+        market_closed = int(row.get("market_closed_trades") or 0)
+        market_wins = int(row.get("market_win_trades") or 0)
+        limit_closed = int(row.get("limit_closed_trades") or 0)
+        limit_wins = int(row.get("limit_win_trades") or 0)
         win_rate = (wins / closed) if closed > 0 else 0.0
+        market_win_rate = (market_wins / market_closed) if market_closed > 0 else 0.0
+        limit_win_rate = (limit_wins / limit_closed) if limit_closed > 0 else 0.0
 
         return {
             "total_trades": int(row.get("total_trades") or 0),
@@ -294,6 +381,22 @@ class MySQLTradeRepository:
             "avg_pnl": float(row.get("avg_pnl") or 0.0),
             "total_pnl_pct": float(row.get("total_pnl_pct") or 0.0),
             "avg_pnl_pct": float(row.get("avg_pnl_pct") or 0.0),
+            "market_closed_trades": market_closed,
+            "market_win_trades": market_wins,
+            "market_win_rate": float(market_win_rate),
+            "market_loss_trades": int(row.get("market_loss_trades") or 0),
+            "market_total_pnl": float(row.get("market_total_pnl") or 0.0),
+            "market_avg_pnl": float(row.get("market_avg_pnl") or 0.0),
+            "market_total_pnl_pct": float(row.get("market_total_pnl_pct") or 0.0),
+            "market_avg_pnl_pct": float(row.get("market_avg_pnl_pct") or 0.0),
+            "limit_closed_trades": limit_closed,
+            "limit_win_trades": limit_wins,
+            "limit_win_rate": float(limit_win_rate),
+            "limit_loss_trades": int(row.get("limit_loss_trades") or 0),
+            "limit_total_pnl": float(row.get("limit_total_pnl") or 0.0),
+            "limit_avg_pnl": float(row.get("limit_avg_pnl") or 0.0),
+            "limit_total_pnl_pct": float(row.get("limit_total_pnl_pct") or 0.0),
+            "limit_avg_pnl_pct": float(row.get("limit_avg_pnl_pct") or 0.0),
         }
 
     def symbol_accuracy(self, symbol: str, lookback: int = 200) -> float | None:

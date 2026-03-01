@@ -44,7 +44,7 @@ DEFAULT_SYMBOLS = [
     "QTUM/USDT",
 ]
 
-FEATURE_COLUMNS = [
+BASE_FEATURE_COLUMNS = [
     "close_m5",
     "volume_m5",
     "ema8_m5",
@@ -64,6 +64,15 @@ FEATURE_COLUMNS = [
     "atr14_h1",
     "setup_side",
 ]
+
+LIQUIDATION_FEATURE_COLUMNS = [
+    "liq_long_proxy_m5",
+    "liq_short_proxy_m5",
+    "liq_imbalance_proxy_m5",
+    "vol_spike_z_m5",
+]
+
+FEATURE_COLUMNS = BASE_FEATURE_COLUMNS + LIQUIDATION_FEATURE_COLUMNS
 
 
 @dataclass
@@ -139,6 +148,25 @@ class DataPipeline:
         out[f"bb_upper_{suffix}"] = upper
         out[f"bb_lower_{suffix}"] = lower
         out[f"atr14_{suffix}"] = self._atr(out, 14)
+        if suffix == "m5":
+            # Estimated liquidation pressure proxies:
+            # long-liquidation proxy -> downside wick + abnormal volume
+            # short-liquidation proxy -> upside wick + abnormal volume
+            close_safe = out["close"].replace(0, np.nan)
+            wick_up = ((out["high"] - np.maximum(out["open"], out["close"])) / close_safe).clip(lower=0)
+            wick_down = ((np.minimum(out["open"], out["close"]) - out["low"]) / close_safe).clip(lower=0)
+            vol_ma = out["volume"].rolling(20, min_periods=5).mean()
+            vol_std = out["volume"].rolling(20, min_periods=5).std(ddof=0).replace(0, np.nan)
+            vol_spike_z = ((out["volume"] - vol_ma) / vol_std).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            vol_spike = np.maximum(vol_spike_z, 0.0)
+
+            long_proxy = (wick_down.fillna(0.0) * (1.0 + vol_spike)).astype(float)
+            short_proxy = (wick_up.fillna(0.0) * (1.0 + vol_spike)).astype(float)
+            out["liq_long_proxy_m5"] = long_proxy
+            out["liq_short_proxy_m5"] = short_proxy
+            out["liq_imbalance_proxy_m5"] = (short_proxy - long_proxy).astype(float)
+            out["vol_spike_z_m5"] = vol_spike_z.astype(float)
+
         out = out.rename(
             columns={
                 "close": f"close_{suffix}",
@@ -273,7 +301,21 @@ class DataPipeline:
         return PreparedData(features=features, labels=labels)
 
     def build_latest_feature_row(self, symbol: str, limit: int = 300) -> pd.Series | None:
-        prepared = self.build_symbol_dataset(symbol=symbol, limit=limit)
-        if prepared.features.empty:
+        raw_m5 = self.client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=limit)
+        raw_h1 = self.client.fetch_ohlcv(symbol=symbol, timeframe="1h", limit=max(300, limit // 12))
+        m5 = self._enrich(self._to_df(raw_m5), "m5")
+        h1 = self._enrich(self._to_df(raw_h1), "h1")
+
+        merged = pd.merge_asof(
+            m5.sort_values("timestamp"),
+            h1.sort_values("timestamp"),
+            on="timestamp",
+            direction="backward",
+            suffixes=("", "_h1dup"),
+        )
+        merged["setup_side"] = self._side_from_setup(merged).fillna(1.0)
+
+        clean = merged.dropna(subset=FEATURE_COLUMNS).copy()
+        if clean.empty:
             return None
-        return prepared.features.iloc[-1]
+        return clean[FEATURE_COLUMNS].astype(float).iloc[-1]

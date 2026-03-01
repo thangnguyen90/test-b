@@ -11,6 +11,7 @@ def normalize_tp_sl(
     sl_extra_buffer_pct: float = 0.0,
     atr_value: float | None = None,
     sl_atr_multiplier: float = 0.0,
+    max_tp_pct: float | None = None,
 ) -> tuple[float, float]:
     """
     Normalize TP/SL to avoid unrealistically tight SL after market entry slippage.
@@ -28,6 +29,8 @@ def normalize_tp_sl(
     floor_sl_distance += buffer_sl_distance
     sl_distance = max(signal_sl_distance, floor_sl_distance)
     tp_distance = max(signal_tp_distance, sl_distance * float(min_rr))
+    if max_tp_pct is not None and max_tp_pct > 0:
+        tp_distance = min(tp_distance, entry * float(max_tp_pct))
 
     if side == "LONG":
         normalized_sl = entry - sl_distance
@@ -51,6 +54,12 @@ def calc_margin_risk_pct(side: str, entry_price: float, stop_loss: float, levera
     else:
         move = max(0.0, (sl - entry) / entry)
     return move * lev * 100
+
+
+def calc_estimated_margin_ratio_pct(leverage: int, maint_margin_rate: float) -> float:
+    lev = max(1, int(leverage))
+    mmr = max(0.0, float(maint_margin_rate))
+    return mmr * lev * 100.0
 
 
 def calc_min_sl_pct_from_loss(min_sl_loss_pct: float) -> float:

@@ -8,6 +8,7 @@ class PaperTrade(BaseModel):
     id: int
     symbol: str
     side: str
+    entry_type: str = "LIMIT"
     signal_win_probability: float
     effective_win_probability: float
     entry_price: float
@@ -39,6 +40,25 @@ class PaperTradeStats(BaseModel):
     avg_pnl_pct: float
     order_usdt: float
     margin_usdt: float
+    leverage: int
+    maint_margin_rate: float
+    max_risk_pct: float
+    market_closed_trades: int = 0
+    market_win_trades: int = 0
+    market_win_rate: float = 0.0
+    market_loss_trades: int = 0
+    market_total_pnl: float = 0.0
+    market_avg_pnl: float = 0.0
+    market_total_pnl_pct: float = 0.0
+    market_avg_pnl_pct: float = 0.0
+    limit_closed_trades: int = 0
+    limit_win_trades: int = 0
+    limit_win_rate: float = 0.0
+    limit_loss_trades: int = 0
+    limit_total_pnl: float = 0.0
+    limit_avg_pnl: float = 0.0
+    limit_total_pnl_pct: float = 0.0
+    limit_avg_pnl_pct: float = 0.0
 
 
 class PaperTradeListResponse(BaseModel):

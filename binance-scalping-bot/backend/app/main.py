@@ -71,6 +71,7 @@ async def on_startup() -> None:
                 sl_atr_timeframe=settings.paper_trade_sl_atr_timeframe,
                 sl_atr_limit=settings.paper_trade_sl_atr_limit,
                 min_rr=settings.paper_trade_min_rr,
+                maint_margin_rate=settings.paper_trade_maint_margin_rate,
                 max_risk_pct=settings.paper_trade_max_risk_pct,
                 max_hold_minutes=settings.paper_trade_max_hold_minutes,
                 disable_sl=settings.paper_trade_disable_sl,

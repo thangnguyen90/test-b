@@ -166,6 +166,7 @@ AUTO_TRAIN_STARTUP_DELAY_SEC=30
 AUTO_TRAIN_LIMIT=800
 AUTO_TRAIN_HORIZON=4
 AUTO_TRAIN_RR_RATIO=1.5
+ML_USE_LIQUIDATION_FEATURES=true
 WS_PING_INTERVAL_SEC=1.0
 MYSQL_ENABLED=false
 MYSQL_HOST=127.0.0.1
@@ -177,6 +178,7 @@ PAPER_TRADE_MIN_WIN=0.75
 PAPER_TRADE_QUANTITY=0.01
 PAPER_TRADE_ORDER_USDT=10
 PAPER_TRADE_MARGIN_USDT=0
+PAPER_TRADE_MAINT_MARGIN_RATE=0.02
 PAPER_TRADE_LEVERAGE=5
 PAPER_TRADE_POLL_INTERVAL_SEC=6
 PAPER_TRADE_MIN_SL_PCT=0.008
@@ -185,6 +187,7 @@ PAPER_TRADE_SL_EXTRA_BUFFER_PCT=0.002
 PAPER_TRADE_SL_ATR_MULTIPLIER=1.2
 PAPER_TRADE_SL_ATR_TIMEFRAME=5m
 PAPER_TRADE_SL_ATR_LIMIT=120
+PAPER_TRADE_MAX_TP_PCT=15
 PAPER_TRADE_MIN_RR=1.5
 PAPER_TRADE_MAX_RISK_PCT=12
 PAPER_TRADE_MAX_HOLD_MINUTES=120
@@ -196,11 +199,20 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
 - Nếu không truyền `quantity` khi mở lệnh, backend sẽ tự tính `quantity = PAPER_TRADE_ORDER_USDT / entry_price`.
 - `PAPER_TRADE_MARGIN_USDT` là margin dùng để tính PnL% (ROI margin).  
 : đặt `0` để tự tính theo công thức `entry_price * quantity / leverage`.
+- `PAPER_TRADE_MAINT_MARGIN_RATE` dùng để ước tính `Signal Margin Ratio%` (kiểu Binance `Tỉ lệ ký quỹ`) với công thức xấp xỉ:  
+: `margin_ratio_pct ~= leverage * maint_margin_rate * 100`.
 - `PAPER_TRADE_QUANTITY` chỉ dùng fallback khi không tính được từ giá.
 - `PAPER_TRADE_MIN_SL_PCT` + `PAPER_TRADE_SL_EXTRA_BUFFER_PCT` giúp kéo SL xa hơn để tránh bị quét quá sớm.
 - `PAPER_TRADE_SL_ATR_MULTIPLIER` dùng ATR để đặt ngưỡng SL tối thiểu theo biến động (0 = tắt ATR).
+- `PAPER_TRADE_MAX_TP_PCT` giới hạn TP tối đa theo `% giá vào` (mặc định 15%).  
+: ví dụ `15` nghĩa là TP không vượt quá `entry +/- 15%`.
 - `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
 : ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
+- `ML_USE_LIQUIDATION_FEATURES=true` bật thêm nhóm feature liquidation proxy (wick + volume spike trên nến 5m) khi train ML.
+- Paper trade sẽ lưu thêm `entry_type` để phân biệt:
+: `MARKET` (mở tay bằng nút Market Open) và `LIMIT` (auto khớp theo entry tín hiệu).
+- Màn hình Paper Trade Stats có thêm `Market Win Rate` và `Limit Win Rate` để so sánh hiệu quả.
+- Có bảng `Entry Type Breakdown` (MARKET/LIMIT): Closed, Win/Loss, Win Rate, Total/Avg PnL (USDT và %).
 
 ## 9) Auto-train định kỳ (macOS + Linux/WSL)
 
