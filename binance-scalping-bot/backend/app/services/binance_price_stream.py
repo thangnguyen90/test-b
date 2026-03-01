@@ -127,8 +127,9 @@ class BinancePriceStream:
         async with self._lock:
             return self._prices.get(key), self._updated_at.get(key)
 
-    async def get_prices(self, symbols: list[str]) -> tuple[dict[str, float], str]:
+    async def get_prices(self, symbols: list[str]) -> tuple[dict[str, float], str, dict[str, str]]:
         out: dict[str, float] = {}
+        out_ts: dict[str, str] = {}
         timestamp = datetime.now(timezone.utc).isoformat()
         async with self._lock:
             for symbol in symbols:
@@ -138,16 +139,18 @@ class BinancePriceStream:
                     out[symbol] = px
                 stamp = self._updated_at.get(key)
                 if stamp:
+                    out_ts[symbol] = stamp
                     timestamp = stamp
-        return out, timestamp
+        return out, timestamp, out_ts
 
     async def status(self, sample_symbols: list[str] | None = None) -> dict[str, Any]:
         sample = sample_symbols or ["BTC/USDT", "ETH/USDT"]
-        prices, timestamp = await self.get_prices(sample)
+        prices, timestamp, timestamps = await self.get_prices(sample)
         async with self._lock:
             total_cached = len(self._prices)
         return {
             "cached_symbols": total_cached,
             "sample_prices": prices,
             "last_timestamp": timestamp,
+            "sample_timestamps": timestamps,
         }

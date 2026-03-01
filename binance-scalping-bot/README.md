@@ -103,6 +103,8 @@ curl http://127.0.0.1:8000/api/v1/paper-trades/open
 curl "http://127.0.0.1:8000/api/v1/paper-trades/history?limit=100"
 ```
 
+- `history` hiện có thêm `close_reason` để biết lệnh đóng do `SL`, `TP`, `TIMEOUT_*` hay `MANUAL_*`.
+
 ### Analytics tables
 
 ```bash
@@ -158,6 +160,12 @@ SQLITE_DB_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_da
 ML_MODEL_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_data/rf_model.joblib
 TRAINING_SYMBOLS=SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT
 ML_FEEDBACK_TRAIN_LIMIT=1200
+AUTO_TRAIN_ENABLED=true
+AUTO_TRAIN_INTERVAL_MINUTES=240
+AUTO_TRAIN_STARTUP_DELAY_SEC=30
+AUTO_TRAIN_LIMIT=800
+AUTO_TRAIN_HORIZON=4
+AUTO_TRAIN_RR_RATIO=1.5
 WS_PING_INTERVAL_SEC=1.0
 MYSQL_ENABLED=false
 MYSQL_HOST=127.0.0.1
@@ -167,9 +175,16 @@ MYSQL_PASSWORD=
 MYSQL_DATABASE=trading_bot
 PAPER_TRADE_MIN_WIN=0.75
 PAPER_TRADE_QUANTITY=0.01
+PAPER_TRADE_ORDER_USDT=10
+PAPER_TRADE_MARGIN_USDT=0
 PAPER_TRADE_LEVERAGE=5
 PAPER_TRADE_POLL_INTERVAL_SEC=6
-PAPER_TRADE_MIN_SL_PCT=0.004
+PAPER_TRADE_MIN_SL_PCT=0.008
+PAPER_TRADE_MIN_SL_LOSS_PCT=5
+PAPER_TRADE_SL_EXTRA_BUFFER_PCT=0.002
+PAPER_TRADE_SL_ATR_MULTIPLIER=1.2
+PAPER_TRADE_SL_ATR_TIMEFRAME=5m
+PAPER_TRADE_SL_ATR_LIMIT=120
 PAPER_TRADE_MIN_RR=1.5
 PAPER_TRADE_MAX_RISK_PCT=12
 PAPER_TRADE_MAX_HOLD_MINUTES=120
@@ -177,7 +192,62 @@ PAPER_TRADE_DISABLE_SL=false
 PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
 ```
 
-## 9) Troubleshooting nhanh
+- `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
+- Nếu không truyền `quantity` khi mở lệnh, backend sẽ tự tính `quantity = PAPER_TRADE_ORDER_USDT / entry_price`.
+- `PAPER_TRADE_MARGIN_USDT` là margin dùng để tính PnL% (ROI margin).  
+: đặt `0` để tự tính theo công thức `entry_price * quantity / leverage`.
+- `PAPER_TRADE_QUANTITY` chỉ dùng fallback khi không tính được từ giá.
+- `PAPER_TRADE_MIN_SL_PCT` + `PAPER_TRADE_SL_EXTRA_BUFFER_PCT` giúp kéo SL xa hơn để tránh bị quét quá sớm.
+- `PAPER_TRADE_SL_ATR_MULTIPLIER` dùng ATR để đặt ngưỡng SL tối thiểu theo biến động (0 = tắt ATR).
+- `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
+: ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
+
+## 9) Auto-train định kỳ (macOS + Linux/WSL)
+
+- Auto-train chạy bên trong backend process nên dùng được trên cả macOS, Linux và WSL.
+- Không cần cron/launchd để train.
+- Mặc định: `AUTO_TRAIN_ENABLED=true`, chạy mỗi `240` phút.
+
+### Kiểm tra trạng thái auto-train
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/ml/status
+```
+
+Các field mới:
+- `training_in_progress`: đang có lượt train chạy hay không.
+- `auto_train_enabled`: bật/tắt auto-train.
+- `auto_train_running`: scheduler có đang chạy trong backend không.
+- `auto_train_interval_minutes`: chu kỳ train.
+- `auto_train_next_run_at`: thời điểm UTC dự kiến chạy lần kế tiếp.
+- `auto_train_last_run_started_at`, `auto_train_last_run_finished_at`, `auto_train_last_result`.
+- `last_train_trigger`, `last_train_started_at`, `last_train_finished_at`, `last_train_duration_sec`, `last_train_result`, `last_train_error`.
+- `train_log_path`: path file log train JSONL.
+
+### Log train
+
+- File log:
+  - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/ml_train.log`
+- Mỗi lần train sẽ có dòng `START` và `FINISH` (JSON), gồm trigger (`manual`/`auto`), thời gian bắt đầu/kết thúc, duration, result/error.
+- Frontend có card `ML Training Monitor` để xem trực tiếp thời gian bắt đầu/kết thúc (đổi sang giờ VN).
+
+### Bật/tắt nhanh
+
+Trong `backend/.env`:
+
+```env
+AUTO_TRAIN_ENABLED=true
+AUTO_TRAIN_INTERVAL_MINUTES=240
+```
+
+Sau khi sửa `.env`, restart backend:
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/backend_service.sh restart
+```
+
+## 10) Troubleshooting nhanh
 
 - Lỗi `pip: command not found`:
   - Luôn dùng pip trong venv:
@@ -189,3 +259,60 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
   - Một số symbol không đủ dữ liệu/setup, thử tăng `limit` hoặc đổi `TRAINING_SYMBOLS`
 - Nếu chưa train model:
   - `GET /api/v1/signals/latest` vẫn chạy bằng fallback heuristic
+
+## 11) Auto restart backend định kỳ (giảm RAM leak qua đêm)
+
+### Quản lý backend thủ công
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/backend_service.sh start
+./scripts/backend_service.sh status
+./scripts/backend_service.sh health
+./scripts/backend_service.sh restart
+./scripts/backend_service.sh restart-force
+./scripts/backend_service.sh stop
+./scripts/backend_service.sh stop-force
+```
+
+- Script chạy backend ở mode production-like (không `--reload`) để tiết kiệm RAM.
+- Không chạy song song cả `uvicorn ... --reload` và `backend_service.sh` ở 2 tab; nên chọn 1 cách.
+- `restart` có kiểm tra `GET /api/v1/ml/status`:
+  - Nếu `training_in_progress=true` thì **không restart** (tránh cắt ngang train).
+- Nếu muốn restart ngay, dùng `restart-force`.
+- `stop-force`/`restart-force` sẽ kill process đang giữ port `8000`.
+- Log file:
+  - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/backend.log`
+
+### Cài launchd restart mỗi 6 giờ (macOS)
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/install_backend_launchd.sh install
+./scripts/install_backend_launchd.sh status
+```
+
+- LaunchAgent label: `com.thang.binance-scalping-bot.backend-restart`
+- File plist:
+  - `~/Library/LaunchAgents/com.thang.binance-scalping-bot.backend-restart.plist`
+- Launchd gọi `./scripts/backend_service.sh restart` nên cũng tự bỏ qua restart khi đang train.
+- Log launchd:
+  - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/launchd.out.log`
+  - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/launchd.err.log`
+
+### Kiểm tra trạng thái train (để biết có bị skip restart hay không)
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/ml/status
+```
+
+- Trường `training_in_progress`:
+  - `true`: đang train, `restart` sẽ skip.
+  - `false`: restart chạy bình thường.
+
+### Gỡ launchd
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/install_backend_launchd.sh uninstall
+```

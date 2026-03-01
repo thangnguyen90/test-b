@@ -19,7 +19,10 @@ class PaperTrade(BaseModel):
     opened_at: datetime
     closed_at: Optional[datetime] = None
     close_price: Optional[float] = None
+    close_reason: Optional[str] = None
     pnl: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    margin_usdt: Optional[float] = None
     result: Optional[int] = None
 
 
@@ -32,6 +35,10 @@ class PaperTradeStats(BaseModel):
     win_rate: float
     total_pnl: float
     avg_pnl: float
+    total_pnl_pct: float
+    avg_pnl_pct: float
+    order_usdt: float
+    margin_usdt: float
 
 
 class PaperTradeListResponse(BaseModel):
@@ -64,5 +71,11 @@ class PaperMarketOpenRequest(BaseModel):
     entry_price: Optional[float] = Field(default=None, gt=0)
     take_profit: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
+    order_usdt: Optional[float] = Field(default=None, gt=0)
+    margin_usdt: Optional[float] = Field(default=None, gt=0)
     quantity: Optional[float] = Field(default=None, gt=0)
     leverage: Optional[int] = Field(default=None, ge=1, le=125)
+
+
+class PaperManualCloseRequest(BaseModel):
+    force_result: Optional[int] = Field(default=None, ge=0, le=1)

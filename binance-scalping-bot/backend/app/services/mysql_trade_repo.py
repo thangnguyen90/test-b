@@ -50,11 +50,13 @@ class MySQLTradeRepository:
                         take_profit DOUBLE NOT NULL,
                         stop_loss DOUBLE NOT NULL,
                         quantity DOUBLE NOT NULL,
+                        margin_usdt DOUBLE NULL,
                         leverage INT NOT NULL,
                         status VARCHAR(20) NOT NULL,
                         opened_at DATETIME(6) NOT NULL,
                         closed_at DATETIME(6) NULL,
                         close_price DOUBLE NULL,
+                        close_reason VARCHAR(32) NULL,
                         pnl DOUBLE NULL,
                         result TINYINT NULL,
                         created_at DATETIME(6) NOT NULL,
@@ -64,6 +66,28 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='margin_usdt'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute("ALTER TABLE paper_trades ADD COLUMN margin_usdt DOUBLE NULL AFTER quantity")
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='close_reason'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute("ALTER TABLE paper_trades ADD COLUMN close_reason VARCHAR(32) NULL AFTER close_price")
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS ml_feedback (
@@ -90,9 +114,9 @@ class MySQLTradeRepository:
                     """
                     INSERT INTO paper_trades (
                         symbol, side, signal_win_probability, effective_win_probability,
-                        entry_price, take_profit, stop_loss, quantity, leverage,
+                        entry_price, take_profit, stop_loss, quantity, margin_usdt, leverage,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -103,6 +127,7 @@ class MySQLTradeRepository:
                         payload["take_profit"],
                         payload["stop_loss"],
                         payload["quantity"],
+                        payload.get("margin_usdt"),
                         payload["leverage"],
                         now,
                         now,
@@ -129,17 +154,24 @@ class MySQLTradeRepository:
                 )
                 return list(cur.fetchall())
 
-    def close_trade(self, trade_id: int, close_price: float, pnl: float, result: int) -> None:
+    def close_trade(
+        self,
+        trade_id: int,
+        close_price: float,
+        pnl: float,
+        result: int,
+        close_reason: str | None = None,
+    ) -> None:
         now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE paper_trades
-                    SET status='CLOSED', closed_at=%s, close_price=%s, pnl=%s, result=%s, updated_at=%s
+                    SET status='CLOSED', closed_at=%s, close_price=%s, close_reason=%s, pnl=%s, result=%s, updated_at=%s
                     WHERE id=%s AND status='OPEN'
                     """,
-                    (now, close_price, pnl, result, now, trade_id),
+                    (now, close_price, close_reason, pnl, result, now, trade_id),
                 )
                 cur.execute(
                     "SELECT * FROM paper_trades WHERE id=%s LIMIT 1",
@@ -213,7 +245,35 @@ class MySQLTradeRepository:
                         SUM(CASE WHEN status='CLOSED' AND result=1 THEN 1 ELSE 0 END) AS win_trades,
                         SUM(CASE WHEN status='CLOSED' AND result=0 THEN 1 ELSE 0 END) AS loss_trades,
                         COALESCE(SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END), 0) AS total_pnl,
-                        COALESCE(AVG(CASE WHEN status='CLOSED' THEN pnl ELSE NULL END), 0) AS avg_pnl
+                        COALESCE(AVG(CASE WHEN status='CLOSED' THEN pnl ELSE NULL END), 0) AS avg_pnl,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status='CLOSED' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS total_pnl_pct,
+                        COALESCE(
+                            AVG(
+                                CASE
+                                    WHEN status='CLOSED' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE NULL
+                                        END
+                                    ELSE NULL
+                                END
+                            ),
+                            0
+                        ) AS avg_pnl_pct
                     FROM paper_trades
                     """
                 )
@@ -232,6 +292,8 @@ class MySQLTradeRepository:
             "win_rate": float(win_rate),
             "total_pnl": float(row.get("total_pnl") or 0.0),
             "avg_pnl": float(row.get("avg_pnl") or 0.0),
+            "total_pnl_pct": float(row.get("total_pnl_pct") or 0.0),
+            "avg_pnl_pct": float(row.get("avg_pnl_pct") or 0.0),
         }
 
     def symbol_accuracy(self, symbol: str, lookback: int = 200) -> float | None:

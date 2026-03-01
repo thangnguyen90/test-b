@@ -115,7 +115,7 @@ async def get_symbols_prices(symbols: str) -> dict:
     if not target_symbols:
         return {"count": 0, "prices": {}, "timestamp": None, "source": "empty"}
 
-    prices, stamp = await price_stream.get_prices(target_symbols)
+    prices, stamp, timestamps = await price_stream.get_prices(target_symbols)
     missing = [sym for sym in target_symbols if sym not in prices]
     if missing:
         try:
@@ -140,6 +140,7 @@ async def get_symbols_prices(symbols: str) -> dict:
         "count": len(prices),
         "prices": prices,
         "timestamp": stamp,
+        "timestamps": timestamps,
         "missing": [sym for sym in target_symbols if sym not in prices],
         "source": "stream+fallback",
     }
@@ -148,7 +149,7 @@ async def get_symbols_prices(symbols: str) -> dict:
 @router.get("/stream-status")
 async def get_stream_status() -> dict:
     status = await price_stream.status(sample_symbols=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
-    return {"source": "price_stream", **status}
+    return {"source": "price_stream", **status, "rest": BinanceFuturesClient.rest_status()}
 
 
 @router.get("/klines")

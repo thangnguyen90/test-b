@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import time
 from typing import Any
 
 from app.api.signals import get_scan_snapshot
 from app.services.binance_client import BinanceFuturesClient
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
-from app.services.risk_manager import calc_margin_risk_pct, normalize_tp_sl
+from app.services.risk_manager import (
+    calc_atr_from_ohlcv,
+    calc_min_sl_pct_from_loss,
+    calc_margin_risk_pct,
+    calc_margin_usdt,
+    calc_quantity_from_order_usdt,
+    normalize_tp_sl,
+)
 
 
 class PaperTradingEngine:
@@ -16,11 +24,19 @@ class PaperTradingEngine:
         self,
         repo: MySQLTradeRepository,
         predictor: MLPredictor,
+        price_stream: Any | None = None,
         min_win_probability: float = 0.75,
         quantity: float = 0.01,
+        order_usdt: float = 10.0,
+        margin_usdt: float = 0.0,
         leverage: int = 5,
         poll_interval_sec: float = 6.0,
         min_sl_pct: float = 0.004,
+        min_sl_loss_pct: float = 5.0,
+        sl_extra_buffer_pct: float = 0.0,
+        sl_atr_multiplier: float = 0.0,
+        sl_atr_timeframe: str = "5m",
+        sl_atr_limit: int = 120,
         min_rr: float = 1.5,
         max_risk_pct: float = 12.0,
         max_hold_minutes: int = 120,
@@ -29,12 +45,20 @@ class PaperTradingEngine:
     ) -> None:
         self.repo = repo
         self.predictor = predictor
+        self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
         self.min_win_probability = min_win_probability
         self.quantity = quantity
+        self.order_usdt = max(0.0, order_usdt)
+        self.margin_usdt = max(0.0, margin_usdt)
         self.leverage = leverage
-        self.poll_interval_sec = max(2.0, poll_interval_sec)
+        self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.min_sl_pct = min_sl_pct
+        self.min_sl_loss_pct = max(0.0, min_sl_loss_pct)
+        self.sl_extra_buffer_pct = max(0.0, sl_extra_buffer_pct)
+        self.sl_atr_multiplier = max(0.0, sl_atr_multiplier)
+        self.sl_atr_timeframe = sl_atr_timeframe or "5m"
+        self.sl_atr_limit = max(30, min(500, int(sl_atr_limit)))
         self.min_rr = min_rr
         self.max_risk_pct = max(0.0, max_risk_pct)
         self.max_hold_minutes = max(1, max_hold_minutes)
@@ -43,6 +67,7 @@ class PaperTradingEngine:
         self._task: asyncio.Task | None = None
         self._running = False
         self._vn_tz = timezone(timedelta(hours=7))
+        self._atr_cache: dict[str, tuple[float, float]] = {}
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -79,6 +104,10 @@ class PaperTradingEngine:
             if symbol:
                 price_symbols.add(symbol)
         market_prices = await asyncio.to_thread(self._resolve_market_prices, list(price_symbols))
+        stream_prices = await self._resolve_stream_prices(list(price_symbols))
+        if stream_prices:
+            # Prefer websocket stream cache for realtime TP/SL checks.
+            market_prices.update(stream_prices)
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
         for item in signals:
@@ -119,7 +148,13 @@ class PaperTradingEngine:
                 entry_price=entry,
                 take_profit=tp,
                 stop_loss=sl,
-                min_sl_pct=self.min_sl_pct,
+                min_sl_pct=max(
+                    self.min_sl_pct,
+                    calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+                ),
+                sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+                atr_value=await self._resolve_symbol_atr(symbol),
+                sl_atr_multiplier=self.sl_atr_multiplier,
                 min_rr=self.min_rr,
             )
             risk_pct = calc_margin_risk_pct(
@@ -131,6 +166,15 @@ class PaperTradingEngine:
             if risk_pct > self.max_risk_pct:
                 continue
 
+            quantity = calc_quantity_from_order_usdt(
+                entry_price=entry,
+                order_usdt=self.order_usdt,
+                fallback_quantity=self.quantity,
+            )
+            margin_usdt = self.margin_usdt
+            if margin_usdt <= 0:
+                margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+
             self.repo.create_open_trade(
                 {
                     "symbol": symbol,
@@ -140,7 +184,8 @@ class PaperTradingEngine:
                     "entry_price": entry,
                     "take_profit": normalized_tp,
                     "stop_loss": normalized_sl,
-                    "quantity": self.quantity,
+                    "quantity": quantity,
+                    "margin_usdt": margin_usdt,
                     "leverage": self.leverage,
                 }
             )
@@ -151,7 +196,8 @@ class PaperTradingEngine:
             side = str(trade["side"])
             price = market_prices.get(symbol)
             if price is None:
-                price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                stream_price = await self._resolve_stream_price(symbol)
+                price = stream_price if stream_price is not None else await asyncio.to_thread(self._resolve_market_price, symbol)
             if price is None:
                 continue
 
@@ -167,6 +213,22 @@ class PaperTradingEngine:
                     self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=entry)
                     sl = entry
 
+            # SL has higher priority than TP per user requirement.
+            sl_hit = False
+            if not self.disable_sl:
+                sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
+            if sl_hit:
+                pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
+                close_reason = 1 if pnl >= 0 else 0
+                self.repo.close_trade(
+                    trade_id=int(trade["id"]),
+                    close_price=price,
+                    pnl=pnl,
+                    result=close_reason,
+                    close_reason="SL",
+                )
+                continue
+
             # Immediate TP exit.
             tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
             if tp_hit:
@@ -177,6 +239,7 @@ class PaperTradingEngine:
                     close_price=price,
                     pnl=pnl,
                     result=close_reason,
+                    close_reason="TP",
                 )
                 continue
 
@@ -192,6 +255,7 @@ class PaperTradingEngine:
                     close_price=price,
                     pnl=pnl,
                     result=close_reason,
+                    close_reason="TIMEOUT_PROFIT",
                 )
                 continue
 
@@ -210,6 +274,7 @@ class PaperTradingEngine:
                 close_price=price,
                 pnl=pnl,
                 result=close_reason,
+                close_reason="TIMEOUT_BREAKEVEN",
             )
 
     def _resolve_market_price(self, symbol: str) -> float | None:
@@ -250,6 +315,47 @@ class PaperTradingEngine:
             if price is not None:
                 out[symbol] = float(price)
         return out
+
+    async def _resolve_stream_prices(self, symbols: list[str]) -> dict[str, float]:
+        if self.price_stream is None or not symbols:
+            return {}
+        try:
+            prices, _, _ = await self.price_stream.get_prices(symbols)
+            return {str(k): float(v) for k, v in prices.items() if v is not None}
+        except Exception:
+            return {}
+
+    async def _resolve_stream_price(self, symbol: str) -> float | None:
+        if self.price_stream is None:
+            return None
+        try:
+            price, _ = await self.price_stream.get_price(symbol=symbol)
+            return float(price) if price is not None else None
+        except Exception:
+            return None
+
+    async def _resolve_symbol_atr(self, symbol: str) -> float | None:
+        if self.sl_atr_multiplier <= 0:
+            return None
+        now = time.time()
+        cached = self._atr_cache.get(symbol)
+        if cached is not None and (now - cached[0]) <= 60:
+            return cached[1]
+        try:
+            rows = await asyncio.to_thread(
+                self.market_client.fetch_ohlcv,
+                symbol,
+                self.sl_atr_timeframe,
+                self.sl_atr_limit,
+            )
+            atr = calc_atr_from_ohlcv(rows=rows, period=14)
+            if atr is None:
+                return None
+            value = float(atr)
+            self._atr_cache[symbol] = (now, value)
+            return value
+        except Exception:
+            return None
 
     @staticmethod
     def _extract_price_from_ticker(ticker: dict[str, Any]) -> float | None:

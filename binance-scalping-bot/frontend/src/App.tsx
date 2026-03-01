@@ -39,6 +39,7 @@ type PriceStreamMessage = {
   price?: number
   prices?: Record<string, number>
   timestamp?: string | null
+  timestamps?: Record<string, string>
   source?: string
   error?: string
 }
@@ -77,6 +78,12 @@ type MarketPriceResponse = {
   symbol: string
   price: number
   timestamp: string | null
+}
+
+type MarketPricesBatchResponse = {
+  prices?: Record<string, number>
+  timestamp?: string | null
+  timestamps?: Record<string, string>
 }
 
 type KlineItem = {
@@ -134,7 +141,10 @@ type PaperTrade = {
   opened_at: string
   closed_at?: string | null
   close_price?: number | null
+  close_reason?: string | null
   pnl?: number | null
+  pnl_pct?: number | null
+  margin_usdt?: number | null
   result?: number | null
 }
 
@@ -147,6 +157,10 @@ type PaperTradeStats = {
   win_rate: number
   total_pnl: number
   avg_pnl: number
+  total_pnl_pct: number
+  avg_pnl_pct: number
+  order_usdt: number
+  margin_usdt: number
 }
 
 type DailyTradeSummary = {
@@ -206,6 +220,31 @@ type BtcTrendResponse = {
   items: BtcTrendItem[]
 }
 
+type MlStatus = {
+  is_loaded: boolean
+  model_path: string
+  trained_at: string | null
+  feature_count: number
+  accuracy: number | null
+  roc_auc: number | null
+  training_in_progress: boolean
+  auto_train_enabled?: boolean
+  auto_train_running?: boolean
+  auto_train_interval_minutes?: number | null
+  auto_train_next_run_at?: string | null
+  auto_train_last_run_started_at?: string | null
+  auto_train_last_run_finished_at?: string | null
+  auto_train_last_result?: string | null
+  auto_train_last_error?: string | null
+  last_train_trigger?: string | null
+  last_train_started_at?: string | null
+  last_train_finished_at?: string | null
+  last_train_duration_sec?: number | null
+  last_train_result?: string | null
+  last_train_error?: string | null
+  train_log_path?: string | null
+}
+
 type SortDirection = 'asc' | 'desc'
 
 type PaperMarketOpenRequest = {
@@ -218,11 +257,16 @@ type PaperMarketOpenRequest = {
   stop_loss: number
 }
 
+type PaperManualCloseRequest = {
+  force_result?: 0 | 1
+}
+
 const API_BASE = 'http://127.0.0.1:8000'
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
+const SIGNAL_RISK_LEVERAGE = 5
 const FALLBACK_COINS = [
   'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'DOGE/USDT',
   'AVAX/USDT', 'DOT/USDT', 'LINK/USDT', 'SUI/USDT', 'TON/USDT', 'NEAR/USDT',
@@ -242,6 +286,18 @@ const TIMEFRAME_RANGE_PCT: Record<string, number> = {
   '12h': 0.2,
   '24h': 0.3,
 }
+
+const VN_TIMEZONE = 'Asia/Ho_Chi_Minh'
+const VN_DATETIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  timeZone: VN_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+})
 
 const PALETTES: Palette[] = [
   {
@@ -358,13 +414,53 @@ function canonicalSymbol(symbol: string): string {
   return symbol.replace(':USDT', '').trim().toUpperCase()
 }
 
+function calcPnlPct(
+  side: 'LONG' | 'SHORT',
+  entryPrice: number,
+  closePrice: number,
+  leverage: number,
+): number | null {
+  if (!Number.isFinite(closePrice) || closePrice <= 0) return null
+  if (entryPrice <= 0 || leverage <= 0) return null
+  const movePct = side === 'LONG'
+    ? (closePrice - entryPrice) / entryPrice
+    : (entryPrice - closePrice) / entryPrice
+  return movePct * leverage * 100
+}
+
+function calcSignalRiskPct(
+  side: 'LONG' | 'SHORT',
+  entryPrice: number,
+  stopLoss: number,
+  leverage = SIGNAL_RISK_LEVERAGE,
+): number | null {
+  if (entryPrice <= 0 || stopLoss <= 0 || leverage <= 0) return null
+  const move = side === 'LONG'
+    ? (entryPrice - stopLoss) / entryPrice
+    : (stopLoss - entryPrice) / entryPrice
+  return Math.max(0, move * leverage * 100)
+}
+
+function calcMarginUsdt(entryPrice: number, quantity: number, leverage: number): number | null {
+  if (entryPrice <= 0 || quantity <= 0 || leverage <= 0) return null
+  return (entryPrice * quantity) / leverage
+}
+
+function formatVnTimestamp(value?: string | null): string {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+
+  const parts = VN_DATETIME_FORMATTER.formatToParts(date)
+  const get = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((item) => item.type === type)?.value ?? ''
+
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
+}
+
 function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
-  if (typeof markPrice !== 'number' || !Number.isFinite(markPrice) || markPrice <= 0) return null
-  if (trade.entry_price <= 0 || trade.leverage <= 0) return null
-  const movePct = trade.side === 'LONG'
-    ? (markPrice - trade.entry_price) / trade.entry_price
-    : (trade.entry_price - markPrice) / trade.entry_price
-  return movePct * trade.leverage * 100
+  if (typeof markPrice !== 'number') return null
+  return calcPnlPct(trade.side, trade.entry_price, markPrice, trade.leverage)
 }
 
 function buildHeatmap(
@@ -641,6 +737,7 @@ function App() {
   const btcTrendReqRef = useRef(false)
   const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const [health, setHealth] = useState<Health | null>(null)
+  const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
   const [error, setError] = useState<string>('')
@@ -672,6 +769,7 @@ function App() {
   const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
+  const [closingTradeId, setClosingTradeId] = useState<number | null>(null)
   const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
   const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
   const [liqOverview, setLiqOverview] = useState<LiquidationOverviewItem[]>([])
@@ -819,6 +917,13 @@ function App() {
     })
     return rows
   }, [liqOverview, liqSort])
+  const openTradeKeySet = useMemo(() => {
+    const set = new Set<string>()
+    for (const row of paperOpenTrades) {
+      set.add(`${canonicalSymbol(row.symbol)}:${row.side}`)
+    }
+    return set
+  }, [paperOpenTrades])
   const liqMaxPage = useMemo(
     () => Math.max(1, Math.ceil((liqTotalSymbols || 0) / liqPageSize)),
     [liqTotalSymbols, liqPageSize],
@@ -864,6 +969,9 @@ function App() {
   }
 
   function canOpenFromLiq(row: LiquidationOverviewItem): boolean {
+    if (row.signal_side && openTradeKeySet.has(`${canonicalSymbol(row.symbol)}:${row.signal_side}`)) {
+      return false
+    }
     return (
       !!row.signal_side
       && typeof row.signal_win_probability === 'number'
@@ -922,6 +1030,12 @@ function App() {
     setHealth(await response.json())
   }
 
+  async function fetchMlStatus() {
+    const response = await fetch(`${API_BASE}/api/v1/ml/status`)
+    if (!response.ok) throw new Error('ML status API failed')
+    setMlStatus(await response.json() as MlStatus)
+  }
+
   async function fetchSignal(symbol = selectedCoin, markPrice = chartBasePrice) {
     const response = await fetch(
       `${API_BASE}/api/v1/signals/latest?symbol=${encodeURIComponent(symbol)}&mark_price=${markPrice}`,
@@ -971,12 +1085,14 @@ function App() {
       `${API_BASE}/api/v1/market/prices?symbols=${encodeURIComponent(symbols.join(','))}`,
     )
     if (!response.ok) throw new Error('Cannot fetch market prices batch')
-    const data = await response.json() as { prices?: Record<string, number>; timestamp?: string | null }
+    const data = await response.json() as MarketPricesBatchResponse
     const prices = data.prices ?? {}
-    if (data.timestamp) {
-      const stampMap: Record<string, string> = {}
-      for (const key of Object.keys(prices)) stampMap[key] = data.timestamp
-      setPaperLivePriceTime((prev) => ({ ...prev, ...stampMap }))
+    if (data.timestamps && Object.keys(data.timestamps).length > 0) {
+      setPaperLivePriceTime((prev) => ({ ...prev, ...data.timestamps }))
+    } else if (data.timestamp) {
+      const fallbackStampMap: Record<string, string> = {}
+      for (const key of Object.keys(prices)) fallbackStampMap[key] = data.timestamp
+      setPaperLivePriceTime((prev) => ({ ...prev, ...fallbackStampMap }))
     }
     return prices
   }
@@ -1094,6 +1210,13 @@ function App() {
         body: JSON.stringify(input),
         signal: controller.signal,
       })
+      if (response.status === 409) {
+        // Duplicate open trade for same symbol/side; treat as idempotent success.
+        fetchPaperTradingStats().catch(() => {
+          // no-op
+        })
+        return
+      }
       if (!response.ok) {
         const text = await response.text()
         throw new Error(`Market open failed: ${text}`)
@@ -1110,6 +1233,24 @@ function App() {
     } finally {
       if (timeoutId != null) window.clearTimeout(timeoutId)
       setIsOpeningMarketOrder(false)
+    }
+  }
+
+  async function closePaperTrade(tradeId: number, payload: PaperManualCloseRequest = {}) {
+    setClosingTradeId(tradeId)
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/paper-trades/close/${tradeId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`Close trade failed: ${text}`)
+      }
+      await fetchPaperTradingStats()
+    } finally {
+      setClosingTradeId(null)
     }
   }
 
@@ -1151,6 +1292,7 @@ function App() {
         })
         await Promise.all([
           fetchHealth(),
+          fetchMlStatus(),
           fetchPendingOrders(),
           fetchSignal(selectedCoin, chartBasePrice),
           fetchKlines(selectedCoin),
@@ -1166,6 +1308,20 @@ function App() {
 
     bootstrap()
     return () => undefined
+  }, [])
+
+  useEffect(() => {
+    fetchMlStatus().catch(() => {
+      // Keep previous ML status when endpoint is temporarily unavailable.
+    })
+    const timer = window.setInterval(() => {
+      fetchMlStatus().catch(() => {
+        // Keep previous ML status on transient errors.
+      })
+    }, 5000)
+    return () => {
+      window.clearInterval(timer)
+    }
   }, [])
 
   useEffect(() => {
@@ -1265,7 +1421,7 @@ function App() {
           .catch(() => {
             // Keep last prices on transient failures.
           })
-      }, 2500)
+      }, 1000)
     }
 
     const connect = () => {
@@ -1289,7 +1445,9 @@ function App() {
           }
           if (payload.type !== 'prices' || !payload.prices) return
           setPaperLivePrices((prev) => ({ ...prev, ...payload.prices }))
-          if (payload.timestamp) {
+          if (payload.timestamps && Object.keys(payload.timestamps).length > 0) {
+            setPaperLivePriceTime((prev) => ({ ...prev, ...payload.timestamps! }))
+          } else if (payload.timestamp) {
             const stamp = payload.timestamp
             const updates: Record<string, string> = {}
             for (const key of Object.keys(payload.prices)) updates[key] = stamp
@@ -1432,7 +1590,7 @@ function App() {
         fetchMarketPriceFallback(selectedCoinRef.current).catch(() => {
           // Keep last market price if fallback request fails.
         })
-      }, 2000)
+      }, 1000)
     }
 
     const connect = () => {
@@ -1536,8 +1694,12 @@ function App() {
             <div className="stats-item"><strong>Win:</strong> {paperStats?.win_trades ?? 0}</div>
             <div className="stats-item"><strong>Loss:</strong> {paperStats?.loss_trades ?? 0}</div>
             <div className="stats-item"><strong>Win Rate:</strong> {paperStats ? `${(paperStats.win_rate * 100).toFixed(2)}%` : '0%'}</div>
-            <div className="stats-item"><strong>Total PnL:</strong> {paperStats?.total_pnl?.toFixed(6) ?? '0.000000'}</div>
-            <div className="stats-item"><strong>Avg PnL:</strong> {paperStats?.avg_pnl?.toFixed(6) ?? '0.000000'}</div>
+            <div className="stats-item"><strong>Order Value:</strong> {paperStats && typeof paperStats.order_usdt === 'number' ? `${paperStats.order_usdt.toFixed(2)} USDT` : '-'}</div>
+            <div className="stats-item"><strong>Margin:</strong> {paperStats && typeof paperStats.margin_usdt === 'number' ? `${paperStats.margin_usdt.toFixed(2)} USDT` : '-'}</div>
+            <div className="stats-item"><strong>Total PnL:</strong> {paperStats ? `${paperStats.total_pnl.toFixed(4)} USDT` : '0.0000 USDT'}</div>
+            <div className="stats-item"><strong>Avg PnL:</strong> {paperStats ? `${paperStats.avg_pnl.toFixed(4)} USDT` : '0.0000 USDT'}</div>
+            <div className="stats-item"><strong>Total PnL%:</strong> {paperStats && typeof paperStats.total_pnl_pct === 'number' ? `${paperStats.total_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
+            <div className="stats-item"><strong>Avg PnL%:</strong> {paperStats && typeof paperStats.avg_pnl_pct === 'number' ? `${paperStats.avg_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
           </div>
 
           <h3 className="section-title">Open Paper Trades</h3>
@@ -1550,15 +1712,18 @@ function App() {
                   <tr>
                     <th>ID</th>
                     <th>Symbol</th>
+                    <th>uPnL (USDT)</th>
+                    <th>uPnL% (Margin)</th>
                     <th>Side</th>
                     <th>Entry</th>
                     <th>Mark (WS)</th>
                     <th>Mark TS</th>
+                    <th>Margin (USDT)</th>
                     <th>TP</th>
                     <th>SL</th>
-                    <th>uPnL% (Margin)</th>
                     <th>Signal%</th>
                     <th>Effective%</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1566,16 +1731,23 @@ function App() {
                     const mark = resolveLivePrice(row.symbol)
                     const markTs = resolveLiveTime(row.symbol)
                     const upnlPct = calcUnrealizedPnlPct(row, mark)
+                    const marginUsdt = typeof row.margin_usdt === 'number'
+                      ? row.margin_usdt
+                      : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+                    const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
+                      ? (marginUsdt * upnlPct / 100)
+                      : null
                     return (
                     <tr key={row.id}>
                       <td>{row.id}</td>
                       <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
-                      <td>{row.side}</td>
-                      <td>{row.entry_price}</td>
-                      <td>{typeof mark === 'number' ? mark : '-'}</td>
-                      <td>{markTs ?? '-'}</td>
-                      <td>{row.take_profit}</td>
-                      <td>{row.stop_loss}</td>
+                      <td>
+                        {typeof upnlUsdt === 'number' ? (
+                          <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${upnlUsdt >= 0 ? '+' : ''}${upnlUsdt.toFixed(4)}`}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>
                         {typeof upnlPct === 'number' ? (
                           <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -1583,8 +1755,29 @@ function App() {
                           </span>
                         ) : '-'}
                       </td>
+                      <td>{row.side}</td>
+                      <td>{row.entry_price}</td>
+                      <td>{typeof mark === 'number' ? mark : '-'}</td>
+                      <td>{formatVnTimestamp(markTs)}</td>
+                      <td>{typeof marginUsdt === 'number' ? marginUsdt.toFixed(2) : '-'}</td>
+                      <td>{row.take_profit}</td>
+                      <td>{row.stop_loss}</td>
                       <td>{(row.signal_win_probability * 100).toFixed(2)}</td>
                       <td>{(row.effective_win_probability * 100).toFixed(2)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-inline btn-secondary"
+                          disabled={closingTradeId === row.id}
+                          onClick={() => {
+                            closePaperTrade(row.id, { force_result: 0 }).catch((err) => {
+                              setError(err instanceof Error ? err.message : 'Unknown error')
+                            })
+                          }}
+                        >
+                          {closingTradeId === row.id ? 'Closing...' : 'Close Wrong'}
+                        </button>
+                      </td>
                     </tr>
                   )})}
                 </tbody>
@@ -1603,33 +1796,52 @@ function App() {
                   <tr>
                     <th>ID</th>
                     <th>Symbol</th>
+                    <th>PnL (USDT)</th>
+                    <th>PnL% (Margin)</th>
                     <th>Side</th>
                     <th>Status</th>
                     <th>Entry</th>
                     <th>Close</th>
-                    <th>PnL</th>
+                    <th>Close Reason</th>
                     <th>Result</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {paperHistory.map((row) => (
-                    <tr key={`${row.id}-${row.status}`}>
-                      <td>{row.id}</td>
-                      <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
-                      <td>{row.side}</td>
-                      <td>{row.status}</td>
-                      <td>{row.entry_price}</td>
-                      <td>{row.close_price ?? '-'}</td>
-                      <td>
-                        {typeof row.pnl === 'number' ? (
-                          <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                            {`${row.pnl >= 0 ? '+' : ''}${row.pnl}`}
-                          </span>
-                        ) : '-'}
-                      </td>
-                      <td>{row.result == null ? '-' : row.result === 1 ? 'WIN' : 'LOSS'}</td>
-                    </tr>
-                  ))}
+                  {paperHistory.map((row) => {
+                    const closePnlPct = typeof row.pnl_pct === 'number'
+                      ? row.pnl_pct
+                      : (
+                        typeof row.close_price === 'number'
+                          ? calcPnlPct(row.side, row.entry_price, row.close_price, row.leverage)
+                          : null
+                      )
+                    return (
+                      <tr key={`${row.id}-${row.status}`}>
+                        <td>{row.id}</td>
+                        <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>
+                          {typeof row.pnl === 'number' ? (
+                            <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.pnl >= 0 ? '+' : ''}${row.pnl.toFixed(4)}`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof closePnlPct === 'number' ? (
+                            <span className={closePnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${closePnlPct >= 0 ? '+' : ''}${closePnlPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>{row.side}</td>
+                        <td>{row.status}</td>
+                        <td>{row.entry_price}</td>
+                        <td>{row.close_price ?? '-'}</td>
+                        <td>{row.close_reason ?? '-'}</td>
+                        <td>{row.result == null ? '-' : row.result === 1 ? 'WIN' : 'LOSS'}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             )}
@@ -1775,7 +1987,7 @@ function App() {
             {' | WS: '}
             {priceWsStatus}
             {' | TS: '}
-            {marketPriceTime ?? '-'}
+            {formatVnTimestamp(marketPriceTime)}
           </h2>
           <span className={`badge ${connectionStatus === 'Live' ? 'success' : 'warn'}`}>{connectionStatus}</span>
         </div>
@@ -1837,6 +2049,18 @@ function App() {
               {renderSymbolJump(signal?.symbol ?? selectedCoin, signal?.predicted_entry_price)}
             </p>
             <p><strong>Win Probability:</strong> {signal ? `${(signal.win_probability * 100).toFixed(2)}%` : '-'}</p>
+            <p>
+              <strong>Signal Risk%:</strong>{' '}
+              {signal ? (
+                <span className="pnl-neg">
+                  {(calcSignalRiskPct(
+                    signal.side,
+                    signal.predicted_entry_price,
+                    signal.stop_loss,
+                  ) ?? 0).toFixed(2)}%
+                </span>
+              ) : '-'}
+            </p>
             <p><strong>Entry:</strong> {signal?.predicted_entry_price ?? '-'}</p>
             <p><strong>TP:</strong> {signal?.take_profit ?? '-'}</p>
             <p><strong>SL:</strong> {signal?.stop_loss ?? '-'}</p>
@@ -1859,7 +2083,11 @@ function App() {
                     setError(err instanceof Error ? err.message : 'Unknown error')
                   })
                 }}
-                disabled={!signal || isOpeningMarketOrder}
+                disabled={
+                  !signal
+                  || isOpeningMarketOrder
+                  || openTradeKeySet.has(`${canonicalSymbol(signal.symbol)}:${signal.side}`)
+                }
               >
                 {isOpeningMarketOrder ? 'Opening...' : 'Open Paper Market Now'}
               </button>
@@ -1925,6 +2153,7 @@ function App() {
                   <th>Symbol</th>
                   <th>Side</th>
                   <th>Win%</th>
+                  <th>Risk%</th>
                   <th>Entry</th>
                   <th>TP</th>
                   <th>SL</th>
@@ -1939,6 +2168,15 @@ function App() {
                     </td>
                     <td>{item.side}</td>
                     <td>{(item.win_probability * 100).toFixed(2)}</td>
+                    <td>
+                      <span className="pnl-neg">
+                        {(calcSignalRiskPct(
+                          item.side,
+                          item.predicted_entry_price,
+                          item.stop_loss,
+                        ) ?? 0).toFixed(2)}%
+                      </span>
+                    </td>
                     <td>{item.predicted_entry_price}</td>
                     <td>{item.take_profit}</td>
                     <td>{item.stop_loss}</td>
@@ -1946,7 +2184,10 @@ function App() {
                       <button
                         type="button"
                         className="btn-inline"
-                        disabled={isOpeningMarketOrder}
+                        disabled={
+                          isOpeningMarketOrder
+                          || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
+                        }
                         onClick={() => {
                           openPaperMarketOrder({
                             symbol: item.symbol,
@@ -2177,7 +2418,7 @@ function App() {
           <div className="content">
             <p><strong>App:</strong> {health?.app_name ?? '-'}</p>
             <p><strong>Env:</strong> {health?.environment ?? '-'}</p>
-            <p><strong>Updated:</strong> {health?.timestamp ?? '-'}</p>
+            <p><strong>Updated:</strong> {formatVnTimestamp(health?.timestamp)}</p>
           </div>
         </article>
 
@@ -2191,10 +2432,32 @@ function App() {
           <div className="content">
             <p><strong>Symbol:</strong> {selectedCoin}</p>
             <p><strong>Real Price (Binance):</strong> {marketPrice ?? '-'}</p>
-            <p><strong>Price Time:</strong> {marketPriceTime ?? '-'}</p>
+            <p><strong>Price Time:</strong> {formatVnTimestamp(marketPriceTime)}</p>
             <p><strong>Connection:</strong> {priceWsStatus}</p>
           </div>
         </article>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>ML Training Monitor</h2>
+          <span className={`badge ${mlStatus?.training_in_progress ? 'warn' : 'success'}`}>
+            {mlStatus?.training_in_progress ? 'Training...' : 'Idle'}
+          </span>
+        </header>
+        <div className="content">
+          <p><strong>Model Loaded:</strong> {mlStatus?.is_loaded ? 'Yes' : 'No'}</p>
+          <p><strong>Last Trained At:</strong> {formatVnTimestamp(mlStatus?.trained_at ?? null)}</p>
+          <p><strong>Last Train Trigger:</strong> {mlStatus?.last_train_trigger ?? '-'}</p>
+          <p><strong>Train Start (VN):</strong> {formatVnTimestamp(mlStatus?.last_train_started_at ?? null)}</p>
+          <p><strong>Train End (VN):</strong> {formatVnTimestamp(mlStatus?.last_train_finished_at ?? null)}</p>
+          <p><strong>Duration:</strong> {typeof mlStatus?.last_train_duration_sec === 'number' ? `${mlStatus.last_train_duration_sec.toFixed(2)}s` : '-'}</p>
+          <p><strong>Result:</strong> {mlStatus?.last_train_result ?? '-'}</p>
+          <p><strong>Error:</strong> {mlStatus?.last_train_error ?? '-'}</p>
+          <p><strong>Auto Train:</strong> {mlStatus?.auto_train_enabled ? 'ON' : 'OFF'} ({mlStatus?.auto_train_interval_minutes ?? '-'}m)</p>
+          <p><strong>Next Auto Run (VN):</strong> {formatVnTimestamp(mlStatus?.auto_train_next_run_at ?? null)}</p>
+          <p><strong>Train Log:</strong> <code>{mlStatus?.train_log_path ?? '-'}</code></p>
+        </div>
       </section>
 
       {error ? <p className="error">{error}</p> : null}

@@ -14,7 +14,7 @@ from app.api.paper_trades import router as paper_trades_router
 from app.api.signals import get_scan_snapshot
 from app.api.signals import router as signals_router
 from app.core.config import settings
-from app.deps import ml_predictor, price_stream, ws_manager
+from app.deps import auto_trainer, ml_predictor, price_stream, ws_manager
 from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
@@ -43,6 +43,7 @@ app.include_router(paper_trades_router)
 async def on_startup() -> None:
     global paper_trade_repo, paper_trade_engine
 
+    paper_trade_api.bind_price_stream(price_stream)
     if settings.mysql_enabled:
         try:
             paper_trade_repo = MySQLTradeRepository(
@@ -56,11 +57,19 @@ async def on_startup() -> None:
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
                 predictor=ml_predictor,
+                price_stream=price_stream,
                 min_win_probability=settings.paper_trade_min_win_probability,
                 quantity=settings.paper_trade_quantity,
+                order_usdt=settings.paper_trade_order_usdt,
+                margin_usdt=settings.paper_trade_margin_usdt,
                 leverage=settings.paper_trade_leverage,
                 poll_interval_sec=settings.paper_trade_poll_interval_sec,
                 min_sl_pct=settings.paper_trade_min_sl_pct,
+                min_sl_loss_pct=settings.paper_trade_min_sl_loss_pct,
+                sl_extra_buffer_pct=settings.paper_trade_sl_extra_buffer_pct,
+                sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
+                sl_atr_timeframe=settings.paper_trade_sl_atr_timeframe,
+                sl_atr_limit=settings.paper_trade_sl_atr_limit,
                 min_rr=settings.paper_trade_min_rr,
                 max_risk_pct=settings.paper_trade_max_risk_pct,
                 max_hold_minutes=settings.paper_trade_max_hold_minutes,
@@ -75,12 +84,14 @@ async def on_startup() -> None:
 
     await ws_manager.start()
     await price_stream.start()
+    await auto_trainer.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     if paper_trade_engine is not None:
         await paper_trade_engine.stop()
+    await auto_trainer.stop()
     await price_stream.stop()
     await ws_manager.stop()
 
@@ -187,13 +198,14 @@ async def prices_socket(
 
     try:
         while websocket.client_state == WebSocketState.CONNECTED:
-            prices, stamp = await price_stream.get_prices(target_symbols)
+            prices, stamp, timestamps = await price_stream.get_prices(target_symbols)
             await websocket.send_json(
                 {
                     "type": "prices",
                     "symbols": target_symbols,
                     "prices": prices,
                     "timestamp": stamp,
+                    "timestamps": timestamps,
                     "source": "stream_cache",
                 }
             )

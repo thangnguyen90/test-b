@@ -48,11 +48,11 @@ class AnalyticsService:
             return "MARKET"
         return "LIMIT"
 
-    def _get_cached(self, key: str) -> Any | None:
+    def _get_cached(self, key: str, allow_stale: bool = False) -> Any | None:
         item = self.cache.get(key)
         if item is None:
             return None
-        if time.time() > item.expires_at:
+        if not allow_stale and time.time() > item.expires_at:
             return None
         return item.payload
 
@@ -101,50 +101,56 @@ class AnalyticsService:
         if cached is not None:
             return cached
 
-        symbols = self._load_usdt_swap_symbols()
-        # Use 24h ticker ranking to reduce heavy scans for multi-day calculations.
-        tickers = self.client.fetch_tickers(symbols[:180])
+        try:
+            symbols = self._load_usdt_swap_symbols()
+            # Use 24h ticker ranking to reduce heavy scans for multi-day calculations.
+            tickers = self.client.fetch_tickers(symbols[:180])
 
-        ranked: list[tuple[str, float]] = []
-        for symbol in symbols:
-            ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
-            if not ticker:
-                continue
-            base = _safe_float(ticker.get("percentage"))
-            if base is None:
-                base = abs(_safe_float(ticker.get("change")) or 0.0)
-            ranked.append((symbol, abs(base)))
-
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        candidates = [sym for sym, _ in ranked[:80]]
-
-        items: list[dict[str, Any]] = []
-        lookback = max(2, days + 1)
-        for symbol in candidates:
-            try:
-                klines = self.client.fetch_ohlcv(symbol=symbol, timeframe="1d", limit=lookback)
-                if len(klines) < 2:
+            ranked: list[tuple[str, float]] = []
+            for symbol in symbols:
+                ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+                if not ticker:
                     continue
-                first = float(klines[0][4])
-                last = float(klines[-1][4])
-                if first <= 0:
-                    continue
-                move_pct = ((last - first) / first) * 100
-                items.append(
-                    {
-                        "symbol": symbol,
-                        "move_pct": move_pct,
-                        "abs_move_pct": abs(move_pct),
-                        "from_price": first,
-                        "to_price": last,
-                        "days": days,
-                    }
-                )
-            except Exception:
-                continue
+                base = _safe_float(ticker.get("percentage"))
+                if base is None:
+                    base = abs(_safe_float(ticker.get("change")) or 0.0)
+                ranked.append((symbol, abs(base)))
 
-        items.sort(key=lambda row: row["abs_move_pct"], reverse=True)
-        return self._set_cache(key, items[:limit], ttl_sec=120)
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            candidates = [sym for sym, _ in ranked[:80]]
+
+            items: list[dict[str, Any]] = []
+            lookback = max(2, days + 1)
+            for symbol in candidates:
+                try:
+                    klines = self.client.fetch_ohlcv(symbol=symbol, timeframe="1d", limit=lookback)
+                    if len(klines) < 2:
+                        continue
+                    first = float(klines[0][4])
+                    last = float(klines[-1][4])
+                    if first <= 0:
+                        continue
+                    move_pct = ((last - first) / first) * 100
+                    items.append(
+                        {
+                            "symbol": symbol,
+                            "move_pct": move_pct,
+                            "abs_move_pct": abs(move_pct),
+                            "from_price": first,
+                            "to_price": last,
+                            "days": days,
+                        }
+                    )
+                except Exception:
+                    continue
+
+            items.sort(key=lambda row: row["abs_move_pct"], reverse=True)
+            return self._set_cache(key, items[:limit], ttl_sec=120)
+        except Exception:
+            stale = self._get_cached(key, allow_stale=True)
+            if stale is not None:
+                return stale
+            return []
 
     def liquidation_overview(
         self,
@@ -159,127 +165,139 @@ class AnalyticsService:
         if cached is not None:
             return cached
 
-        symbols = self._load_usdt_swap_symbols()
-        # Use the all-tickers endpoint once to avoid many chunked REST calls.
         try:
-            tickers = self.client.fetch_tickers()
-        except Exception:
-            tickers = self._fetch_tickers_chunked(symbols, chunk_size=120)
-
-        by_volume: list[tuple[str, float]] = []
-        for symbol in symbols:
-            ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
-            if not ticker:
-                continue
-            quote_vol = _safe_float(ticker.get("quoteVolume")) or 0.0
-            by_volume.append((symbol, quote_vol))
-
-        by_volume.sort(key=lambda x: x[1], reverse=True)
-        ranked = [sym for sym, _ in by_volume]
-        if not full_symbols:
-            ranked = ranked[:80]
-        total_symbols = len(ranked)
-        start = (safe_page - 1) * safe_page_size
-        end = start + safe_page_size
-        candidates = ranked[start:end]
-
-        rows: list[dict[str, Any]] = []
-        for symbol in candidates:
+            symbols = self._load_usdt_swap_symbols()
+            # Use the all-tickers endpoint once to avoid many chunked REST calls.
             try:
-                symbol_id = _to_binance_symbol(symbol)
-                premium = self.http.get(
-                    "https://fapi.binance.com/fapi/v1/premiumIndex",
-                    params={"symbol": symbol_id},
-                ).json()
+                tickers = self.client.fetch_tickers()
+            except Exception:
+                tickers = self._fetch_tickers_chunked(symbols, chunk_size=120)
 
-                mark_price = _safe_float(premium.get("markPrice"))
-                funding_rate = _safe_float(premium.get("lastFundingRate"))
+            by_volume: list[tuple[str, float]] = []
+            for symbol in symbols:
                 ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
-                quote_vol = _safe_float(ticker.get("quoteVolume")) if isinstance(ticker, dict) else None
+                if not ticker:
+                    continue
+                quote_vol = _safe_float(ticker.get("quoteVolume")) or 0.0
+                by_volume.append((symbol, quote_vol))
 
-                open_interest_qty: float | None = None
-                long_short_ratio: float | None = None
+            by_volume.sort(key=lambda x: x[1], reverse=True)
+            ranked = [sym for sym, _ in by_volume]
+            if not full_symbols:
+                ranked = ranked[:80]
+            total_symbols = len(ranked)
+            start = (safe_page - 1) * safe_page_size
+            end = start + safe_page_size
+            candidates = ranked[start:end]
+
+            rows: list[dict[str, Any]] = []
+            for symbol in candidates:
                 try:
-                    oi = self.http.get(
-                        "https://fapi.binance.com/fapi/v1/openInterest",
+                    symbol_id = _to_binance_symbol(symbol)
+                    premium = self.http.get(
+                        "https://fapi.binance.com/fapi/v1/premiumIndex",
                         params={"symbol": symbol_id},
                     ).json()
-                    open_interest_qty = _safe_float(oi.get("openInterest"))
-                except Exception:
-                    open_interest_qty = None
-                try:
-                    ls = self.http.get(
-                        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
-                        params={"symbol": symbol_id, "period": "5m", "limit": 1},
-                    ).json()
-                    if isinstance(ls, list) and ls:
-                        long_short_ratio = _safe_float(ls[0].get("longShortRatio"))
-                except Exception:
-                    long_short_ratio = None
 
-                if mark_price is None:
+                    mark_price = _safe_float(premium.get("markPrice"))
+                    funding_rate = _safe_float(premium.get("lastFundingRate"))
+                    ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+                    quote_vol = _safe_float(ticker.get("quoteVolume")) if isinstance(ticker, dict) else None
+
+                    open_interest_qty: float | None = None
+                    long_short_ratio: float | None = None
+                    try:
+                        oi = self.http.get(
+                            "https://fapi.binance.com/fapi/v1/openInterest",
+                            params={"symbol": symbol_id},
+                        ).json()
+                        open_interest_qty = _safe_float(oi.get("openInterest"))
+                    except Exception:
+                        open_interest_qty = None
+                    try:
+                        ls = self.http.get(
+                            "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                            params={"symbol": symbol_id, "period": "5m", "limit": 1},
+                        ).json()
+                        if isinstance(ls, list) and ls:
+                            long_short_ratio = _safe_float(ls[0].get("longShortRatio"))
+                    except Exception:
+                        long_short_ratio = None
+
+                    if mark_price is None:
+                        continue
+                    if long_short_ratio is None:
+                        long_short_ratio = 1.0
+                    if open_interest_qty is None:
+                        est_notional = max(0.0, float(quote_vol or 0.0) * 0.22)
+                        open_interest_qty = (est_notional / mark_price) if mark_price > 0 else 0.0
+
+                    oi_notional = open_interest_qty * mark_price
+                    # Estimated liquidation zone/value proxy.
+                    zone_bias = 0.02 if long_short_ratio >= 1 else -0.02
+                    liq_zone_price = mark_price * (1 + zone_bias)
+                    liq_zone_value = oi_notional * 0.012 * (1 + abs(long_short_ratio - 1) * 0.35)
+
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "mark_price": mark_price,
+                            "funding_rate": funding_rate,
+                            "long_short_ratio": long_short_ratio,
+                            "open_interest_notional": oi_notional,
+                            "est_liq_zone_price": liq_zone_price,
+                            "est_liq_zone_value": liq_zone_value,
+                        }
+                    )
+                except Exception:
                     continue
-                if long_short_ratio is None:
-                    long_short_ratio = 1.0
-                if open_interest_qty is None:
-                    est_notional = max(0.0, float(quote_vol or 0.0) * 0.22)
-                    open_interest_qty = (est_notional / mark_price) if mark_price > 0 else 0.0
 
-                oi_notional = open_interest_qty * mark_price
-                # Estimated liquidation zone/value proxy.
-                zone_bias = 0.02 if long_short_ratio >= 1 else -0.02
-                liq_zone_price = mark_price * (1 + zone_bias)
-                liq_zone_value = oi_notional * 0.012 * (1 + abs(long_short_ratio - 1) * 0.35)
+            rows.sort(key=lambda row: row["est_liq_zone_value"], reverse=True)
+            top_rows = rows
 
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "mark_price": mark_price,
-                        "funding_rate": funding_rate,
-                        "long_short_ratio": long_short_ratio,
-                        "open_interest_notional": oi_notional,
-                        "est_liq_zone_price": liq_zone_price,
-                        "est_liq_zone_value": liq_zone_value,
-                    }
-                )
-            except Exception:
-                continue
+            for row in top_rows:
+                try:
+                    signal = self.predictor.predict(
+                        symbol=str(row["symbol"]),
+                        mark_price=float(row["mark_price"]),
+                    )
+                    row["signal_side"] = signal.side
+                    row["signal_win_probability"] = signal.win_probability
+                    row["signal_entry_price"] = signal.predicted_entry_price
+                    row["signal_take_profit"] = signal.take_profit
+                    row["signal_stop_loss"] = signal.stop_loss
+                    row["signal_order_type"] = self._signal_order_type(
+                        side=signal.side,
+                        mark_price=float(row["mark_price"]),
+                        entry_price=signal.predicted_entry_price,
+                    )
+                except Exception:
+                    row["signal_side"] = None
+                    row["signal_win_probability"] = None
+                    row["signal_entry_price"] = None
+                    row["signal_take_profit"] = None
+                    row["signal_stop_loss"] = None
+                    row["signal_order_type"] = None
 
-        rows.sort(key=lambda row: row["est_liq_zone_value"], reverse=True)
-        top_rows = rows
-
-        for row in top_rows:
-            try:
-                signal = self.predictor.predict(
-                    symbol=str(row["symbol"]),
-                    mark_price=float(row["mark_price"]),
-                )
-                row["signal_side"] = signal.side
-                row["signal_win_probability"] = signal.win_probability
-                row["signal_entry_price"] = signal.predicted_entry_price
-                row["signal_take_profit"] = signal.take_profit
-                row["signal_stop_loss"] = signal.stop_loss
-                row["signal_order_type"] = self._signal_order_type(
-                    side=signal.side,
-                    mark_price=float(row["mark_price"]),
-                    entry_price=signal.predicted_entry_price,
-                )
-            except Exception:
-                row["signal_side"] = None
-                row["signal_win_probability"] = None
-                row["signal_entry_price"] = None
-                row["signal_take_profit"] = None
-                row["signal_stop_loss"] = None
-                row["signal_order_type"] = None
-
-        payload = {
-            "page": safe_page,
-            "page_size": safe_page_size,
-            "total_symbols": total_symbols,
-            "count": len(top_rows),
-            "items": top_rows,
-        }
-        return self._set_cache(key, payload, ttl_sec=60)
+            payload = {
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "total_symbols": total_symbols,
+                "count": len(top_rows),
+                "items": top_rows,
+            }
+            return self._set_cache(key, payload, ttl_sec=60)
+        except Exception:
+            stale = self._get_cached(key, allow_stale=True)
+            if stale is not None:
+                return stale
+            return {
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "total_symbols": 0,
+                "count": 0,
+                "items": [],
+            }
 
     @staticmethod
     def _ema(values: list[float], period: int) -> float:
@@ -356,59 +374,78 @@ class AnalyticsService:
             return cached
 
         symbol = "BTC/USDT"
-        ticker = self.client.fetch_ticker(symbol=symbol)
-        mark_price = _safe_float(ticker.get("last")) or _safe_float(ticker.get("close")) or 0.0
+        try:
+            ticker = self.client.fetch_ticker(symbol=symbol)
+            mark_price = _safe_float(ticker.get("last")) or _safe_float(ticker.get("close")) or 0.0
 
-        ml_signal = self.predictor.predict(symbol=symbol, mark_price=float(mark_price))
-        ml_direction = 1.0 if ml_signal.side == "LONG" else -1.0
-        ml_bias = ml_direction * ((ml_signal.win_probability * 2.0) - 1.0)
+            ml_signal = self.predictor.predict(symbol=symbol, mark_price=float(mark_price))
+            ml_direction = 1.0 if ml_signal.side == "LONG" else -1.0
+            ml_bias = ml_direction * ((ml_signal.win_probability * 2.0) - 1.0)
 
-        frames = [
-            ("15m", 220, 0.55),
-            ("1h", 220, 0.60),
-            ("4h", 220, 0.68),
-            ("1d", 260, 0.76),
-        ]
-        items: list[dict[str, Any]] = []
-        for tf, limit, tech_weight in frames:
-            rows = self.client.fetch_ohlcv(symbol=symbol, timeframe=tf, limit=limit)
-            tech_score, details = self._trend_from_ohlcv(rows)
-            ml_weight = 1.0 - tech_weight
-            blended = (tech_score * tech_weight) + (ml_bias * ml_weight)
-            prob_up = self._clamp(0.5 + (blended * 0.5), 0.01, 0.99)
-            confidence = self._clamp(0.45 + (abs(blended) * 0.5), 0.45, 0.98)
+            frames = [
+                ("15m", 220, 0.55),
+                ("1h", 220, 0.60),
+                ("4h", 220, 0.68),
+                ("1d", 260, 0.76),
+            ]
+            items: list[dict[str, Any]] = []
+            for tf, limit, tech_weight in frames:
+                rows = self.client.fetch_ohlcv(symbol=symbol, timeframe=tf, limit=limit)
+                tech_score, details = self._trend_from_ohlcv(rows)
+                ml_weight = 1.0 - tech_weight
+                blended = (tech_score * tech_weight) + (ml_bias * ml_weight)
+                prob_up = self._clamp(0.5 + (blended * 0.5), 0.01, 0.99)
+                confidence = self._clamp(0.45 + (abs(blended) * 0.5), 0.45, 0.98)
 
-            if blended > 0.08:
-                trend = "BULLISH"
-                action = "LONG"
-            elif blended < -0.08:
-                trend = "BEARISH"
-                action = "SHORT"
-            else:
-                trend = "SIDEWAYS"
-                action = "WAIT"
+                if blended > 0.08:
+                    trend = "BULLISH"
+                    action = "LONG"
+                elif blended < -0.08:
+                    trend = "BEARISH"
+                    action = "SHORT"
+                else:
+                    trend = "SIDEWAYS"
+                    action = "WAIT"
 
-            items.append(
-                {
-                    "timeframe": tf,
-                    "trend": trend,
-                    "action": action,
-                    "confidence": confidence,
-                    "prob_up": prob_up,
-                    "prob_down": 1.0 - prob_up,
-                    "technical_score": tech_score,
-                    "ml_score": ml_bias,
-                    "blended_score": blended,
-                    "rsi": details["rsi"],
-                    "slope_pct": details["slope_pct"],
+                items.append(
+                    {
+                        "timeframe": tf,
+                        "trend": trend,
+                        "action": action,
+                        "confidence": confidence,
+                        "prob_up": prob_up,
+                        "prob_down": 1.0 - prob_up,
+                        "technical_score": tech_score,
+                        "ml_score": ml_bias,
+                        "blended_score": blended,
+                        "rsi": details["rsi"],
+                        "slope_pct": details["slope_pct"],
+                    }
+                )
+
+            payload = {
+                "symbol": symbol,
+                "mark_price": mark_price,
+                "ml_side": ml_signal.side,
+                "ml_win_probability": ml_signal.win_probability,
+                "items": items,
+                "status": "live",
+            }
+            return self._set_cache(key, payload, ttl_sec=20)
+        except Exception as exc:
+            stale = self._get_cached(key, allow_stale=True)
+            if stale is not None:
+                return {
+                    **stale,
+                    "status": "degraded",
+                    "error": str(exc),
                 }
-            )
-
-        payload = {
-            "symbol": symbol,
-            "mark_price": mark_price,
-            "ml_side": ml_signal.side,
-            "ml_win_probability": ml_signal.win_probability,
-            "items": items,
-        }
-        return self._set_cache(key, payload, ttl_sec=20)
+            return {
+                "symbol": symbol,
+                "mark_price": 0.0,
+                "ml_side": "LONG",
+                "ml_win_probability": 0.5,
+                "items": [],
+                "status": "error",
+                "error": str(exc),
+            }

@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.core.config import settings
-from app.deps import ml_predictor
+from app.deps import auto_trainer, ml_predictor
 from app.models.ml import ModelStatus, TrainRequest, TrainResponse
 
 router = APIRouter(prefix="/api/v1/ml", tags=["ml"])
@@ -9,7 +9,9 @@ router = APIRouter(prefix="/api/v1/ml", tags=["ml"])
 
 @router.get("/status", response_model=ModelStatus)
 def get_model_status() -> ModelStatus:
-    return ModelStatus(**ml_predictor.status())
+    data = ml_predictor.status()
+    data.update(auto_trainer.status())
+    return ModelStatus(**data)
 
 
 @router.post("/train", response_model=TrainResponse)
