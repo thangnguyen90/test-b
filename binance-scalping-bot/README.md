@@ -173,6 +173,8 @@ ML_MODEL_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_dat
 LIQUID_ML_MODEL_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_data/liquid_rf_model.joblib
 TRAINING_SYMBOLS=SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT
 ML_FEEDBACK_TRAIN_LIMIT=1200
+ML_FEEDBACK_MAE_PENALTY_PCT=20
+ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true
 AUTO_TRAIN_ENABLED=true
 AUTO_TRAIN_INTERVAL_MINUTES=240
 AUTO_TRAIN_STARTUP_DELAY_SEC=30
@@ -230,6 +232,8 @@ PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 : ví dụ `15` nghĩa là TP không vượt quá `entry +/- 15%`.
 - `PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT` là ngưỡng kích hoạt dời SL theo `%PnL margin` (ví dụ 15%).
 - `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
+- DB lưu thêm `mae_pct`/`mfe_pct` cho mỗi paper trade (theo % margin), dùng để đánh giá quality tín hiệu.
+- Khi train từ `ml_feedback`, nếu `ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true` và lệnh WIN nhưng `mae_pct <= -ML_FEEDBACK_MAE_PENALTY_PCT`, sample sẽ bị đổi nhãn thành LOSS để phạt setup bị âm quá sâu.
 - `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
 : ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
 - `ML_USE_LIQUIDATION_FEATURES=true` bật thêm nhóm feature liquidation proxy (wick + volume spike trên nến 5m) khi train ML.
@@ -311,14 +315,19 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/backend_service.sh restart-force
 ./scripts/backend_service.sh stop
 ./scripts/backend_service.sh stop-force
+./scripts/backend_service.sh trim-log
 ```
 
 - Script chạy backend ở mode production-like (không `--reload`) để tiết kiệm RAM.
+- Access log HTTP đã tắt (`--no-access-log`) để log không phình nhanh.
 - Không chạy song song cả `uvicorn ... --reload` và `backend_service.sh` ở 2 tab; nên chọn 1 cách.
 - `restart` có kiểm tra `GET /api/v1/ml/status`:
   - Nếu `training_in_progress=true` thì **không restart** (tránh cắt ngang train).
 - Nếu muốn restart ngay, dùng `restart-force`.
 - `stop-force`/`restart-force` sẽ kill process đang giữ port `8000`.
+- Log `backend.log` tự rotate khi start/restart:
+  - `BACKEND_LOG_MAX_MB` (mặc định `128`)
+  - `BACKEND_LOG_KEEP_FILES` (mặc định `5`)
 - Log file:
   - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/backend.log`
 

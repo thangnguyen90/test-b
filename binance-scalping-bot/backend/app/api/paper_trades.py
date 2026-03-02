@@ -99,6 +99,8 @@ class PaperTradeAPI:
             close_reason=str(row["close_reason"]) if row.get("close_reason") is not None else None,
             pnl=pnl,
             pnl_pct=pnl_pct,
+            mae_pct=float(row["mae_pct"]) if row.get("mae_pct") is not None else None,
+            mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
             margin_usdt=margin_usdt,
             result=int(row["result"]) if row.get("result") is not None else None,
         )
@@ -261,6 +263,20 @@ class PaperTradeAPI:
             raise HTTPException(status_code=503, detail=f"Cannot fetch close price for {symbol}")
 
         pnl = (close_price - entry) * qty if side == "LONG" else (entry - close_price) * qty
+        leverage = int(row.get("leverage") or settings.paper_trade_leverage)
+        margin_usdt = (
+            float(row["margin_usdt"])
+            if row.get("margin_usdt") is not None
+            else calc_margin_usdt(entry_price=entry, quantity=qty, leverage=leverage)
+        )
+        pnl_pct = (pnl / margin_usdt) * 100 if margin_usdt > 0 else 0.0
+        prev_mae = float(row.get("mae_pct") or 0.0)
+        prev_mfe = float(row.get("mfe_pct") or 0.0)
+        repo.update_trade_excursions(
+            trade_id=trade_id,
+            mae_pct=min(prev_mae, pnl_pct),
+            mfe_pct=max(prev_mfe, pnl_pct),
+        )
         result = req.force_result if req.force_result is not None else (1 if pnl >= 0 else 0)
         manual_reason = "MANUAL_FORCE_LOSS" if req.force_result == 0 else "MANUAL_FORCE_WIN" if req.force_result == 1 else "MANUAL"
         repo.close_trade(

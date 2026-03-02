@@ -56,6 +56,7 @@ class MLPredictor:
         self.last_side_long_samples: int = 0
         self.last_side_short_samples: int = 0
         self.last_side_balanced: bool = False
+        self.last_feedback_penalized_samples: int = 0
         self.train_log_path = BASE_DIR / ".runtime" / "ml_train.log"
         self.train_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_model_if_exists()
@@ -129,7 +130,8 @@ class MLPredictor:
             )
 
             feedback_rows = self._load_feedback_rows(limit=settings.ml_feedback_train_limit)
-            feedback_prepared = self._build_feedback_dataset(feedback_rows)
+            feedback_prepared, feedback_penalized = self._build_feedback_dataset(feedback_rows)
+            self.last_feedback_penalized_samples = int(feedback_penalized)
             if not feedback_prepared.features.empty:
                 prepared = PreparedData(
                     features=pd.concat([prepared.features, feedback_prepared.features], ignore_index=True),
@@ -145,6 +147,7 @@ class MLPredictor:
                     "roc_auc": None,
                     "trained_at": None,
                     "feedback_samples": int(len(feedback_prepared.labels)),
+                    "feedback_penalized_samples": int(feedback_penalized),
                 }
                 self._finish_train(
                     result="SKIPPED",
@@ -224,6 +227,7 @@ class MLPredictor:
                 "roc_auc": self.roc_auc,
                 "trained_at": self.trained_at,
                 "feedback_samples": int(len(feedback_prepared.labels)),
+                "feedback_penalized_samples": int(feedback_penalized),
                 "side_long_samples_raw": int(side_long_raw),
                 "side_short_samples_raw": int(side_short_raw),
                 "side_long_samples_used": int(side_long_used),
@@ -271,6 +275,7 @@ class MLPredictor:
             "last_side_long_samples": self.last_side_long_samples,
             "last_side_short_samples": self.last_side_short_samples,
             "last_side_balanced": self.last_side_balanced,
+            "last_feedback_penalized_samples": self.last_feedback_penalized_samples,
             "liquidation_features_enabled": settings.ml_use_liquidation_features,
             "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
@@ -427,12 +432,13 @@ class MLPredictor:
         except Exception:
             return []
 
-    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> PreparedData:
+    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int]:
         if not feedback_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int))
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0
 
         feature_rows: list[pd.Series] = []
         labels: list[int] = []
+        penalized_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
 
         for row in feedback_rows:
@@ -445,6 +451,16 @@ class MLPredictor:
             label = int(result)
             if label not in (0, 1):
                 continue
+
+            if settings.ml_feedback_flip_win_on_deep_mae and label == 1:
+                mae_pct = row.get("mae_pct")
+                try:
+                    mae_value = float(mae_pct) if mae_pct is not None else 0.0
+                except Exception:
+                    mae_value = 0.0
+                if mae_value <= -abs(settings.ml_feedback_mae_penalty_pct):
+                    label = 0
+                    penalized_count += 1
 
             if symbol not in symbol_cache:
                 try:
@@ -465,8 +481,8 @@ class MLPredictor:
             labels.append(label)
 
         if not feature_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int))
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), penalized_count
 
         features = pd.DataFrame(feature_rows).reset_index(drop=True)
         labels_series = pd.Series(labels, dtype=int)
-        return PreparedData(features=features, labels=labels_series)
+        return PreparedData(features=features, labels=labels_series), penalized_count

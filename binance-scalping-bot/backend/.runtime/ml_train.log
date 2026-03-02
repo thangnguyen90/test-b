@@ -1,1 +1,2 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-02T09:50:56.854830+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-02T12:15:21.009155+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

@@ -58,6 +58,8 @@ class MySQLTradeRepository:
                         closed_at DATETIME(6) NULL,
                         close_price DOUBLE NULL,
                         close_reason VARCHAR(32) NULL,
+                        mae_pct DOUBLE NULL,
+                        mfe_pct DOUBLE NULL,
                         pnl DOUBLE NULL,
                         result TINYINT NULL,
                         created_at DATETIME(6) NOT NULL,
@@ -104,6 +106,32 @@ class MySQLTradeRepository:
                     )
                 cur.execute(
                     """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='mae_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN mae_pct DOUBLE NULL AFTER close_reason"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='mfe_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
+                    )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS ml_feedback (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         paper_trade_id BIGINT NOT NULL,
@@ -111,6 +139,8 @@ class MySQLTradeRepository:
                         side VARCHAR(10) NOT NULL,
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
+                        mae_pct DOUBLE NULL,
+                        mfe_pct DOUBLE NULL,
                         result TINYINT NOT NULL,
                         pnl DOUBLE NOT NULL,
                         created_at DATETIME(6) NOT NULL,
@@ -119,6 +149,32 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='mae_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE ml_feedback ADD COLUMN mae_pct DOUBLE NULL AFTER effective_win_probability"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='mfe_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE ml_feedback ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
+                    )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
@@ -128,9 +184,9 @@ class MySQLTradeRepository:
                     """
                     INSERT INTO paper_trades (
                         symbol, side, entry_type, signal_win_probability, effective_win_probability,
-                        entry_price, take_profit, stop_loss, quantity, margin_usdt, leverage,
+                        entry_price, take_profit, stop_loss, quantity, margin_usdt, leverage, mae_pct, mfe_pct,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -144,6 +200,8 @@ class MySQLTradeRepository:
                         payload["quantity"],
                         payload.get("margin_usdt"),
                         payload["leverage"],
+                        payload.get("mae_pct", 0.0),
+                        payload.get("mfe_pct", 0.0),
                         now,
                         now,
                         now,
@@ -198,8 +256,8 @@ class MySQLTradeRepository:
                         """
                         INSERT INTO ml_feedback (
                             paper_trade_id, symbol, side, signal_win_probability,
-                            effective_win_probability, result, pnl, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            effective_win_probability, mae_pct, mfe_pct, result, pnl, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             row["id"],
@@ -207,11 +265,29 @@ class MySQLTradeRepository:
                             row["side"],
                             row["signal_win_probability"],
                             row["effective_win_probability"],
+                            row.get("mae_pct"),
+                            row.get("mfe_pct"),
                             result,
                             pnl,
                             now,
                         ),
                     )
+
+    def update_trade_excursions(self, trade_id: int, mae_pct: float, mfe_pct: float) -> None:
+        now = _now_vn()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET
+                        mae_pct = LEAST(COALESCE(mae_pct, %s), %s),
+                        mfe_pct = GREATEST(COALESCE(mfe_pct, %s), %s),
+                        updated_at=%s
+                    WHERE id=%s AND status='OPEN'
+                    """,
+                    (mae_pct, mae_pct, mfe_pct, mfe_pct, now, trade_id),
+                )
 
     def update_take_profit(self, trade_id: int, take_profit: float) -> None:
         now = _now_vn()
@@ -426,7 +502,7 @@ class MySQLTradeRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT symbol, side, result, created_at
+                    SELECT symbol, side, result, mae_pct, mfe_pct, created_at
                     FROM ml_feedback
                     ORDER BY created_at DESC
                     LIMIT {safe_limit}

@@ -7,10 +7,34 @@ UVICORN_BIN="$ROOT_DIR/.venv/bin/uvicorn"
 RUNTIME_DIR="$BACKEND_DIR/.runtime"
 PID_FILE="$RUNTIME_DIR/backend.pid"
 LOG_FILE="$RUNTIME_DIR/backend.log"
+LOG_MAX_MB="${BACKEND_LOG_MAX_MB:-128}"
+LOG_KEEP_FILES="${BACKEND_LOG_KEEP_FILES:-5}"
 HOST="127.0.0.1"
 PORT="8000"
 
 mkdir -p "$RUNTIME_DIR"
+
+rotate_log_if_needed() {
+  local max_bytes
+  local current_size
+  local ts
+  max_bytes=$((LOG_MAX_MB * 1024 * 1024))
+  [[ -f "$LOG_FILE" ]] || return 0
+  current_size="$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)"
+  [[ "$current_size" =~ ^[0-9]+$ ]] || current_size=0
+  if [[ "$current_size" -lt "$max_bytes" ]]; then
+    return 0
+  fi
+
+  ts="$(date +%Y%m%d_%H%M%S)"
+  mv "$LOG_FILE" "$LOG_FILE.$ts"
+  : > "$LOG_FILE"
+
+  find "$RUNTIME_DIR" -maxdepth 1 -type f -name 'backend.log.*' -print \
+    | sort -r \
+    | tail -n +$((LOG_KEEP_FILES + 1)) \
+    | xargs -I {} rm -f "{}"
+}
 
 is_running() {
   if [[ ! -f "$PID_FILE" ]]; then
@@ -33,9 +57,11 @@ start_backend() {
     exit 1
   fi
 
+  rotate_log_if_needed
+
   (
     cd "$BACKEND_DIR"
-    nohup "$UVICORN_BIN" app.main:app --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 &
+    nohup "$UVICORN_BIN" app.main:app --host "$HOST" --port "$PORT" --no-access-log >>"$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
   )
 
@@ -116,7 +142,7 @@ restart_backend_safely() {
 
 usage() {
   cat <<'EOF'
-Usage: scripts/backend_service.sh <start|stop|stop-force|restart|restart-force|status|health|logs>
+Usage: scripts/backend_service.sh <start|stop|stop-force|restart|restart-force|status|health|logs|trim-log>
 EOF
 }
 
@@ -130,5 +156,6 @@ case "$cmd" in
   status) status_backend ;;
   health) health_backend ;;
   logs) tail -n 200 -f "$LOG_FILE" ;;
+  trim-log) : > "$LOG_FILE"; echo "Log truncated: $LOG_FILE" ;;
   *) usage; exit 1 ;;
 esac

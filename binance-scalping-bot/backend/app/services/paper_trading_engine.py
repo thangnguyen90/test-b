@@ -211,6 +211,8 @@ class PaperTradingEngine:
                     "quantity": quantity,
                     "margin_usdt": margin_usdt,
                     "leverage": self.leverage,
+                    "mae_pct": 0.0,
+                    "mfe_pct": 0.0,
                 }
             )
 
@@ -298,6 +300,8 @@ class PaperTradingEngine:
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
                         "leverage": self.leverage,
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
                     }
                 )
 
@@ -319,6 +323,16 @@ class PaperTradingEngine:
 
             # Once ROI reaches trigger, move SL to a locked-profit level.
             pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
+            prev_mae = float(trade.get("mae_pct") or 0.0)
+            prev_mfe = float(trade.get("mfe_pct") or 0.0)
+            next_mae = min(prev_mae, pnl_pct)
+            next_mfe = max(prev_mfe, pnl_pct)
+            if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
+                self.repo.update_trade_excursions(
+                    trade_id=int(trade["id"]),
+                    mae_pct=next_mae,
+                    mfe_pct=next_mfe,
+                )
             if not self.disable_sl and pnl_pct >= self.move_sl_to_entry_pnl_pct:
                 locked_sl = self._calc_locked_profit_sl(
                     side=side,
@@ -528,10 +542,9 @@ class PaperTradingEngine:
 
     @staticmethod
     def _entry_touched(side: str, market_price: float, entry: float) -> bool:
+        # Fill only when mark is near entry (avoid opening stale LIMIT entries far away).
         tolerance = entry * 0.0008
-        if side == "LONG":
-            return market_price <= (entry + tolerance)
-        return market_price >= (entry - tolerance)
+        return abs(market_price - entry) <= tolerance
 
     @staticmethod
     def _calc_pnl(side: str, entry: float, close_price: float, quantity: float) -> float:
