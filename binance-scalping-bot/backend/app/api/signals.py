@@ -124,6 +124,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 {
                     "symbol": signal.symbol,
                     "side": signal.side,
+                    "signal_source": "ML",
                     "win_probability": signal.win_probability,
                     "predicted_entry_price": signal.predicted_entry_price,
                     "stop_loss": signal.stop_loss,
@@ -158,6 +159,7 @@ def get_latest_signal(
     return {
         "symbol": result.symbol,
         "side": result.side,
+        "signal_source": "ML",
         "win_probability": result.win_probability,
         "predicted_entry_price": result.predicted_entry_price,
         "stop_loss": result.stop_loss,

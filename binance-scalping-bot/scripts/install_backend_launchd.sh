@@ -11,8 +11,24 @@ PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
 STDOUT_PATH="$RUNTIME_DIR/launchd.out.log"
 STDERR_PATH="$RUNTIME_DIR/launchd.err.log"
 UID_VALUE="$(id -u)"
+DEFAULT_INTERVAL_SEC=7200
+
+validate_interval() {
+  local value="$1"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "Invalid interval seconds: $value"
+    exit 1
+  fi
+  if [[ "$value" -lt 300 ]]; then
+    echo "Interval too low ($value). Use >= 300 seconds."
+    exit 1
+  fi
+}
 
 install_agent() {
+  local interval_sec="${1:-$DEFAULT_INTERVAL_SEC}"
+  validate_interval "$interval_sec"
+
   cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -29,7 +45,7 @@ install_agent() {
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>21600</integer>
+  <integer>$interval_sec</integer>
   <key>StandardOutPath</key>
   <string>$STDOUT_PATH</string>
   <key>StandardErrorPath</key>
@@ -42,7 +58,7 @@ EOF
   launchctl bootstrap "gui/$UID_VALUE" "$PLIST_PATH"
   launchctl enable "gui/$UID_VALUE/$LABEL"
   launchctl kickstart -k "gui/$UID_VALUE/$LABEL"
-  echo "Installed launchd agent: $PLIST_PATH"
+  echo "Installed launchd agent: $PLIST_PATH (interval=${interval_sec}s)"
 }
 
 uninstall_agent() {
@@ -56,12 +72,11 @@ status_agent() {
 }
 
 case "${1:-}" in
-  install) install_agent ;;
+  install) install_agent "${2:-$DEFAULT_INTERVAL_SEC}" ;;
   uninstall) uninstall_agent ;;
   status) status_agent ;;
   *)
-    echo "Usage: scripts/install_backend_launchd.sh <install|uninstall|status>"
+    echo "Usage: scripts/install_backend_launchd.sh <install [interval_sec]|uninstall|status>"
     exit 1
     ;;
 esac
-

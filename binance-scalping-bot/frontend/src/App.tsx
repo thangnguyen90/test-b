@@ -11,6 +11,7 @@ type Health = {
 type Signal = {
   symbol: string
   side: 'LONG' | 'SHORT'
+  signal_source?: string
   win_probability: number
   predicted_entry_price: number
   stop_loss: number
@@ -111,6 +112,7 @@ type EmaLine = {
 type ScanSignalItem = {
   symbol: string
   side: 'LONG' | 'SHORT'
+  signal_source?: string
   win_probability: number
   predicted_entry_price: number
   stop_loss: number
@@ -210,6 +212,7 @@ type LiquidationOverviewItem = {
   open_interest_notional: number
   est_liq_zone_price: number
   est_liq_zone_value: number
+  signal_source?: string | null
   signal_side?: 'LONG' | 'SHORT' | null
   signal_win_probability?: number | null
   signal_entry_price?: number | null
@@ -433,6 +436,20 @@ function calcEMA(series: number[], period: number): Array<number | null> {
 
 function canonicalSymbol(symbol: string): string {
   return symbol.replace(':USDT', '').trim().toUpperCase()
+}
+
+function formatSignalSource(source?: string | null): string {
+  const normalized = (source ?? '').trim().toUpperCase()
+  if (!normalized) return 'ML'
+  if (normalized === 'LIQ' || normalized === 'LIQ_EMA99') return 'LIQ_EMA99'
+  if (normalized === 'ML') return 'ML'
+  return normalized
+}
+
+function tradeModelSource(entryType?: string | null): 'ML' | 'LIQ_EMA99' {
+  const normalized = (entryType ?? '').trim().toUpperCase()
+  if (normalized === 'LIQ_EMA99') return 'LIQ_EMA99'
+  return 'ML'
 }
 
 function calcPnlPct(
@@ -1801,6 +1818,7 @@ function App() {
                     <th>uPnL (USDT)</th>
                     <th>uPnL% (Margin)</th>
                     <th>Type</th>
+                    <th>Model</th>
                     <th>Side</th>
                     <th>Entry</th>
                     <th>Mark (WS)</th>
@@ -1842,7 +1860,16 @@ function App() {
                           </span>
                         ) : '-'}
                       </td>
-                      <td>{row.entry_type ?? '-'}</td>
+                      <td>
+                        <span className={`badge ${row.entry_type === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
+                          {row.entry_type ?? '-'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`badge ${tradeModelSource(row.entry_type) === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
+                          {tradeModelSource(row.entry_type)}
+                        </span>
+                      </td>
                       <td>{row.side}</td>
                       <td>{row.entry_price}</td>
                       <td>{typeof mark === 'number' ? mark : '-'}</td>
@@ -1885,6 +1912,7 @@ function App() {
                     <th>PnL (USDT)</th>
                     <th>PnL% (Margin)</th>
                     <th>Type</th>
+                    <th>Model</th>
                     <th>Side</th>
                     <th>Status</th>
                     <th>Entry</th>
@@ -1920,7 +1948,16 @@ function App() {
                             </span>
                           ) : '-'}
                         </td>
-                        <td>{row.entry_type ?? '-'}</td>
+                        <td>
+                          <span className={`badge ${row.entry_type === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
+                            {row.entry_type ?? '-'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={`badge ${tradeModelSource(row.entry_type) === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
+                            {tradeModelSource(row.entry_type)}
+                          </span>
+                        </td>
                         <td>{row.side}</td>
                         <td>{row.status}</td>
                         <td>{row.entry_price}</td>
@@ -2129,7 +2166,10 @@ function App() {
         <article className="card">
           <header className="card-header">
             <h2>Latest ML Signal</h2>
-            <span className="badge neutral">{signal?.side ?? 'N/A'}</span>
+            <div className="scan-actions">
+              <span className="badge neutral">{signal?.side ?? 'N/A'}</span>
+              <span className="badge neutral">Source: {formatSignalSource(signal?.signal_source)}</span>
+            </div>
           </header>
           <div className="content">
             <p>
@@ -2239,6 +2279,7 @@ function App() {
                 <tr>
                   <th>Symbol</th>
                   <th>Side</th>
+                  <th>Source</th>
                   <th>Win%</th>
                   <th>Signal Margin Ratio%</th>
                   <th>Entry</th>
@@ -2254,6 +2295,9 @@ function App() {
                       {renderSymbolJump(item.symbol, item.predicted_entry_price)}
                     </td>
                     <td>{item.side}</td>
+                    <td>
+                      <span className="badge neutral">{formatSignalSource(item.signal_source)}</span>
+                    </td>
                     <td>{(item.win_probability * 100).toFixed(2)}</td>
                     <td>
                       <span className="pnl-neg">
@@ -2444,6 +2488,7 @@ function App() {
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('long_short_ratio')}>L/S Ratio</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('funding_rate')}>Funding Rate</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('open_interest_notional')}>OI Notional</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_source')}>Sig Src</button></th>
                   <th>ML Side</th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_win_probability')}>Win%</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_entry_price')}>Entry</button></th>
@@ -2468,6 +2513,9 @@ function App() {
                     <td>{row.long_short_ratio.toFixed(3)}</td>
                     <td>{(row.funding_rate * 100).toFixed(4)}%</td>
                     <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
+                    <td>
+                      <span className="badge neutral">{formatSignalSource(row.signal_source)}</span>
+                    </td>
                     <td>
                       {mlSide ? (
                         <span className={mlSide === 'LONG' ? 'pill-long' : 'pill-short'}>{mlSide}</span>

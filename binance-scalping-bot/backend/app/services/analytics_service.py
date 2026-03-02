@@ -262,6 +262,7 @@ class AnalyticsService:
                         mark_price=float(row["mark_price"]),
                     )
                     row["signal_side"] = signal.side
+                    row["signal_source"] = "ML"
                     row["signal_win_probability"] = signal.win_probability
                     row["signal_entry_price"] = signal.predicted_entry_price
                     row["signal_take_profit"] = signal.take_profit
@@ -273,6 +274,7 @@ class AnalyticsService:
                     )
                 except Exception:
                     row["signal_side"] = None
+                    row["signal_source"] = None
                     row["signal_win_probability"] = None
                     row["signal_entry_price"] = None
                     row["signal_take_profit"] = None

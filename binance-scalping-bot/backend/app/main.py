@@ -14,7 +14,7 @@ from app.api.paper_trades import router as paper_trades_router
 from app.api.signals import get_scan_snapshot
 from app.api.signals import router as signals_router
 from app.core.config import settings
-from app.deps import auto_trainer, ml_predictor, price_stream, ws_manager
+from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor, price_stream, ws_manager
 from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
@@ -57,6 +57,7 @@ async def on_startup() -> None:
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
                 predictor=ml_predictor,
+                liquid_predictor=liquid_ml_predictor,
                 price_stream=price_stream,
                 min_win_probability=settings.paper_trade_min_win_probability,
                 quantity=settings.paper_trade_quantity,
@@ -76,6 +77,12 @@ async def on_startup() -> None:
                 max_hold_minutes=settings.paper_trade_max_hold_minutes,
                 disable_sl=settings.paper_trade_disable_sl,
                 move_sl_to_entry_pnl_pct=settings.paper_trade_move_sl_to_entry_pnl_pct,
+                move_sl_lock_pnl_pct=settings.paper_trade_move_sl_lock_pnl_pct,
+                liquid_enabled=settings.liquid_ml_enabled,
+                liquid_min_win_probability=settings.liquid_ml_min_win,
+                liquid_top_vol_days=settings.liquid_ml_top_vol_days,
+                liquid_max_symbols=settings.liquid_ml_max_symbols,
+                liquid_entry_tolerance_pct=settings.liquid_ml_touch_tolerance_pct,
             )
             await paper_trade_engine.start()
         except Exception:

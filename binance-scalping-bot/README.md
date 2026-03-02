@@ -59,10 +59,22 @@ curl -X POST http://127.0.0.1:8000/api/v1/ml/train \
 - Chọn endpoint `POST /api/v1/ml/train`
 - Bấm `Try it out` -> `Execute`
 
+### Train model riêng cho liquid + EMA99 (Top Volatility)
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ml/liquid/train \
+  -H 'Content-Type: application/json' \
+  -d '{"limit": 900, "horizon": 16, "rr_ratio": 1.5, "top_vol_days": 1, "max_symbols": 30}'
+```
+
 ## 5) Kiểm tra trạng thái model
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/ml/status
+```
+
+```bash
+curl http://127.0.0.1:8000/api/v1/ml/liquid/status
 ```
 
 Kỳ vọng:
@@ -158,6 +170,7 @@ PORT=8000
 ALLOWED_ORIGINS=http://localhost:5173
 SQLITE_DB_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_data/trading_bot.db
 ML_MODEL_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_data/rf_model.joblib
+LIQUID_ML_MODEL_PATH=/Users/thang/Desktop/TEST/binance-scalping-bot/backend/backend_data/liquid_rf_model.joblib
 TRAINING_SYMBOLS=SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT
 ML_FEEDBACK_TRAIN_LIMIT=1200
 AUTO_TRAIN_ENABLED=true
@@ -167,6 +180,14 @@ AUTO_TRAIN_LIMIT=800
 AUTO_TRAIN_HORIZON=4
 AUTO_TRAIN_RR_RATIO=1.5
 ML_USE_LIQUIDATION_FEATURES=true
+LIQUID_ML_ENABLED=true
+LIQUID_ML_MIN_WIN=0.68
+LIQUID_ML_TOP_VOL_DAYS=1
+LIQUID_ML_MAX_SYMBOLS=30
+LIQUID_ML_TOUCH_TOLERANCE_PCT=0.004
+LIQUID_ML_TRAIN_LIMIT=900
+LIQUID_ML_TRAIN_HORIZON=16
+LIQUID_ML_TRAIN_RR_RATIO=1.5
 WS_PING_INTERVAL_SEC=1.0
 MYSQL_ENABLED=false
 MYSQL_HOST=127.0.0.1
@@ -193,6 +214,7 @@ PAPER_TRADE_MAX_RISK_PCT=12
 PAPER_TRADE_MAX_HOLD_MINUTES=120
 PAPER_TRADE_DISABLE_SL=false
 PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
+PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 ```
 
 - `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
@@ -206,9 +228,13 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
 - `PAPER_TRADE_SL_ATR_MULTIPLIER` dùng ATR để đặt ngưỡng SL tối thiểu theo biến động (0 = tắt ATR).
 - `PAPER_TRADE_MAX_TP_PCT` giới hạn TP tối đa theo `% giá vào` (mặc định 15%).  
 : ví dụ `15` nghĩa là TP không vượt quá `entry +/- 15%`.
+- `PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT` là ngưỡng kích hoạt dời SL theo `%PnL margin` (ví dụ 15%).
+- `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
 - `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
 : ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
 - `ML_USE_LIQUIDATION_FEATURES=true` bật thêm nhóm feature liquidation proxy (wick + volume spike trên nến 5m) khi train ML.
+- `LIQUID_ML_ENABLED=true` bật model riêng cho liquid + EMA99 (15m/1h), chạy trên danh sách top volatility coin.
+- Entry của model liquid neo theo EMA99 gần nhất (15m hoặc 1h), sau đó vẫn đi qua normalize TP/SL và rule risk chung trước khi mở lệnh.
 - Paper trade sẽ lưu thêm `entry_type` để phân biệt:
 : `MARKET` (mở tay bằng nút Market Open) và `LIMIT` (auto khớp theo entry tín hiệu).
 - Màn hình Paper Trade Stats có thêm `Market Win Rate` và `Limit Win Rate` để so sánh hiệu quả.
@@ -296,11 +322,11 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 - Log file:
   - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/backend.log`
 
-### Cài launchd restart mỗi 6 giờ (macOS)
+### Cài auto restart mỗi 2 giờ (macOS - launchd)
 
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot
-./scripts/install_backend_launchd.sh install
+./scripts/install_backend_launchd.sh install 7200
 ./scripts/install_backend_launchd.sh status
 ```
 
@@ -308,9 +334,23 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 - File plist:
   - `~/Library/LaunchAgents/com.thang.binance-scalping-bot.backend-restart.plist`
 - Launchd gọi `./scripts/backend_service.sh restart` nên cũng tự bỏ qua restart khi đang train.
+- Có thể đổi interval: `./scripts/install_backend_launchd.sh install <seconds>`
 - Log launchd:
   - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/launchd.out.log`
   - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/launchd.err.log`
+
+### Cài auto restart mỗi 2 giờ (Linux/WSL - cron)
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/install_backend_cron.sh install 2
+./scripts/install_backend_cron.sh status
+```
+
+- Cron gọi `./scripts/backend_service.sh restart` nên cũng tự bỏ qua restart khi đang train.
+- Có thể đổi interval: `./scripts/install_backend_cron.sh install <hours>`
+- Log cron:
+  - `/Users/thang/Desktop/TEST/binance-scalping-bot/backend/.runtime/cron_restart.log`
 
 ### Kiểm tra trạng thái train (để biết có bị skip restart hay không)
 
@@ -327,4 +367,11 @@ curl -s http://127.0.0.1:8000/api/v1/ml/status
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/install_backend_launchd.sh uninstall
+```
+
+### Gỡ cron (Linux/WSL)
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/install_backend_cron.sh uninstall
 ```

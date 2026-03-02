@@ -6,7 +6,9 @@ import time
 from typing import Any
 
 from app.api.signals import get_scan_snapshot
+from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.risk_manager import (
@@ -24,6 +26,7 @@ class PaperTradingEngine:
         self,
         repo: MySQLTradeRepository,
         predictor: MLPredictor,
+        liquid_predictor: LiquidationMLPredictor | None = None,
         price_stream: Any | None = None,
         min_win_probability: float = 0.75,
         quantity: float = 0.01,
@@ -43,9 +46,16 @@ class PaperTradingEngine:
         max_hold_minutes: int = 120,
         disable_sl: bool = False,
         move_sl_to_entry_pnl_pct: float = 15.0,
+        move_sl_lock_pnl_pct: float = 10.0,
+        liquid_enabled: bool = False,
+        liquid_min_win_probability: float = 0.68,
+        liquid_top_vol_days: int = 1,
+        liquid_max_symbols: int = 30,
+        liquid_entry_tolerance_pct: float = 0.003,
     ) -> None:
         self.repo = repo
         self.predictor = predictor
+        self.liquid_predictor = liquid_predictor
         self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
         self.min_win_probability = min_win_probability
@@ -66,10 +76,17 @@ class PaperTradingEngine:
         self.max_hold_minutes = max(1, max_hold_minutes)
         self.disable_sl = disable_sl
         self.move_sl_to_entry_pnl_pct = max(0.0, move_sl_to_entry_pnl_pct)
+        self.move_sl_lock_pnl_pct = max(0.0, min(float(move_sl_lock_pnl_pct), self.move_sl_to_entry_pnl_pct))
+        self.liquid_enabled = liquid_enabled
+        self.liquid_min_win_probability = max(0.0, liquid_min_win_probability)
+        self.liquid_top_vol_days = max(1, min(7, int(liquid_top_vol_days)))
+        self.liquid_max_symbols = max(5, min(80, int(liquid_max_symbols)))
+        self.liquid_entry_tolerance_pct = max(0.0008, float(liquid_entry_tolerance_pct))
         self._task: asyncio.Task | None = None
         self._running = False
         self._vn_tz = timezone(timedelta(hours=7))
         self._atr_cache: dict[str, tuple[float, float]] = {}
+        self._top_vol_cache: tuple[float, list[str]] | None = None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -99,8 +116,13 @@ class PaperTradingEngine:
         snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
         signals = snapshot.get("signals", [])
         open_trades = self.repo.list_open_trades()
+        top_vol_symbols: list[str] = []
+        if self.liquid_enabled and self.liquid_predictor is not None:
+            top_vol_symbols = await asyncio.to_thread(self._load_top_volatility_symbols)
 
         price_symbols = {str(item.get("symbol")) for item in signals if item.get("symbol")}
+        for symbol in top_vol_symbols:
+            price_symbols.add(symbol)
         for trade in open_trades:
             symbol = str(trade.get("symbol") or "")
             if symbol:
@@ -192,6 +214,93 @@ class PaperTradingEngine:
                 }
             )
 
+        # 1b) Separate liquidation+EMA99 model on top volatility symbols.
+        if self.liquid_enabled and self.liquid_predictor is not None:
+            for symbol in top_vol_symbols:
+                market_price = market_prices.get(symbol)
+                if market_price is None:
+                    market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                if market_price is None:
+                    continue
+
+                try:
+                    liq_signal = await asyncio.to_thread(
+                        self.liquid_predictor.predict,
+                        symbol,
+                        float(market_price),
+                    )
+                except Exception:
+                    continue
+
+                raw_prob = float(liq_signal.win_probability)
+                if raw_prob < self.liquid_min_win_probability:
+                    continue
+                side = str(liq_signal.side)
+                if self.repo.has_open_trade(symbol=symbol, side=side):
+                    continue
+
+                entry = float(liq_signal.predicted_entry_price)
+                tp = float(liq_signal.take_profit)
+                sl = float(liq_signal.stop_loss)
+                if entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
+
+                near_entry = abs(float(market_price) - entry) / entry <= self.liquid_entry_tolerance_pct
+                if not (near_entry or bool(liq_signal.near_ema)):
+                    continue
+
+                hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
+                effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
+                if effective_prob < self.min_win_probability:
+                    continue
+
+                normalized_tp, normalized_sl = normalize_tp_sl(
+                    side=side,
+                    entry_price=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    min_sl_pct=max(
+                        self.min_sl_pct,
+                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+                    ),
+                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+                    atr_value=await self._resolve_symbol_atr(symbol),
+                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    min_rr=self.min_rr,
+                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                )
+                risk_pct = calc_estimated_margin_ratio_pct(
+                    leverage=self.leverage,
+                    maint_margin_rate=self.maint_margin_rate,
+                )
+                if risk_pct > self.max_risk_pct:
+                    continue
+
+                quantity = calc_quantity_from_order_usdt(
+                    entry_price=entry,
+                    order_usdt=self.order_usdt,
+                    fallback_quantity=self.quantity,
+                )
+                margin_usdt = self.margin_usdt
+                if margin_usdt <= 0:
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+
+                self.repo.create_open_trade(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_type": "LIQ_EMA99",
+                        "signal_win_probability": raw_prob,
+                        "effective_win_probability": effective_prob,
+                        "entry_price": entry,
+                        "take_profit": normalized_tp,
+                        "stop_loss": normalized_sl,
+                        "quantity": quantity,
+                        "margin_usdt": margin_usdt,
+                        "leverage": self.leverage,
+                    }
+                )
+
         # 2) Manage open trades: close on TP, otherwise apply timeout policy.
         for trade in open_trades:
             symbol = str(trade["symbol"])
@@ -208,12 +317,19 @@ class PaperTradingEngine:
             sl = float(trade["stop_loss"])
             qty = float(trade["quantity"])
 
-            # Move SL to breakeven once unrealized ROI on margin is above threshold.
+            # Once ROI reaches trigger, move SL to a locked-profit level.
             pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
-            if pnl_pct >= self.move_sl_to_entry_pnl_pct:
-                if abs(sl - entry) > max(1e-9, abs(entry) * 1e-8):
-                    self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=entry)
-                    sl = entry
+            if not self.disable_sl and pnl_pct >= self.move_sl_to_entry_pnl_pct:
+                locked_sl = self._calc_locked_profit_sl(
+                    side=side,
+                    entry=entry,
+                    mark_price=price,
+                    leverage=int(trade["leverage"]),
+                )
+                if locked_sl is not None:
+                    if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
+                        self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
+                        sl = locked_sl
 
             # SL has higher priority than TP per user requirement.
             sl_hit = False
@@ -318,6 +434,46 @@ class PaperTradingEngine:
                 out[symbol] = float(price)
         return out
 
+    def _load_top_volatility_symbols(self) -> list[str]:
+        now = time.time()
+        if self._top_vol_cache is not None and (now - self._top_vol_cache[0]) <= 300:
+            return list(self._top_vol_cache[1])
+        try:
+            markets = self.market_client.load_markets()
+            all_symbols: list[str] = []
+            for market in markets.values():
+                if not market.get("active", True):
+                    continue
+                if market.get("swap") is not True:
+                    continue
+                if market.get("settle") != "USDT":
+                    continue
+                sym = market.get("symbol")
+                if sym:
+                    all_symbols.append(str(sym))
+            all_symbols = sorted(set(all_symbols))
+            tickers = self.market_client.fetch_tickers(all_symbols[:220])
+            ranked: list[tuple[str, float]] = []
+            for symbol in all_symbols:
+                ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+                if not isinstance(ticker, dict):
+                    continue
+                pct = ticker.get("percentage")
+                if pct is None:
+                    pct = ticker.get("change")
+                try:
+                    ranked.append((symbol, abs(float(pct))))
+                except Exception:
+                    continue
+            ranked.sort(key=lambda x: x[1], reverse=True)
+            symbols = [sym for sym, _ in ranked[: self.liquid_max_symbols]]
+            self._top_vol_cache = (now, symbols)
+            return symbols
+        except Exception:
+            if self._top_vol_cache is not None:
+                return list(self._top_vol_cache[1])
+            return []
+
     async def _resolve_stream_prices(self, symbols: list[str]) -> dict[str, float]:
         if self.price_stream is None or not symbols:
             return {}
@@ -389,6 +545,22 @@ class PaperTradingEngine:
             return 0.0
         move = (mark_price - entry) / entry if side == "LONG" else (entry - mark_price) / entry
         return move * leverage * 100
+
+    def _calc_locked_profit_sl(self, side: str, entry: float, mark_price: float, leverage: int) -> float | None:
+        if entry <= 0 or leverage <= 0:
+            return None
+        if self.move_sl_lock_pnl_pct <= 0:
+            return entry
+
+        lock_move_pct = (self.move_sl_lock_pnl_pct / 100.0) / float(leverage)
+        if side == "LONG":
+            target = entry * (1.0 + lock_move_pct)
+            # Keep SL slightly below mark to avoid accidental instant close on update tick.
+            return min(target, mark_price * 0.99999)
+
+        target = entry * (1.0 - lock_move_pct)
+        # Keep SL slightly above mark to avoid accidental instant close on update tick.
+        return max(target, mark_price * 1.00001)
 
     def _is_expired(self, opened_at: Any) -> bool:
         if opened_at is None:
