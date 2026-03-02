@@ -147,6 +147,8 @@ type PaperTrade = {
   close_reason?: string | null
   pnl?: number | null
   pnl_pct?: number | null
+  mae_pct?: number | null
+  mfe_pct?: number | null
   margin_usdt?: number | null
   result?: number | null
 }
@@ -1817,6 +1819,8 @@ function App() {
                     <th>Symbol</th>
                     <th>uPnL (USDT)</th>
                     <th>uPnL% (Margin)</th>
+                    <th>MAE%</th>
+                    <th>MFE%</th>
                     <th>Type</th>
                     <th>Model</th>
                     <th>Side</th>
@@ -1857,6 +1861,20 @@ function App() {
                         {typeof upnlPct === 'number' ? (
                           <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                             {`${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td>
+                        {typeof row.mae_pct === 'number' ? (
+                          <span className={row.mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${row.mae_pct >= 0 ? '+' : ''}${row.mae_pct.toFixed(2)}%`}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td>
+                        {typeof row.mfe_pct === 'number' ? (
+                          <span className={row.mfe_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${row.mfe_pct >= 0 ? '+' : ''}${row.mfe_pct.toFixed(2)}%`}
                           </span>
                         ) : '-'}
                       </td>
@@ -1911,6 +1929,8 @@ function App() {
                     <th>Symbol</th>
                     <th>PnL (USDT)</th>
                     <th>PnL% (Margin)</th>
+                    <th>MAE%</th>
+                    <th>MFE%</th>
                     <th>Type</th>
                     <th>Model</th>
                     <th>Side</th>
@@ -1945,6 +1965,20 @@ function App() {
                           {typeof closePnlPct === 'number' ? (
                             <span className={closePnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                               {`${closePnlPct >= 0 ? '+' : ''}${closePnlPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.mae_pct === 'number' ? (
+                            <span className={row.mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.mae_pct >= 0 ? '+' : ''}${row.mae_pct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.mfe_pct === 'number' ? (
+                            <span className={row.mfe_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.mfe_pct >= 0 ? '+' : ''}${row.mfe_pct.toFixed(2)}%`}
                             </span>
                           ) : '-'}
                         </td>
