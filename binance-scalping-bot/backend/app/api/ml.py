@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from app.core.config import settings
-from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor
+from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor, ml_test_predictor
 from app.models.ml import (
     LiquidModelStatus,
     LiquidTrainRequest,
@@ -23,6 +23,12 @@ def get_model_status() -> ModelStatus:
     return ModelStatus(**data)
 
 
+@router.get("/test/status", response_model=ModelStatus)
+def get_test_model_status() -> ModelStatus:
+    data = ml_test_predictor.status()
+    return ModelStatus(**data)
+
+
 @router.post("/train", response_model=TrainResponse)
 def train_model(req: TrainRequest) -> TrainResponse:
     result = ml_predictor.train(
@@ -30,6 +36,18 @@ def train_model(req: TrainRequest) -> TrainResponse:
         horizon=req.horizon,
         rr_ratio=req.rr_ratio,
         symbols=settings.training_symbols,
+    )
+    return TrainResponse(**result)
+
+
+@router.post("/test/train", response_model=TrainResponse)
+def train_test_model(req: TrainRequest) -> TrainResponse:
+    result = ml_test_predictor.train(
+        limit=req.limit,
+        horizon=req.horizon,
+        rr_ratio=req.rr_ratio,
+        symbols=settings.training_symbols,
+        trigger="manual_test",
     )
     return TrainResponse(**result)
 

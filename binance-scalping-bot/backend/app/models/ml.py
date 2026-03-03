@@ -81,5 +81,7 @@ class LiquidModelStatus(BaseModel):
     accuracy: float | None
     roc_auc: float | None
     touch_tolerance_pct: float
+    short_zone_min_score: float = 0.0
+    short_zone_touch_multiplier: float = 1.0
     rr_ratio: float
     last_near_ema_samples: int = 0

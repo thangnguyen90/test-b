@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
+import math
 import time
 from typing import Any
 
-from app.api.signals import get_scan_snapshot
+from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
 from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
@@ -26,6 +28,7 @@ class PaperTradingEngine:
         self,
         repo: MySQLTradeRepository,
         predictor: MLPredictor,
+        predictor_test: MLPredictor | None = None,
         liquid_predictor: LiquidationMLPredictor | None = None,
         price_stream: Any | None = None,
         min_win_probability: float = 0.75,
@@ -34,6 +37,7 @@ class PaperTradingEngine:
         margin_usdt: float = 0.0,
         leverage: int = 5,
         poll_interval_sec: float = 6.0,
+        stream_max_stale_sec: float = 5.0,
         min_sl_pct: float = 0.004,
         min_sl_loss_pct: float = 5.0,
         sl_extra_buffer_pct: float = 0.0,
@@ -52,9 +56,29 @@ class PaperTradingEngine:
         liquid_top_vol_days: int = 1,
         liquid_max_symbols: int = 30,
         liquid_entry_tolerance_pct: float = 0.003,
+        btc_filter_enabled: bool = True,
+        btc_filter_timeframe: str = "15m",
+        btc_filter_cache_sec: float = 20.0,
+        btc_filter_min_confidence: float = 0.55,
+        btc_filter_block_countertrend: bool = True,
+        btc_filter_countertrend_min_win: float = 0.9,
+        btc_shock_pause_enabled: bool = True,
+        btc_shock_threshold_pct: float = 1.2,
+        btc_shock_cooldown_minutes: int = 30,
+        btc_profit_lock_enabled: bool = True,
+        btc_profit_lock_min_confidence: float = 0.6,
+        btc_follow_min_corr: float = 0.45,
+        btc_follow_min_beta: float = 0.2,
+        btc_follow_lookback: int = 120,
+        btc_follow_cache_sec: float = 300.0,
+        test_ml_enabled: bool = False,
+        test_ml_min_win_probability: float = 0.75,
+        test_ml_max_symbols: int = 80,
+        test_ml_max_orders_per_cycle: int = 2,
     ) -> None:
         self.repo = repo
         self.predictor = predictor
+        self.predictor_test = predictor_test
         self.liquid_predictor = liquid_predictor
         self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
@@ -64,6 +88,7 @@ class PaperTradingEngine:
         self.margin_usdt = max(0.0, margin_usdt)
         self.leverage = leverage
         self.poll_interval_sec = max(1.0, poll_interval_sec)
+        self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
         self.min_sl_pct = min_sl_pct
         self.min_sl_loss_pct = max(0.0, min_sl_loss_pct)
         self.sl_extra_buffer_pct = max(0.0, sl_extra_buffer_pct)
@@ -82,11 +107,34 @@ class PaperTradingEngine:
         self.liquid_top_vol_days = max(1, min(7, int(liquid_top_vol_days)))
         self.liquid_max_symbols = max(5, min(80, int(liquid_max_symbols)))
         self.liquid_entry_tolerance_pct = max(0.0008, float(liquid_entry_tolerance_pct))
+        self.btc_filter_enabled = btc_filter_enabled
+        self.btc_filter_timeframe = (btc_filter_timeframe or "15m").strip()
+        self.btc_filter_cache_sec = max(5.0, float(btc_filter_cache_sec))
+        self.btc_filter_min_confidence = max(0.5, min(float(btc_filter_min_confidence), 0.99))
+        self.btc_filter_block_countertrend = btc_filter_block_countertrend
+        self.btc_filter_countertrend_min_win = max(0.5, min(float(btc_filter_countertrend_min_win), 0.99))
+        self.btc_shock_pause_enabled = btc_shock_pause_enabled
+        self.btc_shock_threshold_pct = max(0.2, float(btc_shock_threshold_pct))
+        self.btc_shock_cooldown_minutes = max(1, int(btc_shock_cooldown_minutes))
+        self.btc_profit_lock_enabled = bool(btc_profit_lock_enabled)
+        self.btc_profit_lock_min_confidence = max(0.5, min(float(btc_profit_lock_min_confidence), 0.99))
+        self.btc_follow_min_corr = max(0.0, min(float(btc_follow_min_corr), 0.99))
+        self.btc_follow_min_beta = max(0.0, float(btc_follow_min_beta))
+        self.btc_follow_lookback = max(60, min(500, int(btc_follow_lookback)))
+        self.btc_follow_cache_sec = max(30.0, float(btc_follow_cache_sec))
+        self.test_ml_enabled = bool(test_ml_enabled)
+        self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
+        self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
+        self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
         self._task: asyncio.Task | None = None
         self._running = False
         self._vn_tz = timezone(timedelta(hours=7))
         self._atr_cache: dict[str, tuple[float, float]] = {}
         self._top_vol_cache: tuple[float, list[str]] | None = None
+        self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
+        self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
+        self._open_pause_until_ts: float = 0.0
+        self._open_pause_reason: str | None = None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -116,11 +164,21 @@ class PaperTradingEngine:
         snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
         signals = snapshot.get("signals", [])
         open_trades = self.repo.list_open_trades()
+        test_symbols: list[str] = []
+        if self.test_ml_enabled and self.predictor_test is not None:
+            test_symbols = await asyncio.to_thread(get_cached_symbols_snapshot, self.test_ml_max_symbols)
+            if not test_symbols:
+                # Fallback to symbols present in current scan response if cache is empty.
+                test_symbols = [str(item.get("symbol")) for item in signals if item.get("symbol")]
+            if len(test_symbols) > self.test_ml_max_symbols:
+                test_symbols = test_symbols[: self.test_ml_max_symbols]
         top_vol_symbols: list[str] = []
         if self.liquid_enabled and self.liquid_predictor is not None:
             top_vol_symbols = await asyncio.to_thread(self._load_top_volatility_symbols)
 
         price_symbols = {str(item.get("symbol")) for item in signals if item.get("symbol")}
+        for symbol in test_symbols:
+            price_symbols.add(symbol)
         for symbol in top_vol_symbols:
             price_symbols.add(symbol)
         for trade in open_trades:
@@ -132,128 +190,45 @@ class PaperTradingEngine:
         if stream_prices:
             # Prefer websocket stream cache for realtime TP/SL checks.
             market_prices.update(stream_prices)
+        btc_guard = await asyncio.to_thread(self._resolve_btc_trend_guard)
+        self._apply_btc_shock_pause(btc_guard)
+        open_paused = self._is_open_paused()
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
-        for item in signals:
-            raw_prob = float(item.get("win_probability") or 0.0)
-            if raw_prob < self.min_win_probability:
-                continue
+        if not open_paused:
+            for item in signals:
+                raw_prob = float(item.get("win_probability") or 0.0)
+                if raw_prob < self.min_win_probability:
+                    continue
 
-            symbol = str(item.get("symbol"))
-            side = str(item.get("side"))
-            if self.repo.has_open_trade(symbol=symbol, side=side):
-                continue
+                symbol = str(item.get("symbol"))
+                side = str(item.get("side"))
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+                    continue
 
-            entry = float(item.get("predicted_entry_price") or 0.0)
-            tp = float(item.get("take_profit") or 0.0)
-            sl = float(item.get("stop_loss") or 0.0)
-            if entry <= 0 or tp <= 0 or sl <= 0:
-                continue
+                entry = float(item.get("predicted_entry_price") or 0.0)
+                tp = float(item.get("take_profit") or 0.0)
+                sl = float(item.get("stop_loss") or 0.0)
+                if entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
 
-            market_price = market_prices.get(symbol)
-            if market_price is None:
-                market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
-            if market_price is None:
-                continue
-
-            # Blend model signal with realized historical accuracy for this symbol.
-            hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
-            effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
-            if effective_prob < self.min_win_probability:
-                continue
-
-            # Trigger condition: market touches/gets through entry.
-            touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
-            if not touched:
-                continue
-
-            normalized_tp, normalized_sl = normalize_tp_sl(
-                side=side,
-                entry_price=entry,
-                take_profit=tp,
-                stop_loss=sl,
-                min_sl_pct=max(
-                    self.min_sl_pct,
-                    calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
-                ),
-                sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                atr_value=await self._resolve_symbol_atr(symbol),
-                sl_atr_multiplier=self.sl_atr_multiplier,
-                min_rr=self.min_rr,
-                max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
-            )
-            risk_pct = calc_estimated_margin_ratio_pct(
-                leverage=self.leverage,
-                maint_margin_rate=self.maint_margin_rate,
-            )
-            if risk_pct > self.max_risk_pct:
-                continue
-
-            quantity = calc_quantity_from_order_usdt(
-                entry_price=entry,
-                order_usdt=self.order_usdt,
-                fallback_quantity=self.quantity,
-            )
-            margin_usdt = self.margin_usdt
-            if margin_usdt <= 0:
-                margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
-
-            self.repo.create_open_trade(
-                {
-                    "symbol": symbol,
-                    "side": side,
-                    "entry_type": "LIMIT",
-                    "signal_win_probability": raw_prob,
-                    "effective_win_probability": effective_prob,
-                    "entry_price": entry,
-                    "take_profit": normalized_tp,
-                    "stop_loss": normalized_sl,
-                    "quantity": quantity,
-                    "margin_usdt": margin_usdt,
-                    "leverage": self.leverage,
-                    "mae_pct": 0.0,
-                    "mfe_pct": 0.0,
-                }
-            )
-
-        # 1b) Separate liquidation+EMA99 model on top volatility symbols.
-        if self.liquid_enabled and self.liquid_predictor is not None:
-            for symbol in top_vol_symbols:
                 market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
                 if market_price is None:
                     continue
 
-                try:
-                    liq_signal = await asyncio.to_thread(
-                        self.liquid_predictor.predict,
-                        symbol,
-                        float(market_price),
-                    )
-                except Exception:
-                    continue
-
-                raw_prob = float(liq_signal.win_probability)
-                if raw_prob < self.liquid_min_win_probability:
-                    continue
-                side = str(liq_signal.side)
-                if self.repo.has_open_trade(symbol=symbol, side=side):
-                    continue
-
-                entry = float(liq_signal.predicted_entry_price)
-                tp = float(liq_signal.take_profit)
-                sl = float(liq_signal.stop_loss)
-                if entry <= 0 or tp <= 0 or sl <= 0:
-                    continue
-
-                near_entry = abs(float(market_price) - entry) / entry <= self.liquid_entry_tolerance_pct
-                if not (near_entry or bool(liq_signal.near_ema)):
-                    continue
-
+                # Blend model signal with realized historical accuracy for this symbol.
                 hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
                 if effective_prob < self.min_win_probability:
+                    continue
+                if not self._pass_btc_filter(side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                    continue
+
+                # Trigger condition: market touches/gets through entry.
+                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
+                if not touched:
                     continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
@@ -286,6 +261,201 @@ class PaperTradingEngine:
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+
+                self.repo.create_open_trade(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_type": "LIMIT",
+                        "signal_win_probability": raw_prob,
+                        "effective_win_probability": effective_prob,
+                        "entry_price": entry,
+                        "take_profit": normalized_tp,
+                        "stop_loss": normalized_sl,
+                        "liq_zone_price": float(item["liq_zone_price"]) if item.get("liq_zone_price") is not None else None,
+                        "liq_zone_score": None,
+                        "quantity": quantity,
+                        "margin_usdt": margin_usdt,
+                        "leverage": self.leverage,
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
+                        "feature_snapshot": feature_snapshot,
+                    }
+                )
+
+        # 1a) Optional test model: open separated ML_TEST orders for side-by-side comparison.
+        if (not open_paused) and self.test_ml_enabled and self.predictor_test is not None:
+            opened_test_orders = 0
+            for symbol in test_symbols:
+                if opened_test_orders >= self.test_ml_max_orders_per_cycle:
+                    break
+                market_price = market_prices.get(symbol)
+                if market_price is None:
+                    market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                if market_price is None:
+                    continue
+
+                try:
+                    test_signal = await asyncio.to_thread(
+                        self.predictor_test.predict,
+                        symbol,
+                        float(market_price),
+                    )
+                except Exception:
+                    continue
+
+                raw_prob = float(test_signal.win_probability)
+                if raw_prob < self.test_ml_min_win_probability:
+                    continue
+                side = str(test_signal.side)
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
+                    continue
+
+                entry = float(test_signal.predicted_entry_price)
+                tp = float(test_signal.take_profit)
+                sl = float(test_signal.stop_loss)
+                if entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
+
+                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
+                if not touched:
+                    continue
+                if not self._pass_btc_filter(side=side, effective_prob=raw_prob, btc_guard=btc_guard):
+                    continue
+
+                normalized_tp, normalized_sl = normalize_tp_sl(
+                    side=side,
+                    entry_price=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    min_sl_pct=max(
+                        self.min_sl_pct,
+                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+                    ),
+                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+                    atr_value=await self._resolve_symbol_atr(symbol),
+                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    min_rr=self.min_rr,
+                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                )
+                risk_pct = calc_estimated_margin_ratio_pct(
+                    leverage=self.leverage,
+                    maint_margin_rate=self.maint_margin_rate,
+                )
+                if risk_pct > self.max_risk_pct:
+                    continue
+
+                quantity = calc_quantity_from_order_usdt(
+                    entry_price=entry,
+                    order_usdt=self.order_usdt,
+                    fallback_quantity=self.quantity,
+                )
+                margin_usdt = self.margin_usdt
+                if margin_usdt <= 0:
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+
+                self.repo.create_open_trade(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_type": "ML_TEST",
+                        "signal_win_probability": raw_prob,
+                        "effective_win_probability": raw_prob,
+                        "entry_price": entry,
+                        "take_profit": normalized_tp,
+                        "stop_loss": normalized_sl,
+                        "quantity": quantity,
+                        "margin_usdt": margin_usdt,
+                        "leverage": self.leverage,
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
+                        "feature_snapshot": feature_snapshot,
+                    }
+                )
+                opened_test_orders += 1
+
+        # 1b) Separate liquidation+EMA99 model on top volatility symbols.
+        if (not open_paused) and self.liquid_enabled and self.liquid_predictor is not None:
+            for symbol in top_vol_symbols:
+                market_price = market_prices.get(symbol)
+                if market_price is None:
+                    market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                if market_price is None:
+                    continue
+
+                try:
+                    liq_signal = await asyncio.to_thread(
+                        self.liquid_predictor.predict,
+                        symbol,
+                        float(market_price),
+                    )
+                except Exception:
+                    continue
+
+                raw_prob = float(liq_signal.win_probability)
+                if raw_prob < self.liquid_min_win_probability:
+                    continue
+                side = str(liq_signal.side)
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                    continue
+
+                entry = float(liq_signal.predicted_entry_price)
+                tp = float(liq_signal.take_profit)
+                sl = float(liq_signal.stop_loss)
+                if entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
+
+                near_entry = abs(float(market_price) - entry) / entry <= self.liquid_entry_tolerance_pct
+                if side == "SHORT":
+                    short_zone_confirmed = bool(liq_signal.near_liq_zone) and (
+                        float(liq_signal.liq_zone_score) >= float(self.liquid_predictor.short_zone_min_score)
+                    )
+                    if not (near_entry or short_zone_confirmed):
+                        continue
+                else:
+                    if not (near_entry or bool(liq_signal.near_ema)):
+                        continue
+
+                hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
+                effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
+                if effective_prob < self.min_win_probability:
+                    continue
+                if not self._pass_btc_filter(side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                    continue
+
+                normalized_tp, normalized_sl = normalize_tp_sl(
+                    side=side,
+                    entry_price=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    min_sl_pct=max(
+                        self.min_sl_pct,
+                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+                    ),
+                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+                    atr_value=await self._resolve_symbol_atr(symbol),
+                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    min_rr=self.min_rr,
+                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                )
+                risk_pct = calc_estimated_margin_ratio_pct(
+                    leverage=self.leverage,
+                    maint_margin_rate=self.maint_margin_rate,
+                )
+                if risk_pct > self.max_risk_pct:
+                    continue
+
+                quantity = calc_quantity_from_order_usdt(
+                    entry_price=entry,
+                    order_usdt=self.order_usdt,
+                    fallback_quantity=self.quantity,
+                )
+                margin_usdt = self.margin_usdt
+                if margin_usdt <= 0:
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
 
                 self.repo.create_open_trade(
                     {
@@ -302,6 +472,7 @@ class PaperTradingEngine:
                         "leverage": self.leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
+                        "feature_snapshot": feature_snapshot,
                     }
                 )
 
@@ -320,6 +491,7 @@ class PaperTradingEngine:
             tp = float(trade["take_profit"])
             sl = float(trade["stop_loss"])
             qty = float(trade["quantity"])
+            pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
 
             # Once ROI reaches trigger, move SL to a locked-profit level.
             pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
@@ -345,12 +517,27 @@ class PaperTradingEngine:
                         self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
                         sl = locked_sl
 
+            # Lock profit when BTC trend flips against this position for BTC-following symbols only.
+            if self._should_close_profit_on_btc_trend(
+                symbol=symbol,
+                side=side,
+                pnl=pnl,
+                btc_guard=btc_guard,
+            ):
+                self.repo.close_trade(
+                    trade_id=int(trade["id"]),
+                    close_price=price,
+                    pnl=pnl,
+                    result=1,
+                    close_reason="BTC_TREND_PROFIT_LOCK",
+                )
+                continue
+
             # SL has higher priority than TP per user requirement.
             sl_hit = False
             if not self.disable_sl:
                 sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
             if sl_hit:
-                pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
                 close_reason = 1 if pnl >= 0 else 0
                 self.repo.close_trade(
                     trade_id=int(trade["id"]),
@@ -364,7 +551,6 @@ class PaperTradingEngine:
             # Immediate TP exit.
             tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
             if tp_hit:
-                pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
                 close_reason = 1 if pnl >= 0 else 0
                 self.repo.close_trade(
                     trade_id=int(trade["id"]),
@@ -379,7 +565,6 @@ class PaperTradingEngine:
             if not self._is_expired(trade.get("opened_at")):
                 continue
 
-            pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
             if pnl > 0:
                 close_reason = 1
                 self.repo.close_trade(
@@ -492,8 +677,16 @@ class PaperTradingEngine:
         if self.price_stream is None or not symbols:
             return {}
         try:
-            prices, _, _ = await self.price_stream.get_prices(symbols)
-            return {str(k): float(v) for k, v in prices.items() if v is not None}
+            prices, _, timestamps = await self.price_stream.get_prices(symbols)
+            out: dict[str, float] = {}
+            for key, value in prices.items():
+                if value is None:
+                    continue
+                ts = timestamps.get(str(key))
+                if not self._is_stream_timestamp_fresh(ts):
+                    continue
+                out[str(key)] = float(value)
+            return out
         except Exception:
             return {}
 
@@ -501,10 +694,27 @@ class PaperTradingEngine:
         if self.price_stream is None:
             return None
         try:
-            price, _ = await self.price_stream.get_price(symbol=symbol)
+            price, ts = await self.price_stream.get_price(symbol=symbol)
+            if not self._is_stream_timestamp_fresh(ts):
+                return None
             return float(price) if price is not None else None
         except Exception:
             return None
+
+    def _is_stream_timestamp_fresh(self, timestamp: str | None) -> bool:
+        if not timestamp:
+            return False
+        try:
+            text = str(timestamp).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+            return age <= self.stream_max_stale_sec
+        except Exception:
+            return False
 
     async def _resolve_symbol_atr(self, symbol: str) -> float | None:
         if self.sl_atr_multiplier <= 0:
@@ -529,6 +739,201 @@ class PaperTradingEngine:
         except Exception:
             return None
 
+    def _resolve_btc_trend_guard(self) -> dict[str, Any]:
+        neutral = {
+            "side": "NEUTRAL",
+            "confidence": 0.0,
+            "score": 0.0,
+            "timeframe": self.btc_filter_timeframe,
+            "shock": False,
+            "shock_move_pct": 0.0,
+            "shock_range_pct": 0.0,
+            "shock_metric_pct": 0.0,
+        }
+        if not self.btc_filter_enabled and not self.btc_shock_pause_enabled:
+            return neutral
+
+        now = time.time()
+        cached = self._btc_trend_cache
+        if cached is not None and (now - cached[0]) <= self.btc_filter_cache_sec:
+            return cached[1]
+
+        try:
+            rows = self.market_client.fetch_ohlcv(
+                symbol="BTC/USDT",
+                timeframe=self.btc_filter_timeframe,
+                limit=180,
+            )
+            closes = [float(row[4]) for row in rows if len(row) >= 5]
+            if len(closes) < 60:
+                payload = neutral
+            else:
+                ema_fast = self._ema_last(closes[-120:], period=21)
+                ema_slow = self._ema_last(closes[-160:], period=55)
+                base = max(1e-12, abs(closes[-6]))
+                slope_pct = ((closes[-1] - closes[-6]) / base) * 100.0
+
+                cross_component = self._clamp(((ema_fast - ema_slow) / max(1e-12, abs(ema_slow))) * 26.0, -1.0, 1.0)
+                slope_component = self._clamp(slope_pct / 0.7, -1.0, 1.0)
+                score = (cross_component * 0.65) + (slope_component * 0.35)
+                confidence = self._clamp(0.50 + (abs(score) * 0.50), 0.50, 0.99)
+                if score > 0.08:
+                    trend_side = "LONG"
+                elif score < -0.08:
+                    trend_side = "SHORT"
+                else:
+                    trend_side = "NEUTRAL"
+
+                last_row = rows[-1] if rows and len(rows[-1]) >= 5 else None
+                prev_close = closes[-2] if len(closes) >= 2 else closes[-1]
+                shock_move_pct = 0.0
+                shock_range_pct = 0.0
+                if last_row is not None:
+                    open_px = float(last_row[1])
+                    high_px = float(last_row[2])
+                    low_px = float(last_row[3])
+                    close_px = float(last_row[4])
+                    if abs(prev_close) > 1e-12:
+                        shock_move_pct = abs((close_px - prev_close) / prev_close) * 100.0
+                    if abs(open_px) > 1e-12:
+                        shock_range_pct = abs((high_px - low_px) / open_px) * 100.0
+                shock_metric_pct = max(shock_move_pct, shock_range_pct)
+                shock = self.btc_shock_pause_enabled and (shock_metric_pct >= self.btc_shock_threshold_pct)
+
+                payload = {
+                    "side": trend_side,
+                    "confidence": float(confidence),
+                    "score": float(score),
+                    "timeframe": self.btc_filter_timeframe,
+                    "shock": bool(shock),
+                    "shock_move_pct": float(shock_move_pct),
+                    "shock_range_pct": float(shock_range_pct),
+                    "shock_metric_pct": float(shock_metric_pct),
+                }
+        except Exception:
+            payload = cached[1] if cached is not None else neutral
+
+        self._btc_trend_cache = (now, payload)
+        return payload
+
+    def _pass_btc_filter(self, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
+        if not self.btc_filter_enabled:
+            return True
+        trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
+        try:
+            confidence = float(btc_guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if trend_side not in {"LONG", "SHORT"}:
+            return True
+        if confidence < self.btc_filter_min_confidence:
+            return True
+        if side.upper() == trend_side:
+            return True
+        if self.btc_filter_block_countertrend:
+            return False
+        return effective_prob >= self.btc_filter_countertrend_min_win
+
+    def _should_close_profit_on_btc_trend(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        pnl: float,
+        btc_guard: dict[str, Any],
+    ) -> bool:
+        if not self.btc_profit_lock_enabled:
+            return False
+        if pnl <= 0:
+            return False
+
+        trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
+        if trend_side not in {"LONG", "SHORT"}:
+            return False
+        if side.upper() == trend_side:
+            return False
+        try:
+            confidence = float(btc_guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if confidence < self.btc_profit_lock_min_confidence:
+            return False
+        return self._is_symbol_following_btc(symbol)
+
+    def _is_symbol_following_btc(self, symbol: str) -> bool:
+        normalized = str(symbol).strip()
+        if not normalized:
+            return False
+        if normalized.upper().startswith("BTC/USDT"):
+            return True
+
+        now = time.time()
+        cached = self._btc_follow_cache.get(normalized)
+        if cached is not None and (now - cached[0]) <= self.btc_follow_cache_sec:
+            return bool(cached[1])
+
+        follows = False
+        corr = 0.0
+        beta = 0.0
+        try:
+            sym_rows = self.market_client.fetch_ohlcv(
+                symbol=normalized,
+                timeframe=self.btc_filter_timeframe,
+                limit=self.btc_follow_lookback,
+            )
+            btc_rows = self.market_client.fetch_ohlcv(
+                symbol="BTC/USDT",
+                timeframe=self.btc_filter_timeframe,
+                limit=self.btc_follow_lookback,
+            )
+            sym_closes = [float(row[4]) for row in sym_rows if len(row) >= 5]
+            btc_closes = [float(row[4]) for row in btc_rows if len(row) >= 5]
+            sym_ret = self._pct_returns(sym_closes)
+            btc_ret = self._pct_returns(btc_closes)
+            n = min(len(sym_ret), len(btc_ret))
+            if n >= 30:
+                corr, beta = self._corr_beta(sym_ret[-n:], btc_ret[-n:])
+                follows = (corr >= self.btc_follow_min_corr) and (beta >= self.btc_follow_min_beta)
+        except Exception:
+            follows = False
+
+        self._btc_follow_cache[normalized] = (now, follows, corr, beta)
+        return follows
+
+    def _apply_btc_shock_pause(self, btc_guard: dict[str, Any]) -> None:
+        if not self.btc_shock_pause_enabled:
+            return
+        if not bool(btc_guard.get("shock")):
+            return
+        now = time.time()
+        pause_until = now + (self.btc_shock_cooldown_minutes * 60)
+        if pause_until > self._open_pause_until_ts:
+            self._open_pause_until_ts = pause_until
+            metric = float(btc_guard.get("shock_metric_pct") or 0.0)
+            self._open_pause_reason = f"BTC_SHOCK_{metric:.2f}%"
+
+    def _is_open_paused(self) -> bool:
+        now = time.time()
+        if now < self._open_pause_until_ts:
+            return True
+        self._open_pause_until_ts = 0.0
+        self._open_pause_reason = None
+        return False
+
+    @staticmethod
+    def _ema_last(values: list[float], period: int) -> float:
+        if not values:
+            return 0.0
+        alpha = 2.0 / (period + 1.0)
+        ema = float(values[0])
+        for value in values[1:]:
+            ema = (float(value) * alpha) + (ema * (1.0 - alpha))
+        return float(ema)
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
     @staticmethod
     def _extract_price_from_ticker(ticker: dict[str, Any]) -> float | None:
         price = ticker.get("last") or ticker.get("close")
@@ -545,6 +950,53 @@ class PaperTradingEngine:
         # Fill only when mark is near entry (avoid opening stale LIMIT entries far away).
         tolerance = entry * 0.0008
         return abs(market_price - entry) <= tolerance
+
+    @staticmethod
+    def _pct_returns(closes: list[float]) -> list[float]:
+        out: list[float] = []
+        for i in range(1, len(closes)):
+            prev = float(closes[i - 1])
+            cur = float(closes[i])
+            if abs(prev) <= 1e-12:
+                continue
+            out.append((cur - prev) / prev)
+        return out
+
+    @staticmethod
+    def _corr_beta(series_y: list[float], series_x: list[float]) -> tuple[float, float]:
+        n = min(len(series_y), len(series_x))
+        if n < 2:
+            return 0.0, 0.0
+        ys = [float(v) for v in series_y[-n:]]
+        xs = [float(v) for v in series_x[-n:]]
+
+        mean_y = sum(ys) / n
+        mean_x = sum(xs) / n
+        var_x = sum((x - mean_x) ** 2 for x in xs) / n
+        var_y = sum((y - mean_y) ** 2 for y in ys) / n
+        if var_x <= 1e-16 or var_y <= 1e-16:
+            return 0.0, 0.0
+
+        cov = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n)) / n
+        corr = cov / math.sqrt(var_x * var_y)
+        beta = cov / var_x
+        return float(corr), float(beta)
+
+    def _capture_feature_snapshot(self, symbol: str, side: str) -> dict[str, float] | None:
+        try:
+            row = self.predictor.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
+            if row is None:
+                return None
+            payload = {k: float(v) for k, v in row.to_dict().items()}
+            if side == "LONG":
+                payload["setup_side"] = 1.0
+            elif side == "SHORT":
+                payload["setup_side"] = 0.0
+            # Ensure serializable finite values only.
+            json.dumps(payload, allow_nan=False)
+            return payload
+        except Exception:
+            return None
 
     @staticmethod
     def _calc_pnl(side: str, entry: float, close_price: float, quantity: float) -> float:

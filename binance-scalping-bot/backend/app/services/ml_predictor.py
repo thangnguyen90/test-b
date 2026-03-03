@@ -36,11 +36,21 @@ class SignalResult:
 
 
 class MLPredictor:
-    def __init__(self, model_path: str, pipeline: DataPipeline | None = None) -> None:
+    def __init__(
+        self,
+        model_path: str,
+        pipeline: DataPipeline | None = None,
+        use_liquidation_features: bool | None = None,
+    ) -> None:
         self.model_path = Path(model_path)
         self.pipeline = pipeline or DataPipeline()
         self.model: RandomForestClassifier | None = None
-        self.preferred_feature_columns = FEATURE_COLUMNS if settings.ml_use_liquidation_features else BASE_FEATURE_COLUMNS
+        self.use_liquidation_features = (
+            settings.ml_use_liquidation_features
+            if use_liquidation_features is None
+            else bool(use_liquidation_features)
+        )
+        self.preferred_feature_columns = FEATURE_COLUMNS if self.use_liquidation_features else BASE_FEATURE_COLUMNS
         self.feature_columns = list(self.preferred_feature_columns)
         self.trained_at: datetime | None = None
         self.accuracy: float | None = None
@@ -276,7 +286,7 @@ class MLPredictor:
             "last_side_short_samples": self.last_side_short_samples,
             "last_side_balanced": self.last_side_balanced,
             "last_feedback_penalized_samples": self.last_feedback_penalized_samples,
-            "liquidation_features_enabled": settings.ml_use_liquidation_features,
+            "liquidation_features_enabled": self.use_liquidation_features,
             "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
         }
@@ -462,22 +472,30 @@ class MLPredictor:
                     label = 0
                     penalized_count += 1
 
-            if symbol not in symbol_cache:
-                try:
-                    symbol_cache[symbol] = self.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
-                except Exception:
-                    symbol_cache[symbol] = None
+            feature_snapshot = self._parse_feature_snapshot(row.get("feature_snapshot_json"))
+            if feature_snapshot is None:
+                if symbol not in symbol_cache:
+                    try:
+                        symbol_cache[symbol] = self.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
+                    except Exception:
+                        symbol_cache[symbol] = None
 
-            feature_row = symbol_cache[symbol]
-            if feature_row is None:
-                continue
+                feature_row = symbol_cache[symbol]
+                if feature_row is None:
+                    continue
+                sample_dict = feature_row.to_dict()
+            else:
+                sample_dict = dict(feature_snapshot)
 
-            sample = feature_row.copy()
             if side == "LONG":
-                sample["setup_side"] = 1.0
+                sample_dict["setup_side"] = 1.0
             elif side == "SHORT":
-                sample["setup_side"] = 0.0
-            feature_rows.append(sample[self.feature_columns].astype(float))
+                sample_dict["setup_side"] = 0.0
+
+            sample = self._coerce_feature_row(sample_dict)
+            if sample is None:
+                continue
+            feature_rows.append(sample)
             labels.append(label)
 
         if not feature_rows:
@@ -486,3 +504,49 @@ class MLPredictor:
         features = pd.DataFrame(feature_rows).reset_index(drop=True)
         labels_series = pd.Series(labels, dtype=int)
         return PreparedData(features=features, labels=labels_series), penalized_count
+
+    @staticmethod
+    def _parse_feature_snapshot(raw: object) -> dict[str, float] | None:
+        if raw is None:
+            return None
+        payload: object = raw
+        if isinstance(raw, (bytes, bytearray)):
+            payload = raw.decode("utf-8", errors="ignore")
+        if isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return None
+            try:
+                payload = json.loads(text)
+            except Exception:
+                return None
+        if not isinstance(payload, dict):
+            return None
+
+        out: dict[str, float] = {}
+        for key, value in payload.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                parsed = float(value)
+            except Exception:
+                continue
+            if not np.isfinite(parsed):
+                continue
+            out[key] = parsed
+        return out or None
+
+    def _coerce_feature_row(self, sample: dict[str, object]) -> pd.Series | None:
+        out: dict[str, float] = {}
+        for col in self.feature_columns:
+            raw = sample.get(col)
+            try:
+                value = float(raw) if raw is not None else 0.0
+            except Exception:
+                value = 0.0
+            if not np.isfinite(value):
+                value = 0.0
+            out[col] = value
+        if not out:
+            return None
+        return pd.Series(out, dtype=float)

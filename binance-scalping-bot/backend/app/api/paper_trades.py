@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,6 +17,7 @@ from app.models.paper_trades import (
     PaperTradeStatsResponse,
 )
 from app.services.binance_client import BinanceFuturesClient
+from app.services.data_pipeline import DataPipeline
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
@@ -45,6 +47,7 @@ class PaperTradeAPI:
         self.repo: MySQLTradeRepository | None = None
         self.price_stream = None
         self.market_client = BinanceFuturesClient()
+        self.data_pipeline = DataPipeline()
 
         self.router.add_api_route("/open", self.get_open, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
@@ -90,6 +93,10 @@ class PaperTradeAPI:
             entry_price=entry_price,
             take_profit=float(row["take_profit"]),
             stop_loss=float(row["stop_loss"]),
+            liq_ema99_15m=float(row["liq_ema99_15m"]) if row.get("liq_ema99_15m") is not None else None,
+            liq_ema99_1h=float(row["liq_ema99_1h"]) if row.get("liq_ema99_1h") is not None else None,
+            liq_zone_price=float(row["liq_zone_price"]) if row.get("liq_zone_price") is not None else None,
+            liq_zone_score=float(row["liq_zone_score"]) if row.get("liq_zone_score") is not None else None,
             quantity=quantity,
             leverage=leverage,
             status=str(row["status"]),
@@ -210,6 +217,7 @@ class PaperTradeAPI:
                 quantity=quantity,
                 leverage=leverage,
             )
+        feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, req.symbol, req.side)
 
         trade_id = repo.create_open_trade(
             {
@@ -224,6 +232,7 @@ class PaperTradeAPI:
                 "quantity": quantity,
                 "margin_usdt": margin_usdt,
                 "leverage": leverage,
+                "feature_snapshot": feature_snapshot,
             }
         )
         rows = repo.list_recent_trades(limit=1)
@@ -303,6 +312,20 @@ class PaperTradeAPI:
                 limit=settings.paper_trade_sl_atr_limit,
             )
             return calc_atr_from_ohlcv(rows=rows, period=14)
+        except Exception:
+            return None
+
+    def _capture_feature_snapshot(self, symbol: str, side: str) -> dict[str, float] | None:
+        try:
+            row = self.data_pipeline.build_latest_feature_row(symbol=symbol, limit=400)
+            if row is None:
+                return None
+            payload = {k: float(v) for k, v in row.to_dict().items()}
+            if side == "LONG":
+                payload["setup_side"] = 1.0
+            elif side == "SHORT":
+                payload["setup_side"] = 0.0
+            return payload
         except Exception:
             return None
 

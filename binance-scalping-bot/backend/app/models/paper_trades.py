@@ -14,6 +14,10 @@ class PaperTrade(BaseModel):
     entry_price: float
     take_profit: float
     stop_loss: float
+    liq_ema99_15m: Optional[float] = None
+    liq_ema99_1h: Optional[float] = None
+    liq_zone_price: Optional[float] = None
+    liq_zone_score: Optional[float] = None
     quantity: float
     leverage: int
     status: str

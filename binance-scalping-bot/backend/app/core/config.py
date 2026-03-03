@@ -29,6 +29,10 @@ class Settings(BaseModel):
         "ML_MODEL_PATH",
         str(BASE_DIR / "backend_data" / "rf_model.joblib"),
     )
+    ml_test_model_path: str = os.getenv(
+        "ML_TEST_MODEL_PATH",
+        str(BASE_DIR / "backend_data" / "rf_model_test.joblib"),
+    )
     liquid_ml_model_path: str = os.getenv(
         "LIQUID_ML_MODEL_PATH",
         str(BASE_DIR / "backend_data" / "liquid_rf_model.joblib"),
@@ -43,11 +47,14 @@ class Settings(BaseModel):
     auto_train_horizon: int = int(os.getenv("AUTO_TRAIN_HORIZON", "4"))
     auto_train_rr_ratio: float = float(os.getenv("AUTO_TRAIN_RR_RATIO", "1.5"))
     ml_use_liquidation_features: bool = os.getenv("ML_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
+    ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
     liquid_ml_top_vol_days: int = int(os.getenv("LIQUID_ML_TOP_VOL_DAYS", "1"))
     liquid_ml_max_symbols: int = int(os.getenv("LIQUID_ML_MAX_SYMBOLS", "30"))
     liquid_ml_touch_tolerance_pct: float = float(os.getenv("LIQUID_ML_TOUCH_TOLERANCE_PCT", "0.004"))
+    liquid_ml_short_zone_min_score: float = float(os.getenv("LIQUID_ML_SHORT_ZONE_MIN_SCORE", "0.012"))
+    liquid_ml_short_zone_touch_multiplier: float = float(os.getenv("LIQUID_ML_SHORT_ZONE_TOUCH_MULTIPLIER", "2.0"))
     liquid_ml_train_limit: int = int(os.getenv("LIQUID_ML_TRAIN_LIMIT", "900"))
     liquid_ml_train_horizon: int = int(os.getenv("LIQUID_ML_TRAIN_HORIZON", "16"))
     liquid_ml_train_rr_ratio: float = float(os.getenv("LIQUID_ML_TRAIN_RR_RATIO", "1.5"))
@@ -69,6 +76,7 @@ class Settings(BaseModel):
     paper_trade_maint_margin_rate: float = float(os.getenv("PAPER_TRADE_MAINT_MARGIN_RATE", "0.02"))
     paper_trade_leverage: int = int(os.getenv("PAPER_TRADE_LEVERAGE", "5"))
     paper_trade_poll_interval_sec: float = float(os.getenv("PAPER_TRADE_POLL_INTERVAL_SEC", "6"))
+    paper_trade_stream_max_stale_sec: float = float(os.getenv("PAPER_TRADE_STREAM_MAX_STALE_SEC", "5"))
     paper_trade_min_sl_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_PCT", "0.008"))
     paper_trade_min_sl_loss_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_LOSS_PCT", "5"))
     paper_trade_sl_extra_buffer_pct: float = float(os.getenv("PAPER_TRADE_SL_EXTRA_BUFFER_PCT", "0.002"))
@@ -82,6 +90,25 @@ class Settings(BaseModel):
     paper_trade_disable_sl: bool = os.getenv("PAPER_TRADE_DISABLE_SL", "false").lower() == "true"
     paper_trade_move_sl_to_entry_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT", "15"))
     paper_trade_move_sl_lock_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT", "10"))
+    paper_trade_btc_filter_enabled: bool = os.getenv("PAPER_TRADE_BTC_FILTER_ENABLED", "true").lower() == "true"
+    paper_trade_btc_filter_timeframe: str = os.getenv("PAPER_TRADE_BTC_FILTER_TIMEFRAME", "15m")
+    paper_trade_btc_filter_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_CACHE_SEC", "20"))
+    paper_trade_btc_filter_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE", "0.55"))
+    paper_trade_btc_filter_block_countertrend: bool = os.getenv("PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND", "true").lower() == "true"
+    paper_trade_btc_filter_countertrend_min_win: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN", "0.9"))
+    paper_trade_btc_shock_pause_enabled: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED", "true").lower() == "true"
+    paper_trade_btc_shock_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT", "1.2"))
+    paper_trade_btc_shock_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES", "30"))
+    paper_trade_btc_profit_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED", "true").lower() == "true"
+    paper_trade_btc_profit_lock_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE", "0.6"))
+    paper_trade_btc_follow_min_corr: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_CORR", "0.45"))
+    paper_trade_btc_follow_min_beta: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_BETA", "0.2"))
+    paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
+    paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
+    paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
+    paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
+    paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
+    paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
 
 
 settings = Settings()

@@ -8,9 +8,15 @@ from app.services.ws_manager import WSManager
 
 order_manager = OrderManager(settings.sqlite_db_path)
 ml_predictor = MLPredictor(model_path=settings.ml_model_path)
+ml_test_predictor = MLPredictor(
+    model_path=settings.ml_test_model_path,
+    use_liquidation_features=settings.ml_test_use_liquidation_features,
+)
 liquid_ml_predictor = LiquidationMLPredictor(
     model_path=settings.liquid_ml_model_path,
     touch_tolerance_pct=settings.liquid_ml_touch_tolerance_pct,
+    short_zone_min_score=settings.liquid_ml_short_zone_min_score,
+    short_zone_touch_multiplier=settings.liquid_ml_short_zone_touch_multiplier,
     rr_ratio=settings.liquid_ml_train_rr_ratio,
 )
 ws_manager = WSManager()

@@ -32,6 +32,27 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _estimate_liq_zone(last_price: float, side: str, ticker: dict) -> tuple[float, float]:
+    if last_price <= 0:
+        return 0.0, 0.0
+
+    quote_volume = max(0.0, _safe_float(ticker.get("quoteVolume")) or 0.0)
+    change_pct = _safe_float(ticker.get("percentage")) or 0.0
+    long_short_proxy = 1.0 + _clamp(change_pct / 100.0 * 1.8, -0.45, 0.45)
+
+    base_bias = 0.012 + (abs(long_short_proxy - 1.0) * 0.01)
+    zone_bias = abs(base_bias) if side == "LONG" else -abs(base_bias)
+    liq_zone_price = last_price * (1.0 + zone_bias)
+
+    oi_notional_proxy = quote_volume * 0.22
+    liq_zone_value = oi_notional_proxy * 0.012 * (1.0 + abs(long_short_proxy - 1.0) * 0.35)
+    return round(liq_zone_price, 6), max(0.0, liq_zone_value)
+
+
 def _is_418_error(exc: Exception) -> bool:
     text = str(exc)
     return "418" in text or "I'm a teapot" in text or "Client Error" in text
@@ -120,6 +141,11 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
             continue
 
         if signal.win_probability >= min_win:
+            liq_zone_price, liq_zone_value = _estimate_liq_zone(
+                last_price=last_price,
+                side=signal.side,
+                ticker=ticker if isinstance(ticker, dict) else {},
+            )
             matches.append(
                 {
                     "symbol": signal.symbol,
@@ -129,6 +155,8 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                     "predicted_entry_price": signal.predicted_entry_price,
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
+                    "liq_zone_price": liq_zone_price,
+                    "liq_zone_value": liq_zone_value,
                 }
             )
 

@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import settings
 from app.services.ml_predictor import MLPredictor
+from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.binance_client import BinanceFuturesClient
 
 
@@ -35,6 +36,13 @@ class AnalyticsService:
     def __init__(self) -> None:
         self.client = BinanceFuturesClient()
         self.predictor = MLPredictor(model_path=settings.ml_model_path)
+        self.liquid_predictor = LiquidationMLPredictor(
+            model_path=settings.liquid_ml_model_path,
+            touch_tolerance_pct=settings.liquid_ml_touch_tolerance_pct,
+            short_zone_min_score=settings.liquid_ml_short_zone_min_score,
+            short_zone_touch_multiplier=settings.liquid_ml_short_zone_touch_multiplier,
+            rr_ratio=settings.liquid_ml_train_rr_ratio,
+        )
         self.http = httpx.Client(timeout=httpx.Timeout(2.5, connect=2.0))
         self.cache: dict[str, CacheItem] = {}
 
@@ -73,6 +81,31 @@ class AnalyticsService:
             except Exception:
                 continue
         return out
+
+    def _resolve_liq_signal(self, symbol: str, mark_price: float) -> dict[str, Any] | None:
+        if mark_price <= 0:
+            return None
+        cache_key = f"liq_signal:{symbol}"
+        cached = self._get_cached(cache_key)
+        if isinstance(cached, dict):
+            cached_mark = _safe_float(cached.get("mark_price")) or 0.0
+            # Refresh only if mark moved enough; otherwise reuse cached LIQ signal.
+            if cached_mark > 0 and abs(mark_price - cached_mark) / cached_mark <= 0.002:
+                return cached
+
+        signal = self.liquid_predictor.predict(symbol=symbol, mark_price=mark_price)
+        payload = {
+            "symbol": symbol,
+            "side": signal.side,
+            "source": "LIQ_EMA99",
+            "win_probability": signal.win_probability,
+            "entry_price": signal.predicted_entry_price,
+            "take_profit": signal.take_profit,
+            "stop_loss": signal.stop_loss,
+            "mark_price": mark_price,
+        }
+        self._set_cache(cache_key, payload, ttl_sec=120)
+        return payload
 
     def _load_usdt_swap_symbols(self) -> list[str]:
         cached = self._get_cached("symbols")
@@ -257,20 +290,31 @@ class AnalyticsService:
 
             for row in top_rows:
                 try:
-                    signal = self.predictor.predict(
-                        symbol=str(row["symbol"]),
-                        mark_price=float(row["mark_price"]),
-                    )
-                    row["signal_side"] = signal.side
-                    row["signal_source"] = "ML"
-                    row["signal_win_probability"] = signal.win_probability
-                    row["signal_entry_price"] = signal.predicted_entry_price
-                    row["signal_take_profit"] = signal.take_profit
-                    row["signal_stop_loss"] = signal.stop_loss
+                    symbol = str(row["symbol"])
+                    mark = float(row["mark_price"])
+                    liq_signal = self._resolve_liq_signal(symbol=symbol, mark_price=mark)
+                    if liq_signal is not None:
+                        row["signal_side"] = liq_signal["side"]
+                        row["signal_source"] = liq_signal["source"]
+                        row["signal_win_probability"] = liq_signal["win_probability"]
+                        row["signal_entry_price"] = liq_signal["entry_price"]
+                        row["signal_take_profit"] = liq_signal["take_profit"]
+                        row["signal_stop_loss"] = liq_signal["stop_loss"]
+                    else:
+                        signal = self.predictor.predict(
+                            symbol=symbol,
+                            mark_price=mark,
+                        )
+                        row["signal_side"] = signal.side
+                        row["signal_source"] = "ML"
+                        row["signal_win_probability"] = signal.win_probability
+                        row["signal_entry_price"] = signal.predicted_entry_price
+                        row["signal_take_profit"] = signal.take_profit
+                        row["signal_stop_loss"] = signal.stop_loss
                     row["signal_order_type"] = self._signal_order_type(
-                        side=signal.side,
+                        side=str(row["signal_side"]),
                         mark_price=float(row["mark_price"]),
-                        entry_price=signal.predicted_entry_price,
+                        entry_price=float(row["signal_entry_price"]),
                     )
                 except Exception:
                     row["signal_side"] = None

@@ -14,7 +14,7 @@ from app.api.paper_trades import router as paper_trades_router
 from app.api.signals import get_scan_snapshot
 from app.api.signals import router as signals_router
 from app.core.config import settings
-from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor, price_stream, ws_manager
+from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor, ml_test_predictor, price_stream, ws_manager
 from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
@@ -57,6 +57,7 @@ async def on_startup() -> None:
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
                 predictor=ml_predictor,
+                predictor_test=ml_test_predictor,
                 liquid_predictor=liquid_ml_predictor,
                 price_stream=price_stream,
                 min_win_probability=settings.paper_trade_min_win_probability,
@@ -65,6 +66,7 @@ async def on_startup() -> None:
                 margin_usdt=settings.paper_trade_margin_usdt,
                 leverage=settings.paper_trade_leverage,
                 poll_interval_sec=settings.paper_trade_poll_interval_sec,
+                stream_max_stale_sec=settings.paper_trade_stream_max_stale_sec,
                 min_sl_pct=settings.paper_trade_min_sl_pct,
                 min_sl_loss_pct=settings.paper_trade_min_sl_loss_pct,
                 sl_extra_buffer_pct=settings.paper_trade_sl_extra_buffer_pct,
@@ -83,6 +85,25 @@ async def on_startup() -> None:
                 liquid_top_vol_days=settings.liquid_ml_top_vol_days,
                 liquid_max_symbols=settings.liquid_ml_max_symbols,
                 liquid_entry_tolerance_pct=settings.liquid_ml_touch_tolerance_pct,
+                btc_filter_enabled=settings.paper_trade_btc_filter_enabled,
+                btc_filter_timeframe=settings.paper_trade_btc_filter_timeframe,
+                btc_filter_cache_sec=settings.paper_trade_btc_filter_cache_sec,
+                btc_filter_min_confidence=settings.paper_trade_btc_filter_min_confidence,
+                btc_filter_block_countertrend=settings.paper_trade_btc_filter_block_countertrend,
+                btc_filter_countertrend_min_win=settings.paper_trade_btc_filter_countertrend_min_win,
+                btc_shock_pause_enabled=settings.paper_trade_btc_shock_pause_enabled,
+                btc_shock_threshold_pct=settings.paper_trade_btc_shock_threshold_pct,
+                btc_shock_cooldown_minutes=settings.paper_trade_btc_shock_cooldown_minutes,
+                btc_profit_lock_enabled=settings.paper_trade_btc_profit_lock_enabled,
+                btc_profit_lock_min_confidence=settings.paper_trade_btc_profit_lock_min_confidence,
+                btc_follow_min_corr=settings.paper_trade_btc_follow_min_corr,
+                btc_follow_min_beta=settings.paper_trade_btc_follow_min_beta,
+                btc_follow_lookback=settings.paper_trade_btc_follow_lookback,
+                btc_follow_cache_sec=settings.paper_trade_btc_follow_cache_sec,
+                test_ml_enabled=settings.paper_trade_test_ml_enabled,
+                test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
+                test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,
+                test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
             )
             await paper_trade_engine.start()
         except Exception:

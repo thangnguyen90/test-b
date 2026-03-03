@@ -50,6 +50,9 @@ class LiquidSignalResult:
     ema99_15m: float
     ema99_1h: float
     near_ema: bool
+    liq_zone_price: float
+    liq_zone_score: float
+    near_liq_zone: bool
 
 
 class LiquidationMLPredictor:
@@ -59,12 +62,16 @@ class LiquidationMLPredictor:
         *,
         client: BinanceFuturesClient | None = None,
         touch_tolerance_pct: float = 0.004,
+        short_zone_min_score: float = 0.012,
+        short_zone_touch_multiplier: float = 2.0,
         rr_ratio: float = 1.5,
     ) -> None:
         self.client = client or BinanceFuturesClient()
         self.model_path = Path(model_path)
         self.feature_columns = list(LIQUID_FEATURE_COLUMNS)
         self.touch_tolerance_pct = max(0.0005, float(touch_tolerance_pct))
+        self.short_zone_min_score = max(0.0001, float(short_zone_min_score))
+        self.short_zone_touch_multiplier = max(1.0, float(short_zone_touch_multiplier))
         self.rr_ratio = max(1.0, float(rr_ratio))
         self.model: RandomForestClassifier | None = None
         self.trained_at: datetime | None = None
@@ -84,6 +91,8 @@ class LiquidationMLPredictor:
         self.accuracy = payload.get("accuracy")
         self.roc_auc = payload.get("roc_auc")
         self.touch_tolerance_pct = float(payload.get("touch_tolerance_pct", self.touch_tolerance_pct))
+        self.short_zone_min_score = float(payload.get("short_zone_min_score", self.short_zone_min_score))
+        self.short_zone_touch_multiplier = float(payload.get("short_zone_touch_multiplier", self.short_zone_touch_multiplier))
         self.rr_ratio = float(payload.get("rr_ratio", self.rr_ratio))
 
     @staticmethod
@@ -312,6 +321,8 @@ class LiquidationMLPredictor:
                 "accuracy": self.accuracy,
                 "roc_auc": self.roc_auc,
                 "touch_tolerance_pct": self.touch_tolerance_pct,
+                "short_zone_min_score": self.short_zone_min_score,
+                "short_zone_touch_multiplier": self.short_zone_touch_multiplier,
                 "rr_ratio": rr_ratio,
             },
             self.model_path,
@@ -336,9 +347,35 @@ class LiquidationMLPredictor:
             "accuracy": self.accuracy,
             "roc_auc": self.roc_auc,
             "touch_tolerance_pct": self.touch_tolerance_pct,
+            "short_zone_min_score": self.short_zone_min_score,
+            "short_zone_touch_multiplier": self.short_zone_touch_multiplier,
             "rr_ratio": self.rr_ratio,
             "last_near_ema_samples": self.last_near_ema_samples,
         }
+
+    @staticmethod
+    def _extract_liq_zone(
+        frame: pd.DataFrame,
+        *,
+        side: str,
+        window: int = 96,
+    ) -> tuple[float, float]:
+        if frame.empty:
+            return 0.0, 0.0
+        view = frame.tail(max(30, window)).copy()
+        vol_spike = view["vol_spike_z_15m"].clip(lower=0).fillna(0.0)
+        if side == "SHORT":
+            score = (view["wick_up_15m"].fillna(0.0) * (1.0 + vol_spike)).astype(float)
+            zone_price_series = view["high"].astype(float)
+        else:
+            score = (view["wick_down_15m"].fillna(0.0) * (1.0 + vol_spike)).astype(float)
+            zone_price_series = view["low"].astype(float)
+        if score.empty:
+            return 0.0, 0.0
+        idx = score.idxmax()
+        zone_score = float(score.loc[idx])
+        zone_price = float(zone_price_series.loc[idx])
+        return zone_price, zone_score
 
     def predict(self, symbol: str, mark_price: float) -> LiquidSignalResult:
         frame = self._prepare_frame(symbol=symbol, limit=520)
@@ -358,12 +395,17 @@ class LiquidationMLPredictor:
                 ema99_15m=round(entry, 6),
                 ema99_1h=round(entry, 6),
                 near_ema=False,
+                liq_zone_price=round(entry, 6),
+                liq_zone_score=0.0,
+                near_liq_zone=False,
             )
 
         row = frame.iloc[-1].copy()
         ema15 = float(row.get("ema99_15m") or mark_price)
         ema1h = float(row.get("ema99_1h") or mark_price)
         near_ema = bool(row.get("near_ema"))
+        short_zone_price, short_zone_score = self._extract_liq_zone(frame, side="SHORT")
+        long_zone_price, long_zone_score = self._extract_liq_zone(frame, side="LONG")
         if abs(mark_price - ema15) <= abs(mark_price - ema1h):
             entry = ema15
         else:
@@ -390,6 +432,22 @@ class LiquidationMLPredictor:
             side = "LONG" if mark_price <= entry else "SHORT"
             win_prob = 0.55 if near_ema else 0.5
 
+        if side == "SHORT":
+            liq_zone_price = short_zone_price if short_zone_price > 0 else entry
+            liq_zone_score = short_zone_score
+            touch_dist = self.touch_tolerance_pct * self.short_zone_touch_multiplier
+        else:
+            liq_zone_price = long_zone_price if long_zone_price > 0 else entry
+            liq_zone_score = long_zone_score
+            touch_dist = self.touch_tolerance_pct
+        near_liq_zone = False
+        if mark_price > 0 and liq_zone_price > 0:
+            near_liq_zone = abs(float(mark_price) - liq_zone_price) / float(mark_price) <= touch_dist
+
+        # For SHORT, prefer liquidation zone as confirmation anchor instead of EMA99.
+        if side == "SHORT" and liq_zone_score >= self.short_zone_min_score and liq_zone_price > 0:
+            entry = liq_zone_price
+
         tp_dist = atr * self.rr_ratio
         if side == "LONG":
             sl = entry - atr
@@ -407,4 +465,7 @@ class LiquidationMLPredictor:
             ema99_15m=round(ema15, 6),
             ema99_1h=round(ema1h, 6),
             near_ema=near_ema,
+            liq_zone_price=round(float(liq_zone_price), 6),
+            liq_zone_score=float(np.clip(liq_zone_score, 0.0, 10.0)),
+            near_liq_zone=near_liq_zone,
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from typing import Any
 
 import pymysql
@@ -50,6 +51,10 @@ class MySQLTradeRepository:
                         entry_price DOUBLE NOT NULL,
                         take_profit DOUBLE NOT NULL,
                         stop_loss DOUBLE NOT NULL,
+                        liq_ema99_15m DOUBLE NULL,
+                        liq_ema99_1h DOUBLE NULL,
+                        liq_zone_price DOUBLE NULL,
+                        liq_zone_score DOUBLE NULL,
                         quantity DOUBLE NOT NULL,
                         margin_usdt DOUBLE NULL,
                         leverage INT NOT NULL,
@@ -60,6 +65,8 @@ class MySQLTradeRepository:
                         close_reason VARCHAR(32) NULL,
                         mae_pct DOUBLE NULL,
                         mfe_pct DOUBLE NULL,
+                        feature_snapshot_json LONGTEXT NULL,
+                        feature_captured_at DATETIME(6) NULL,
                         pnl DOUBLE NULL,
                         result TINYINT NULL,
                         created_at DATETIME(6) NOT NULL,
@@ -132,6 +139,84 @@ class MySQLTradeRepository:
                     )
                 cur.execute(
                     """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='liq_ema99_15m'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN liq_ema99_15m DOUBLE NULL AFTER stop_loss"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='liq_ema99_1h'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN liq_ema99_1h DOUBLE NULL AFTER liq_ema99_15m"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='liq_zone_price'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN liq_zone_price DOUBLE NULL AFTER liq_ema99_1h"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='liq_zone_score'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN liq_zone_score DOUBLE NULL AFTER liq_zone_price"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='feature_snapshot_json'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN feature_snapshot_json LONGTEXT NULL AFTER mfe_pct"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='feature_captured_at'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN feature_captured_at DATETIME(6) NULL AFTER feature_snapshot_json"
+                    )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS ml_feedback (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         paper_trade_id BIGINT NOT NULL,
@@ -141,6 +226,8 @@ class MySQLTradeRepository:
                         effective_win_probability DOUBLE NOT NULL,
                         mae_pct DOUBLE NULL,
                         mfe_pct DOUBLE NULL,
+                        feature_snapshot_json LONGTEXT NULL,
+                        feature_captured_at DATETIME(6) NULL,
                         result TINYINT NOT NULL,
                         pnl DOUBLE NOT NULL,
                         created_at DATETIME(6) NOT NULL,
@@ -175,18 +262,59 @@ class MySQLTradeRepository:
                     cur.execute(
                         "ALTER TABLE ml_feedback ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
                     )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='feature_snapshot_json'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE ml_feedback ADD COLUMN feature_snapshot_json LONGTEXT NULL AFTER mfe_pct"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='feature_captured_at'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE ml_feedback ADD COLUMN feature_captured_at DATETIME(6) NULL AFTER feature_snapshot_json"
+                    )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
+        feature_snapshot_json = payload.get("feature_snapshot_json")
+        if feature_snapshot_json is None and payload.get("feature_snapshot") is not None:
+            raw = payload.get("feature_snapshot")
+            if isinstance(raw, str):
+                feature_snapshot_json = raw
+            else:
+                try:
+                    feature_snapshot_json = json.dumps(raw, ensure_ascii=True, allow_nan=False)
+                except Exception:
+                    feature_snapshot_json = None
+        feature_captured_at = payload.get("feature_captured_at")
+        if feature_snapshot_json is not None and feature_captured_at is None:
+            feature_captured_at = now
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO paper_trades (
                         symbol, side, entry_type, signal_win_probability, effective_win_probability,
-                        entry_price, take_profit, stop_loss, quantity, margin_usdt, leverage, mae_pct, mfe_pct,
+                        entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        quantity, margin_usdt, leverage, mae_pct, mfe_pct,
+                        feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -197,11 +325,17 @@ class MySQLTradeRepository:
                         payload["entry_price"],
                         payload["take_profit"],
                         payload["stop_loss"],
+                        payload.get("liq_ema99_15m"),
+                        payload.get("liq_ema99_1h"),
+                        payload.get("liq_zone_price"),
+                        payload.get("liq_zone_score"),
                         payload["quantity"],
                         payload.get("margin_usdt"),
                         payload["leverage"],
                         payload.get("mae_pct", 0.0),
                         payload.get("mfe_pct", 0.0),
+                        feature_snapshot_json,
+                        feature_captured_at,
                         now,
                         now,
                         now,
@@ -209,13 +343,24 @@ class MySQLTradeRepository:
                 )
                 return int(cur.lastrowid)
 
-    def has_open_trade(self, symbol: str, side: str) -> bool:
+    def has_open_trade(self, symbol: str, side: str, entry_type: str | None = None) -> bool:
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM paper_trades WHERE symbol=%s AND side=%s AND status='OPEN' LIMIT 1",
-                    (symbol, side),
-                )
+                if entry_type:
+                    cur.execute(
+                        """
+                        SELECT id
+                        FROM paper_trades
+                        WHERE symbol=%s AND side=%s AND entry_type=%s AND status='OPEN'
+                        LIMIT 1
+                        """,
+                        (symbol, side, entry_type),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id FROM paper_trades WHERE symbol=%s AND side=%s AND status='OPEN' LIMIT 1",
+                        (symbol, side),
+                    )
                 row = cur.fetchone()
                 return row is not None
 
@@ -256,8 +401,10 @@ class MySQLTradeRepository:
                         """
                         INSERT INTO ml_feedback (
                             paper_trade_id, symbol, side, signal_win_probability,
-                            effective_win_probability, mae_pct, mfe_pct, result, pnl, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            effective_win_probability, mae_pct, mfe_pct,
+                            feature_snapshot_json, feature_captured_at,
+                            result, pnl, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             row["id"],
@@ -267,6 +414,8 @@ class MySQLTradeRepository:
                             row["effective_win_probability"],
                             row.get("mae_pct"),
                             row.get("mfe_pct"),
+                            row.get("feature_snapshot_json"),
+                            row.get("feature_captured_at"),
                             result,
                             pnl,
                             now,
@@ -502,7 +651,8 @@ class MySQLTradeRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT symbol, side, result, mae_pct, mfe_pct, created_at
+                    SELECT symbol, side, result, mae_pct, mfe_pct, created_at,
+                           feature_snapshot_json, feature_captured_at
                     FROM ml_feedback
                     ORDER BY created_at DESC
                     LIMIT {safe_limit}

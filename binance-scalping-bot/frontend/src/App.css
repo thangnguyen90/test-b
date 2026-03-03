@@ -454,6 +454,12 @@ button:hover:not(:disabled) {
   border-radius: 8px;
 }
 
+.inline-actions {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -529,6 +535,45 @@ td {
 .error {
   margin: 0.6rem 0 0;
   color: #a7262f;
+}
+
+.trade-toast-stack {
+  position: fixed;
+  top: 0.9rem;
+  right: 1rem;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.trade-toast {
+  min-width: 220px;
+  max-width: 320px;
+  border-radius: 10px;
+  border: 1px solid;
+  padding: 0.5rem 0.65rem;
+  box-shadow: 0 10px 24px rgba(11, 16, 26, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  font-size: 0.82rem;
+}
+
+.trade-toast strong {
+  color: inherit;
+}
+
+.trade-toast-tp {
+  background: #e9f9ef;
+  border-color: #7fc89c;
+  color: #0f5c36;
+}
+
+.trade-toast-sl {
+  background: #ffecec;
+  border-color: #e39b9b;
+  color: #8b1f1f;
 }
 
 .modal-backdrop {

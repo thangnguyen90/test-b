@@ -117,6 +117,8 @@ type ScanSignalItem = {
   predicted_entry_price: number
   stop_loss: number
   take_profit: number
+  liq_zone_price?: number
+  liq_zone_value?: number
 }
 
 type ScanSignalsResponse = {
@@ -138,6 +140,10 @@ type PaperTrade = {
   entry_price: number
   take_profit: number
   stop_loss: number
+  liq_ema99_15m?: number | null
+  liq_ema99_1h?: number | null
+  liq_zone_price?: number | null
+  liq_zone_score?: number | null
   quantity: number
   leverage: number
   status: string
@@ -271,6 +277,47 @@ type MlStatus = {
 }
 
 type SortDirection = 'asc' | 'desc'
+type OpenSortKey =
+  | 'id'
+  | 'symbol'
+  | 'upnl_usdt'
+  | 'upnl_pct'
+  | 'mae_pct'
+  | 'mfe_pct'
+  | 'entry_type'
+  | 'model'
+  | 'side'
+  | 'entry_price'
+  | 'mark_price'
+  | 'mark_ts'
+  | 'margin_usdt'
+  | 'take_profit'
+  | 'stop_loss'
+  | 'signal_win_probability'
+  | 'effective_win_probability'
+type HistorySortKey =
+  | 'id'
+  | 'symbol'
+  | 'pnl'
+  | 'pnl_pct'
+  | 'mae_pct'
+  | 'mfe_pct'
+  | 'entry_type'
+  | 'model'
+  | 'side'
+  | 'status'
+  | 'entry_price'
+  | 'close_price'
+  | 'close_reason'
+  | 'result'
+
+type TradeToast = {
+  id: number
+  tradeId: number
+  symbol: string
+  closeReason: 'TP' | 'SL'
+  pnlPct: number | null
+}
 
 type PaperMarketOpenRequest = {
   symbol: string
@@ -448,10 +495,17 @@ function formatSignalSource(source?: string | null): string {
   return normalized
 }
 
-function tradeModelSource(entryType?: string | null): 'ML' | 'LIQ_EMA99' {
+function tradeModelSource(entryType?: string | null): 'ML' | 'LIQ_EMA99' | 'ML_TEST' {
   const normalized = (entryType ?? '').trim().toUpperCase()
+  if (normalized === 'ML_TEST') return 'ML_TEST'
   if (normalized === 'LIQ_EMA99') return 'LIQ_EMA99'
   return 'ML'
+}
+
+function tradeModelBadge(source: 'ML' | 'LIQ_EMA99' | 'ML_TEST'): 'neutral' | 'warn' | 'success' {
+  if (source === 'LIQ_EMA99') return 'warn'
+  if (source === 'ML_TEST') return 'success'
+  return 'neutral'
 }
 
 function calcPnlPct(
@@ -493,9 +547,23 @@ function formatVnTimestamp(value?: string | null): string {
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
 }
 
+function formatCompactMoney(value?: number | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  const rounded = Math.round(value)
+  return rounded.toLocaleString()
+}
+
 function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
   if (typeof markPrice !== 'number') return null
   return calcPnlPct(trade.side, trade.entry_price, markPrice, trade.leverage)
+}
+
+function resolveClosedPnlPct(trade: PaperTrade): number | null {
+  if (typeof trade.pnl_pct === 'number') return trade.pnl_pct
+  if (typeof trade.close_price === 'number') {
+    return calcPnlPct(trade.side, trade.entry_price, trade.close_price, trade.leverage)
+  }
+  return null
 }
 
 function buildHeatmap(
@@ -770,6 +838,9 @@ function App() {
   const symbolReqIdRef = useRef(0)
   const liqReqRef = useRef(false)
   const btcTrendReqRef = useRef(false)
+  const notifiedCloseTradeIdsRef = useRef<Set<number>>(new Set())
+  const closeToastInitializedRef = useRef(false)
+  const toastTimerRef = useRef<Map<number, number>>(new Map())
   const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const [health, setHealth] = useState<Health | null>(null)
   const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
@@ -799,6 +870,7 @@ function App() {
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
+  const [tradeToasts, setTradeToasts] = useState<TradeToast[]>([])
   const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
   const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
   const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
@@ -820,6 +892,14 @@ function App() {
   })
   const [liqSort, setLiqSort] = useState<{ key: keyof LiquidationOverviewItem; direction: SortDirection }>({
     key: 'est_liq_zone_value',
+    direction: 'desc',
+  })
+  const [historySort, setHistorySort] = useState<{ key: HistorySortKey; direction: SortDirection }>({
+    key: 'id',
+    direction: 'desc',
+  })
+  const [openSort, setOpenSort] = useState<{ key: OpenSortKey; direction: SortDirection }>({
+    key: 'id',
     direction: 'desc',
   })
 
@@ -953,6 +1033,139 @@ function App() {
     })
     return rows
   }, [liqOverview, liqSort])
+  const sortedPaperHistory = useMemo(() => {
+    const rows = [...paperHistory]
+    const { key, direction } = historySort
+    rows.sort((a, b) => {
+      const av = (() => {
+        switch (key) {
+          case 'pnl_pct':
+            return resolveClosedPnlPct(a) ?? Number.NEGATIVE_INFINITY
+          case 'model':
+            return tradeModelSource(a.entry_type)
+          case 'result':
+            return a.result ?? -1
+          case 'entry_type':
+            return a.entry_type ?? ''
+          case 'close_reason':
+            return a.close_reason ?? ''
+          case 'close_price':
+            return a.close_price ?? Number.NEGATIVE_INFINITY
+          case 'mae_pct':
+            return a.mae_pct ?? Number.NEGATIVE_INFINITY
+          case 'mfe_pct':
+            return a.mfe_pct ?? Number.NEGATIVE_INFINITY
+          case 'pnl':
+            return a.pnl ?? Number.NEGATIVE_INFINITY
+          default:
+            return a[key] as string | number | null | undefined
+        }
+      })()
+      const bv = (() => {
+        switch (key) {
+          case 'pnl_pct':
+            return resolveClosedPnlPct(b) ?? Number.NEGATIVE_INFINITY
+          case 'model':
+            return tradeModelSource(b.entry_type)
+          case 'result':
+            return b.result ?? -1
+          case 'entry_type':
+            return b.entry_type ?? ''
+          case 'close_reason':
+            return b.close_reason ?? ''
+          case 'close_price':
+            return b.close_price ?? Number.NEGATIVE_INFINITY
+          case 'mae_pct':
+            return b.mae_pct ?? Number.NEGATIVE_INFINITY
+          case 'mfe_pct':
+            return b.mfe_pct ?? Number.NEGATIVE_INFINITY
+          case 'pnl':
+            return b.pnl ?? Number.NEGATIVE_INFINITY
+          default:
+            return b[key] as string | number | null | undefined
+        }
+      })()
+
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return direction === 'asc' ? av - bv : bv - av
+      }
+      return direction === 'asc'
+        ? String(av ?? '').localeCompare(String(bv ?? ''))
+        : String(bv ?? '').localeCompare(String(av ?? ''))
+    })
+    return rows
+  }, [paperHistory, historySort])
+  const sortedPaperOpenTrades = useMemo(() => {
+    const rows = [...paperOpenTrades]
+    const { key, direction } = openSort
+
+    const valueOf = (row: PaperTrade): string | number => {
+      const mark = resolveLivePrice(row.symbol)
+      const markTs = resolveLiveTime(row.symbol)
+      const marginUsdt = typeof row.margin_usdt === 'number'
+        ? row.margin_usdt
+        : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+      const upnlPct = calcUnrealizedPnlPct(row, mark)
+      const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
+        ? (marginUsdt * upnlPct / 100)
+        : null
+
+      switch (key) {
+        case 'id':
+          return row.id
+        case 'symbol':
+          return row.symbol
+        case 'upnl_usdt':
+          return upnlUsdt ?? Number.NEGATIVE_INFINITY
+        case 'upnl_pct':
+          return upnlPct ?? Number.NEGATIVE_INFINITY
+        case 'mae_pct':
+          return row.mae_pct ?? Number.NEGATIVE_INFINITY
+        case 'mfe_pct':
+          return row.mfe_pct ?? Number.NEGATIVE_INFINITY
+        case 'entry_type':
+          return row.entry_type ?? ''
+        case 'model':
+          return tradeModelSource(row.entry_type)
+        case 'side':
+          return row.side
+        case 'entry_price':
+          return row.entry_price
+        case 'mark_price':
+          return mark ?? Number.NEGATIVE_INFINITY
+        case 'mark_ts': {
+          if (!markTs) return Number.NEGATIVE_INFINITY
+          const value = Date.parse(markTs)
+          return Number.isNaN(value) ? Number.NEGATIVE_INFINITY : value
+        }
+        case 'margin_usdt':
+          return marginUsdt ?? Number.NEGATIVE_INFINITY
+        case 'take_profit':
+          return row.take_profit
+        case 'stop_loss':
+          return row.stop_loss
+        case 'signal_win_probability':
+          return row.signal_win_probability
+        case 'effective_win_probability':
+          return row.effective_win_probability
+        default:
+          return Number.NEGATIVE_INFINITY
+      }
+    }
+
+    rows.sort((a, b) => {
+      const av = valueOf(a)
+      const bv = valueOf(b)
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return direction === 'asc' ? av - bv : bv - av
+      }
+      return direction === 'asc'
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av))
+    })
+
+    return rows
+  }, [paperOpenTrades, openSort, paperLivePrices, paperLivePriceTime])
   const openTradeKeySet = useMemo(() => {
     const set = new Set<string>()
     for (const row of paperOpenTrades) {
@@ -976,6 +1189,24 @@ function App() {
 
   function toggleLiqSort(key: keyof LiquidationOverviewItem) {
     setLiqSort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: 'desc' }
+    })
+  }
+
+  function toggleHistorySort(key: HistorySortKey) {
+    setHistorySort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: 'desc' }
+    })
+  }
+
+  function toggleOpenSort(key: OpenSortKey) {
+    setOpenSort((prev) => {
       if (prev.key === key) {
         return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
       }
@@ -1058,6 +1289,44 @@ function App() {
       if (canonicalSymbol(k) === key) return v
     }
     return undefined
+  }
+
+  function pushTradeToast(row: PaperTrade, closeReason: 'TP' | 'SL') {
+    const toastId = Date.now() + Math.floor(Math.random() * 100000)
+    const toast: TradeToast = {
+      id: toastId,
+      tradeId: row.id,
+      symbol: row.symbol,
+      closeReason,
+      pnlPct: resolveClosedPnlPct(row),
+    }
+    setTradeToasts((prev) => {
+      const next = [...prev, toast]
+      return next.length > 6 ? next.slice(next.length - 6) : next
+    })
+    const timerId = window.setTimeout(() => {
+      setTradeToasts((prev) => prev.filter((item) => item.id !== toastId))
+      toastTimerRef.current.delete(toastId)
+    }, 10000)
+    toastTimerRef.current.set(toastId, timerId)
+  }
+
+  function processCloseToasts(rows: PaperTrade[]) {
+    const relevant = rows.filter(
+      (row) => row.status === 'CLOSED' && (row.close_reason === 'TP' || row.close_reason === 'SL'),
+    )
+    if (!closeToastInitializedRef.current) {
+      for (const row of relevant) notifiedCloseTradeIdsRef.current.add(row.id)
+      closeToastInitializedRef.current = true
+      return
+    }
+    for (const row of relevant) {
+      if (notifiedCloseTradeIdsRef.current.has(row.id)) continue
+      notifiedCloseTradeIdsRef.current.add(row.id)
+      if (row.close_reason === 'TP' || row.close_reason === 'SL') {
+        pushTradeToast(row, row.close_reason)
+      }
+    }
   }
 
   async function fetchHealth() {
@@ -1180,7 +1449,9 @@ function App() {
 
     if (historyRes.ok) {
       const historyPayload = await historyRes.json() as { items: PaperTrade[] }
-      setPaperHistory(historyPayload.items ?? [])
+      const nextHistory = historyPayload.items ?? []
+      processCloseToasts(nextHistory)
+      setPaperHistory(nextHistory)
     } else {
       errors.push(`history:${historyRes.status}`)
     }
@@ -1338,6 +1609,49 @@ function App() {
     }
   }
 
+  async function createPendingFromHighWin(item: ScanSignalItem, useLiqZone = false) {
+    const baseEntry = item.predicted_entry_price
+    const liqEntry = item.liq_zone_price
+    const entryPrice = (useLiqZone && typeof liqEntry === 'number' && liqEntry > 0) ? liqEntry : baseEntry
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+      setError(`Invalid entry price for ${item.symbol}`)
+      return
+    }
+
+    const tpDist = Math.abs(item.take_profit - baseEntry)
+    const slDist = Math.abs(baseEntry - item.stop_loss)
+    const takeProfit = item.side === 'LONG' ? entryPrice + tpDist : entryPrice - tpDist
+    const stopLoss = item.side === 'LONG' ? entryPrice - slDist : entryPrice + slDist
+
+    setIsLoadingOrder(true)
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/orders/pending`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: item.symbol,
+          side: item.side,
+          quantity: 0.01,
+          leverage: 5,
+          predicted_entry_price: entryPrice,
+          stop_loss: stopLoss,
+          take_profit: takeProfit,
+          win_probability: item.win_probability,
+        }),
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`Create pending order failed: ${text}`)
+      }
+      await fetchPendingOrders()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setIsLoadingOrder(false)
+    }
+  }
+
   useEffect(() => {
     const bootstrap = async () => {
       try {
@@ -1363,6 +1677,15 @@ function App() {
 
     bootstrap()
     return () => undefined
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const timerId of toastTimerRef.current.values()) {
+        window.clearTimeout(timerId)
+      }
+      toastTimerRef.current.clear()
+    }
   }, [])
 
   useEffect(() => {
@@ -1711,6 +2034,19 @@ function App() {
 
   return (
     <main className="app-shell">
+      <div className="trade-toast-stack">
+        {tradeToasts.map((toast) => (
+          <div key={toast.id} className={`trade-toast ${toast.closeReason === 'TP' ? 'trade-toast-tp' : 'trade-toast-sl'}`}>
+            <strong>{toast.closeReason === 'TP' ? 'TP Hit' : 'SL Hit'}</strong>
+            <span>{toast.symbol} #{toast.tradeId}</span>
+            <span>
+              {typeof toast.pnlPct === 'number'
+                ? `${toast.pnlPct >= 0 ? '+' : ''}${toast.pnlPct.toFixed(2)}%`
+                : '-'}
+            </span>
+          </div>
+        ))}
+      </div>
       <section className="hero">
         <p className="eyebrow">Liquidation Monitor</p>
         <h1>Liquidation Map + ML Signal</h1>
@@ -1815,30 +2151,35 @@ function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>ID</th>
-                    <th>Symbol</th>
-                    <th>uPnL (USDT)</th>
-                    <th>uPnL% (Margin)</th>
-                    <th>MAE%</th>
-                    <th>MFE%</th>
-                    <th>Type</th>
-                    <th>Model</th>
-                    <th>Side</th>
-                    <th>Entry</th>
-                    <th>Mark (WS)</th>
-                    <th>Mark TS</th>
-                    <th>Margin (USDT)</th>
-                    <th>TP</th>
-                    <th>SL</th>
-                    <th>Signal%</th>
-                    <th>Effective%</th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mfe_pct')}>MFE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_type')}>Type</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('model')}>Model</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('side')}>Side</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_price')}>Entry</button></th>
+                    <th>EMA99 15m</th>
+                    <th>EMA99 1h</th>
+                    <th>Liq Zone</th>
+                    <th>Zone Score</th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mark_price')}>Mark (WS)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mark_ts')}>Mark TS</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('margin_usdt')}>Margin (USDT)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('take_profit')}>TP</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('stop_loss')}>SL</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('signal_win_probability')}>Signal%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('effective_win_probability')}>Effective%</button></th>
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {paperOpenTrades.map((row) => {
+                  {sortedPaperOpenTrades.map((row) => {
                     const mark = resolveLivePrice(row.symbol)
                     const markTs = resolveLiveTime(row.symbol)
+                    const modelSource = tradeModelSource(row.entry_type)
                     const upnlPct = calcUnrealizedPnlPct(row, mark)
                     const marginUsdt = typeof row.margin_usdt === 'number'
                       ? row.margin_usdt
@@ -1884,12 +2225,20 @@ function App() {
                         </span>
                       </td>
                       <td>
-                        <span className={`badge ${tradeModelSource(row.entry_type) === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
-                          {tradeModelSource(row.entry_type)}
+                        <span className={`badge ${tradeModelBadge(modelSource)}`}>
+                          {modelSource}
                         </span>
                       </td>
-                      <td>{row.side}</td>
+                      <td>
+                        <span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>
+                          {row.side}
+                        </span>
+                      </td>
                       <td>{row.entry_price}</td>
+                      <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
+                      <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
+                      <td>{typeof row.liq_zone_price === 'number' ? row.liq_zone_price : '-'}</td>
+                      <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
                       <td>{typeof mark === 'number' ? mark : '-'}</td>
                       <td>{formatVnTimestamp(markTs)}</td>
                       <td>{typeof marginUsdt === 'number' ? marginUsdt.toFixed(2) : '-'}</td>
@@ -1925,31 +2274,30 @@ function App() {
               <table>
                 <thead>
                   <tr>
-                    <th>ID</th>
-                    <th>Symbol</th>
-                    <th>PnL (USDT)</th>
-                    <th>PnL% (Margin)</th>
-                    <th>MAE%</th>
-                    <th>MFE%</th>
-                    <th>Type</th>
-                    <th>Model</th>
-                    <th>Side</th>
-                    <th>Status</th>
-                    <th>Entry</th>
-                    <th>Close</th>
-                    <th>Close Reason</th>
-                    <th>Result</th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('id')}>ID</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('symbol')}>Symbol</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mfe_pct')}>MFE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('entry_type')}>Type</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('model')}>Model</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('side')}>Side</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('status')}>Status</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('entry_price')}>Entry</button></th>
+                    <th>EMA99 15m</th>
+                    <th>EMA99 1h</th>
+                    <th>Liq Zone</th>
+                    <th>Zone Score</th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_price')}>Close</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_reason')}>Close Reason</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('result')}>Result</button></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {paperHistory.map((row) => {
-                    const closePnlPct = typeof row.pnl_pct === 'number'
-                      ? row.pnl_pct
-                      : (
-                        typeof row.close_price === 'number'
-                          ? calcPnlPct(row.side, row.entry_price, row.close_price, row.leverage)
-                          : null
-                      )
+                  {sortedPaperHistory.map((row) => {
+                    const closePnlPct = resolveClosedPnlPct(row)
+                    const modelSource = tradeModelSource(row.entry_type)
                     return (
                       <tr key={`${row.id}-${row.status}`}>
                         <td>{row.id}</td>
@@ -1988,13 +2336,17 @@ function App() {
                           </span>
                         </td>
                         <td>
-                          <span className={`badge ${tradeModelSource(row.entry_type) === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
-                            {tradeModelSource(row.entry_type)}
+                          <span className={`badge ${tradeModelBadge(modelSource)}`}>
+                            {modelSource}
                           </span>
                         </td>
                         <td>{row.side}</td>
                         <td>{row.status}</td>
                         <td>{row.entry_price}</td>
+                        <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
+                        <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
+                        <td>{typeof row.liq_zone_price === 'number' ? row.liq_zone_price : '-'}</td>
+                        <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
                         <td>{row.close_price ?? '-'}</td>
                         <td>{row.close_reason ?? '-'}</td>
                         <td>{row.result == null ? '-' : row.result === 1 ? 'WIN' : 'LOSS'}</td>
@@ -2319,6 +2671,8 @@ function App() {
                   <th>Entry</th>
                   <th>TP</th>
                   <th>SL</th>
+                  <th>Liq Zone</th>
+                  <th>Liq Value</th>
                   <th>Action</th>
                 </tr>
               </thead>
@@ -2344,29 +2698,49 @@ function App() {
                     <td>{item.predicted_entry_price}</td>
                     <td>{item.take_profit}</td>
                     <td>{item.stop_loss}</td>
+                    <td>{typeof item.liq_zone_price === 'number' ? item.liq_zone_price : '-'}</td>
+                    <td>{formatCompactMoney(item.liq_zone_value)}</td>
                     <td>
-                      <button
-                        type="button"
-                        className="btn-inline"
-                        disabled={
-                          isOpeningMarketOrder
-                          || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
-                        }
-                        onClick={() => {
-                          openPaperMarketOrder({
-                            symbol: item.symbol,
-                            side: item.side,
-                            signal_win_probability: item.win_probability,
-                            entry_price: item.predicted_entry_price,
-                            take_profit: item.take_profit,
-                            stop_loss: item.stop_loss,
-                          }).catch((err) => {
-                            setError(err instanceof Error ? err.message : 'Unknown error')
-                          })
-                        }}
-                      >
-                        {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
-                      </button>
+                      <div className="inline-actions">
+                        <button
+                          type="button"
+                          className="btn-inline"
+                          disabled={
+                            isOpeningMarketOrder
+                            || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
+                          }
+                          onClick={() => {
+                            openPaperMarketOrder({
+                              symbol: item.symbol,
+                              side: item.side,
+                              signal_win_probability: item.win_probability,
+                              entry_price: item.predicted_entry_price,
+                              take_profit: item.take_profit,
+                              stop_loss: item.stop_loss,
+                            }).catch((err) => {
+                              setError(err instanceof Error ? err.message : 'Unknown error')
+                            })
+                          }}
+                        >
+                          {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-inline btn-secondary"
+                          disabled={
+                            isLoadingOrder
+                            || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
+                            || !(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)
+                          }
+                          onClick={() => {
+                            createPendingFromHighWin(item, true).catch((err) => {
+                              setError(err instanceof Error ? err.message : 'Unknown error')
+                            })
+                          }}
+                        >
+                          {isLoadingOrder ? 'Placing...' : 'Limit @Liq'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
