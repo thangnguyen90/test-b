@@ -46,6 +46,7 @@ class PaperTradeAPI:
         self.router = APIRouter(prefix="/api/v1/paper-trades", tags=["paper-trades"])
         self.repo: MySQLTradeRepository | None = None
         self.price_stream = None
+        self.major_symbol_resolver = None
         self.market_client = BinanceFuturesClient()
         self.data_pipeline = DataPipeline()
 
@@ -62,11 +63,19 @@ class PaperTradeAPI:
     def bind_price_stream(self, price_stream: object | None) -> None:
         self.price_stream = price_stream
 
+    def bind_major_symbol_resolver(self, resolver: object | None) -> None:
+        self.major_symbol_resolver = resolver if callable(resolver) else None
+
     @staticmethod
     def _normalize_symbol_key(symbol: str) -> str:
         return str(symbol or "").upper().strip().replace(":USDT", "")
 
     def _is_major_symbol(self, symbol: str) -> bool:
+        if callable(self.major_symbol_resolver):
+            try:
+                return bool(self.major_symbol_resolver(symbol))
+            except Exception:
+                pass
         major_set = {self._normalize_symbol_key(item) for item in settings.paper_trade_major_symbols if item}
         return self._normalize_symbol_key(symbol) in major_set
 

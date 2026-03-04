@@ -37,6 +37,11 @@ class PaperTradingEngine:
         margin_usdt: float = 0.0,
         leverage: int = 5,
         major_symbols: list[str] | None = None,
+        major_dynamic_enabled: bool = True,
+        major_dynamic_refresh_sec: int = 180,
+        major_dynamic_limit: int = 8,
+        major_dynamic_candidates: int = 30,
+        major_dynamic_candle_lookback: int = 24,
         major_symbol_leverage: int = 10,
         major_symbol_max_risk_pct: float = 20.0,
         poll_interval_sec: float = 6.0,
@@ -102,13 +107,20 @@ class PaperTradingEngine:
         self.order_usdt = max(0.0, order_usdt)
         self.margin_usdt = max(0.0, margin_usdt)
         self.leverage = leverage
+        self.major_dynamic_enabled = bool(major_dynamic_enabled)
+        self.major_dynamic_refresh_sec = max(30, int(major_dynamic_refresh_sec))
+        self.major_dynamic_limit = max(1, min(30, int(major_dynamic_limit)))
+        self.major_dynamic_candidates = max(self.major_dynamic_limit, min(120, int(major_dynamic_candidates)))
+        self.major_dynamic_candle_lookback = max(12, min(120, int(major_dynamic_candle_lookback)))
         self.major_symbol_leverage = max(1, int(major_symbol_leverage))
         self.major_symbol_max_risk_pct = max(0.0, float(major_symbol_max_risk_pct))
-        self.major_symbols = {
+        self.major_symbols_static = {
             self._normalize_symbol_key(symbol)
             for symbol in (major_symbols or [])
             if symbol
         }
+        self.major_symbols_runtime: set[str] = set()
+        self._major_symbols_runtime_updated_ts: float = 0.0
         self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
         self.min_sl_pct = min_sl_pct
@@ -198,6 +210,8 @@ class PaperTradingEngine:
     async def _run_once(self) -> None:
         snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
         signals = snapshot.get("signals", [])
+        if self.major_dynamic_enabled:
+            await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)
         open_trades = self.repo.list_open_trades()
         test_symbols: list[str] = []
         if self.test_ml_enabled and self.predictor_test is not None:
@@ -1240,8 +1254,14 @@ class PaperTradingEngine:
         base = str(symbol or "").upper().strip()
         return base.replace(":USDT", "")
 
+    def is_major_symbol(self, symbol: str) -> bool:
+        return self._is_major_symbol(symbol)
+
     def _is_major_symbol(self, symbol: str) -> bool:
-        return self._normalize_symbol_key(symbol) in self.major_symbols
+        key = self._normalize_symbol_key(symbol)
+        if key in self.major_symbols_runtime:
+            return True
+        return key in self.major_symbols_static
 
     def _resolve_symbol_leverage(self, symbol: str) -> int:
         if self._is_major_symbol(symbol):
@@ -1252,6 +1272,94 @@ class PaperTradingEngine:
         if self._is_major_symbol(symbol):
             return max(self.max_risk_pct, self.major_symbol_max_risk_pct)
         return self.max_risk_pct
+
+    def _refresh_major_symbols_runtime(self, signals: list[dict[str, Any]]) -> None:
+        now = time.time()
+        if (now - self._major_symbols_runtime_updated_ts) < self.major_dynamic_refresh_sec:
+            return
+        if not signals:
+            return
+
+        candidates: list[tuple[str, float]] = []
+        for item in signals:
+            symbol = str(item.get("symbol") or "")
+            if not symbol:
+                continue
+            try:
+                win_prob = float(item.get("win_probability") or 0.0)
+            except Exception:
+                win_prob = 0.0
+            candidates.append((symbol, win_prob))
+
+        if not candidates:
+            return
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        selected = candidates[: self.major_dynamic_candidates]
+        scores: list[tuple[str, float]] = []
+
+        turnovers: dict[str, float] = {}
+        momentum_abs: dict[str, float] = {}
+        hist_acc_map: dict[str, float] = {}
+        win_prob_map: dict[str, float] = {}
+
+        for symbol, win_prob in selected:
+            key = self._normalize_symbol_key(symbol)
+            win_prob_map[key] = max(0.0, min(1.0, float(win_prob)))
+            hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
+            hist_acc_map[key] = float(hist_acc) if hist_acc is not None else 0.5
+            turnover = 0.0
+            momentum = 0.0
+            try:
+                rows = self.market_client.fetch_ohlcv(
+                    symbol=symbol,
+                    timeframe="5m",
+                    limit=self.major_dynamic_candle_lookback,
+                )
+                closes = [float(r[4]) for r in rows if len(r) >= 6]
+                vols = [float(r[5]) for r in rows if len(r) >= 6]
+                n = min(len(closes), len(vols))
+                if n > 0:
+                    quote_turns = [max(0.0, closes[i] * vols[i]) for i in range(n)]
+                    turnover = float(sum(quote_turns) / n)
+                    base = closes[0]
+                    if abs(base) > 1e-12:
+                        momentum = abs((closes[-1] - base) / base)
+            except Exception:
+                turnover = 0.0
+                momentum = 0.0
+            turnovers[key] = turnover
+            momentum_abs[key] = momentum
+
+        turnover_values = [math.log10(max(v, 1.0)) for v in turnovers.values()]
+        turnover_min = min(turnover_values) if turnover_values else 0.0
+        turnover_max = max(turnover_values) if turnover_values else 1.0
+        momentum_values = list(momentum_abs.values())
+        momentum_min = min(momentum_values) if momentum_values else 0.0
+        momentum_max = max(momentum_values) if momentum_values else 1.0
+
+        for key in win_prob_map.keys():
+            turnover_raw = math.log10(max(turnovers.get(key, 0.0), 1.0))
+            turnover_norm = (
+                0.5 if turnover_max <= turnover_min else (turnover_raw - turnover_min) / (turnover_max - turnover_min)
+            )
+            momentum_raw = momentum_abs.get(key, 0.0)
+            momentum_norm = (
+                0.0 if momentum_max <= momentum_min else (momentum_raw - momentum_min) / (momentum_max - momentum_min)
+            )
+            score = (
+                (0.45 * turnover_norm)
+                + (0.30 * win_prob_map.get(key, 0.0))
+                + (0.20 * hist_acc_map.get(key, 0.5))
+                + (0.05 * momentum_norm)
+            )
+            scores.append((key, score))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        runtime = {symbol_key for symbol_key, _ in scores[: self.major_dynamic_limit]}
+        if runtime:
+            self.major_symbols_runtime = runtime
+            self._major_symbols_runtime_updated_ts = now
 
     def _is_expired(self, opened_at: Any) -> bool:
         if opened_at is None:
