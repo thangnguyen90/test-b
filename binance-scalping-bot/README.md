@@ -175,6 +175,14 @@ TRAINING_SYMBOLS=SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT
 ML_FEEDBACK_TRAIN_LIMIT=1200
 ML_FEEDBACK_MAE_PENALTY_PCT=20
 ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true
+ML_FEEDBACK_RECOVERY_PENALTY_ENABLED=true
+ML_FEEDBACK_RECOVERY_PENALTY_MAE_PCT=10
+ML_FEEDBACK_RECOVERY_PENALTY_MAX_PNL_PCT=2
+ML_FEEDBACK_RECOVERY_PENALTY_WEIGHT_FACTOR=0.35
+ML_FEEDBACK_GOOD_SIGNAL_BOOST_ENABLED=true
+ML_FEEDBACK_GOOD_SIGNAL_MIN_PNL_PCT=8
+ML_FEEDBACK_GOOD_SIGNAL_MAX_MAE_PCT=4
+ML_FEEDBACK_GOOD_SIGNAL_WEIGHT_MULTIPLIER=1.4
 AUTO_TRAIN_ENABLED=true
 AUTO_TRAIN_INTERVAL_MINUTES=240
 AUTO_TRAIN_STARTUP_DELAY_SEC=30
@@ -203,6 +211,9 @@ PAPER_TRADE_ORDER_USDT=10
 PAPER_TRADE_MARGIN_USDT=0
 PAPER_TRADE_MAINT_MARGIN_RATE=0.02
 PAPER_TRADE_LEVERAGE=5
+PAPER_TRADE_MAJOR_SYMBOLS=BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT
+PAPER_TRADE_MAJOR_LEVERAGE=10
+PAPER_TRADE_MAJOR_MAX_RISK_PCT=20
 PAPER_TRADE_POLL_INTERVAL_SEC=6
 PAPER_TRADE_MIN_SL_PCT=0.008
 PAPER_TRADE_MIN_SL_LOSS_PCT=5
@@ -215,8 +226,35 @@ PAPER_TRADE_MIN_RR=1.5
 PAPER_TRADE_MAX_RISK_PCT=12
 PAPER_TRADE_MAX_HOLD_MINUTES=120
 PAPER_TRADE_DISABLE_SL=false
-PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=15
+PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
+PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true
+PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE=5
+PAPER_TRADE_BTC_FILTER_ENABLED=true
+PAPER_TRADE_BTC_FILTER_TIMEFRAME=15m
+PAPER_TRADE_BTC_FILTER_CACHE_SEC=20
+PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE=0.55
+PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND=true
+PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN=0.77
+PAPER_TRADE_BTC_OVERHEAT_LONG_BLOCK_ENABLED=true
+PAPER_TRADE_BTC_OVERHEAT_RSI_15M_MAX=80
+PAPER_TRADE_BTC_OVERHEAT_RSI_1H_MAX=75
+PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED=true
+PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT=1.2
+PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES=30
+PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES=60
+PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK=true
+PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD=21
+PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT=0.0015
+PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED=true
+PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT=0.8
+PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE=0.55
+PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED=true
+PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE=0.60
+PAPER_TRADE_BTC_FOLLOW_MIN_CORR=0.45
+PAPER_TRADE_BTC_FOLLOW_MIN_BETA=0.20
+PAPER_TRADE_BTC_FOLLOW_LOOKBACK=120
+PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
 ```
 
 - `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
@@ -230,10 +268,37 @@ PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 - `PAPER_TRADE_SL_ATR_MULTIPLIER` dùng ATR để đặt ngưỡng SL tối thiểu theo biến động (0 = tắt ATR).
 - `PAPER_TRADE_MAX_TP_PCT` giới hạn TP tối đa theo `% giá vào` (mặc định 15%).  
 : ví dụ `15` nghĩa là TP không vượt quá `entry +/- 15%`.
-- `PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT` là ngưỡng kích hoạt dời SL theo `%PnL margin` (ví dụ 15%).
+- `PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT` là ngưỡng kích hoạt dời SL theo `%PnL margin` tại `PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE` (ví dụ 5% tại 5x).
 - `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
+- `PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true` sẽ tự scale ngưỡng theo leverage thực tế của lệnh.  
+: ví dụ cấu hình `trigger=5`, `reference_leverage=5` thì lệnh 10x sẽ kích hoạt ở `10%` PnL margin.
+- `PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT` là ngưỡng sốc BTC theo `%` (dựa trên biến động close-to-close hoặc range nến).
+- `PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES` tạm dừng mở lệnh mới sau shock.
+- `PAPER_TRADE_BTC_OVERHEAT_LONG_BLOCK_ENABLED=true` chặn LONG khi BTC đang overheat.
+- `PAPER_TRADE_BTC_OVERHEAT_RSI_15M_MAX` và `PAPER_TRADE_BTC_OVERHEAT_RSI_1H_MAX` là ngưỡng RSI để cho phép LONG.
+- `PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES` khóa riêng lệnh `LONG` sau shock tăng mạnh của BTC.
+- `PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK=true` chỉ mở lại `LONG` khi BTC pullback về EMA.
+- `PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD` chọn EMA dùng xác nhận pullback (`21` hoặc `55`).
+- `PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT` là biên độ cho phép quanh EMA để tính là đã pullback.
+- `PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED=true` sẽ đóng nhanh các lệnh `LONG` đang lãi khi BTC đảo chiều giảm mạnh.
+- `PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT` là ngưỡng đảo chiều mạnh theo `%` để kích hoạt đóng nhanh.
+- `PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE` là độ tin cậy trend SHORT tối thiểu để đóng nhanh (nếu chưa đủ thì vẫn có nhánh fallback khi shock cực mạnh).
 - DB lưu thêm `mae_pct`/`mfe_pct` cho mỗi paper trade (theo % margin), dùng để đánh giá quality tín hiệu.
+- Khi train từ `ml_feedback`, nhãn được ưu tiên theo `close_reason`:
+: `TP` => mẫu tốt (`WIN`), `SL` => mẫu xấu (`LOSS`).
 - Khi train từ `ml_feedback`, nếu `ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true` và lệnh WIN nhưng `mae_pct <= -ML_FEEDBACK_MAE_PENALTY_PCT`, sample sẽ bị đổi nhãn thành LOSS để phạt setup bị âm quá sâu.
+- Với case "âm sâu lâu, cuối cùng chỉ hồi nhẹ/breakeven", bật:
+: `ML_FEEDBACK_RECOVERY_PENALTY_ENABLED=true`.
+: Khi `mae_pct <= -ML_FEEDBACK_RECOVERY_PENALTY_MAE_PCT` và `pnl_pct <= ML_FEEDBACK_RECOVERY_PENALTY_MAX_PNL_PCT`,
+: sample WIN vẫn giữ nhãn nhưng bị giảm trọng số train theo `ML_FEEDBACK_RECOVERY_PENALTY_WEIGHT_FACTOR`.
+- Với case tín hiệu tốt (lãi tốt và drawdown thấp), bật:
+: `ML_FEEDBACK_GOOD_SIGNAL_BOOST_ENABLED=true`.
+: Khi `pnl_pct >= ML_FEEDBACK_GOOD_SIGNAL_MIN_PNL_PCT` và `mae_pct >= -ML_FEEDBACK_GOOD_SIGNAL_MAX_MAE_PCT`,
+: sample WIN sẽ được tăng trọng số train theo `ML_FEEDBACK_GOOD_SIGNAL_WEIGHT_MULTIPLIER`.
+- Có thể cấu hình leverage riêng cho coin lớn:
+: `PAPER_TRADE_MAJOR_SYMBOLS`, `PAPER_TRADE_MAJOR_LEVERAGE`.
+: Ví dụ đặt `PAPER_TRADE_MAJOR_LEVERAGE=10` cho BTC/ETH/BNB/SOL.
+: Risk gate riêng dùng `PAPER_TRADE_MAJOR_MAX_RISK_PCT` (nên >= `leverage * maint_margin_rate * 100`).
 - `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
 : ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
 - `ML_USE_LIQUIDATION_FEATURES=true` bật thêm nhóm feature liquidation proxy (wick + volume spike trên nến 5m) khi train ML.

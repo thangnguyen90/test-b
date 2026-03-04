@@ -67,6 +67,8 @@ class MLPredictor:
         self.last_side_short_samples: int = 0
         self.last_side_balanced: bool = False
         self.last_feedback_penalized_samples: int = 0
+        self.last_feedback_recovery_penalized_samples: int = 0
+        self.last_feedback_good_boosted_samples: int = 0
         self.train_log_path = BASE_DIR / ".runtime" / "ml_train.log"
         self.train_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_model_if_exists()
@@ -140,8 +142,16 @@ class MLPredictor:
             )
 
             feedback_rows = self._load_feedback_rows(limit=settings.ml_feedback_train_limit)
-            feedback_prepared, feedback_penalized = self._build_feedback_dataset(feedback_rows)
+            (
+                feedback_prepared,
+                feedback_penalized,
+                feedback_recovery_penalized,
+                feedback_good_boosted,
+                feedback_weights,
+            ) = self._build_feedback_dataset(feedback_rows)
             self.last_feedback_penalized_samples = int(feedback_penalized)
+            self.last_feedback_recovery_penalized_samples = int(feedback_recovery_penalized)
+            self.last_feedback_good_boosted_samples = int(feedback_good_boosted)
             if not feedback_prepared.features.empty:
                 prepared = PreparedData(
                     features=pd.concat([prepared.features, feedback_prepared.features], ignore_index=True),
@@ -158,6 +168,8 @@ class MLPredictor:
                     "trained_at": None,
                     "feedback_samples": int(len(feedback_prepared.labels)),
                     "feedback_penalized_samples": int(feedback_penalized),
+                    "feedback_recovery_penalized_samples": int(feedback_recovery_penalized),
+                    "feedback_good_boosted_samples": int(feedback_good_boosted),
                 }
                 self._finish_train(
                     result="SKIPPED",
@@ -176,22 +188,32 @@ class MLPredictor:
             self.feature_columns = list(train_feature_columns)
             X = prepared.features[self.feature_columns]
             y = prepared.labels
+            sample_weights = pd.Series(np.ones(len(y), dtype=float), index=X.index, dtype=float)
+            if settings.ml_feedback_use_pnl_weight and len(feedback_weights) > 0 and len(feedback_prepared.features) > 0:
+                feedback_offset = len(X) - len(feedback_prepared.features)
+                tail_len = min(len(feedback_weights), len(X) - feedback_offset)
+                if tail_len > 0:
+                    start = max(0, feedback_offset)
+                    end = start + tail_len
+                    sample_weights.iloc[start:end] = np.asarray(feedback_weights[:tail_len], dtype=float)
             side_long_raw, side_short_raw = self._count_side_samples(X)
-            X, y, side_balanced = self._rebalance_side_samples(X, y)
+            X, y, sample_weights, side_balanced = self._rebalance_side_samples(X, y, sample_weights)
             side_long_used, side_short_used = self._count_side_samples(X)
 
             try:
-                X_train, X_test, y_train, y_test = train_test_split(
+                X_train, X_test, y_train, y_test, w_train, _ = train_test_split(
                     X,
                     y,
+                    sample_weights,
                     test_size=0.2,
                     random_state=42,
                     stratify=y,
                 )
             except ValueError:
-                X_train, X_test, y_train, y_test = train_test_split(
+                X_train, X_test, y_train, y_test, w_train, _ = train_test_split(
                     X,
                     y,
+                    sample_weights,
                     test_size=0.2,
                     random_state=42,
                     stratify=None,
@@ -204,7 +226,7 @@ class MLPredictor:
                 min_samples_leaf=4,
                 n_jobs=-1,
             )
-            model.fit(X_train, y_train)
+            model.fit(X_train, y_train, sample_weight=w_train)
 
             pred = model.predict(X_test)
             prob = model.predict_proba(X_test)[:, 1]
@@ -238,6 +260,8 @@ class MLPredictor:
                 "trained_at": self.trained_at,
                 "feedback_samples": int(len(feedback_prepared.labels)),
                 "feedback_penalized_samples": int(feedback_penalized),
+                "feedback_recovery_penalized_samples": int(feedback_recovery_penalized),
+                "feedback_good_boosted_samples": int(feedback_good_boosted),
                 "side_long_samples_raw": int(side_long_raw),
                 "side_short_samples_raw": int(side_short_raw),
                 "side_long_samples_used": int(side_long_used),
@@ -286,6 +310,8 @@ class MLPredictor:
             "last_side_short_samples": self.last_side_short_samples,
             "last_side_balanced": self.last_side_balanced,
             "last_feedback_penalized_samples": self.last_feedback_penalized_samples,
+            "last_feedback_recovery_penalized_samples": self.last_feedback_recovery_penalized_samples,
+            "last_feedback_good_boosted_samples": self.last_feedback_good_boosted_samples,
             "liquidation_features_enabled": self.use_liquidation_features,
             "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
@@ -381,18 +407,21 @@ class MLPredictor:
     def _rebalance_side_samples(
         features: pd.DataFrame,
         labels: pd.Series,
-    ) -> tuple[pd.DataFrame, pd.Series, bool]:
+        sample_weights: pd.Series | None = None,
+    ) -> tuple[pd.DataFrame, pd.Series, pd.Series, bool]:
+        if sample_weights is None:
+            sample_weights = pd.Series(np.ones(len(features), dtype=float), index=features.index, dtype=float)
         if "setup_side" not in features.columns:
-            return features, labels, False
+            return features, labels, sample_weights.reset_index(drop=True), False
 
         side = pd.to_numeric(features["setup_side"], errors="coerce")
         long_idx = features.index[side >= 0.5].to_numpy()
         short_idx = features.index[side < 0.5].to_numpy()
         if len(long_idx) == 0 or len(short_idx) == 0:
-            return features, labels, False
+            return features, labels, sample_weights.reset_index(drop=True), False
 
         if len(long_idx) == len(short_idx):
-            return features, labels, False
+            return features, labels, sample_weights.reset_index(drop=True), False
 
         rng = np.random.default_rng(42)
         if len(long_idx) > len(short_idx):
@@ -404,7 +433,8 @@ class MLPredictor:
         rng.shuffle(final_idx)
         re_features = features.loc[final_idx].reset_index(drop=True)
         re_labels = labels.loc[final_idx].reset_index(drop=True)
-        return re_features, re_labels, True
+        re_weights = sample_weights.loc[final_idx].reset_index(drop=True)
+        return re_features, re_labels, re_weights, True
 
     def _to_signal(self, symbol: str, side: str, win_prob: float, entry: float, atr: float) -> SignalResult:
         rr = 1.5
@@ -442,13 +472,16 @@ class MLPredictor:
         except Exception:
             return []
 
-    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int]:
+    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int, int, int, list[float]]:
         if not feedback_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, []
 
         feature_rows: list[pd.Series] = []
         labels: list[int] = []
+        weights: list[float] = []
         penalized_count = 0
+        recovery_penalized_count = 0
+        good_boosted_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
 
         for row in feedback_rows:
@@ -461,7 +494,15 @@ class MLPredictor:
             label = int(result)
             if label not in (0, 1):
                 continue
+            close_reason = str(row.get("close_reason") or "").upper()
+            # User rule: TP means good sample, SL means bad sample.
+            if close_reason == "TP":
+                label = 1
+            elif close_reason == "SL":
+                label = 0
 
+            deep_drawdown_recovery = False
+            good_signal = False
             if settings.ml_feedback_flip_win_on_deep_mae and label == 1:
                 mae_pct = row.get("mae_pct")
                 try:
@@ -471,6 +512,37 @@ class MLPredictor:
                 if mae_value <= -abs(settings.ml_feedback_mae_penalty_pct):
                     label = 0
                     penalized_count += 1
+            if settings.ml_feedback_recovery_penalty_enabled and label == 1:
+                try:
+                    mae_value = float(row.get("mae_pct") or 0.0)
+                except Exception:
+                    mae_value = 0.0
+                try:
+                    pnl_pct_value = float(row.get("pnl_pct") or 0.0)
+                except Exception:
+                    pnl_pct_value = 0.0
+                if (
+                    mae_value <= -abs(settings.ml_feedback_recovery_penalty_mae_pct)
+                    and pnl_pct_value <= float(settings.ml_feedback_recovery_penalty_max_pnl_pct)
+                ):
+                    deep_drawdown_recovery = True
+                    recovery_penalized_count += 1
+
+            if settings.ml_feedback_good_signal_boost_enabled and label == 1 and not deep_drawdown_recovery:
+                try:
+                    mae_value = float(row.get("mae_pct") or 0.0)
+                except Exception:
+                    mae_value = 0.0
+                try:
+                    pnl_pct_value = float(row.get("pnl_pct") or 0.0)
+                except Exception:
+                    pnl_pct_value = 0.0
+                if (
+                    pnl_pct_value >= float(settings.ml_feedback_good_signal_min_pnl_pct)
+                    and mae_value >= -abs(float(settings.ml_feedback_good_signal_max_mae_pct))
+                ):
+                    good_signal = True
+                    good_boosted_count += 1
 
             feature_snapshot = self._parse_feature_snapshot(row.get("feature_snapshot_json"))
             if feature_snapshot is None:
@@ -497,13 +569,62 @@ class MLPredictor:
                 continue
             feature_rows.append(sample)
             labels.append(label)
+            weights.append(
+                self._feedback_sample_weight(
+                    row=row,
+                    label=label,
+                    deep_drawdown_recovery=deep_drawdown_recovery,
+                    good_signal=good_signal,
+                )
+            )
 
         if not feature_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), penalized_count
+            return (
+                PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)),
+                penalized_count,
+                recovery_penalized_count,
+                good_boosted_count,
+                [],
+            )
 
         features = pd.DataFrame(feature_rows).reset_index(drop=True)
         labels_series = pd.Series(labels, dtype=int)
-        return PreparedData(features=features, labels=labels_series), penalized_count
+        return (
+            PreparedData(features=features, labels=labels_series),
+            penalized_count,
+            recovery_penalized_count,
+            good_boosted_count,
+            weights,
+        )
+
+    def _feedback_sample_weight(
+        self,
+        row: dict,
+        label: int,
+        deep_drawdown_recovery: bool = False,
+        good_signal: bool = False,
+    ) -> float:
+        weight = 1.0
+        if settings.ml_feedback_use_pnl_weight:
+            try:
+                pnl_pct = float(row.get("pnl_pct") or 0.0)
+            except Exception:
+                pnl_pct = 0.0
+            boost = abs(pnl_pct) * max(0.0, settings.ml_feedback_pnl_weight_factor)
+            boost = min(boost, max(0.0, settings.ml_feedback_pnl_weight_max_boost))
+            if label == 0:
+                boost *= max(1.0, settings.ml_feedback_pnl_loss_boost_multiplier)
+            weight = max(1.0, 1.0 + boost)
+
+        if deep_drawdown_recovery:
+            penalty = float(settings.ml_feedback_recovery_penalty_weight_factor)
+            penalty = min(max(penalty, 0.05), 1.0)
+            weight *= penalty
+
+        if good_signal:
+            boost = max(1.0, float(settings.ml_feedback_good_signal_weight_multiplier))
+            weight *= boost
+        return max(0.05, weight)
 
     @staticmethod
     def _parse_feature_snapshot(raw: object) -> dict[str, float] | None:

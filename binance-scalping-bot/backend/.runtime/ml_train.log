@@ -40,3 +40,17 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-03T12:20:26.380424+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-03T12:54:41.425864+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-03T13:16:36.756532+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T13:39:04.627229+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T14:22:20.143071+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T14:44:21.879012+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T15:54:06.099707+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T19:54:52.173255+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-03T23:55:34.193400+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T01:49:46.885333+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T05:50:23.371220+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T06:26:35.113868+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "manual", "started_at": "2026-03-04T08:45:46.688370+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 32}
+{"event": "FINISH", "trigger": "manual", "result": "SKIPPED", "error": null, "started_at": "2026-03-04T08:45:46.688370+00:00", "finished_at": "2026-03-04T08:45:48.357507+00:00", "duration_sec": 1.669, "payload": {"trained": false, "samples": 0, "features": 22, "accuracy": null, "roc_auc": null, "trained_at": null, "feedback_samples": 0, "feedback_penalized_samples": 0, "feedback_recovery_penalized_samples": 0, "feedback_good_boosted_samples": 0}}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T10:27:14.061513+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T13:28:39.118945+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-04T14:05:16.577893+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

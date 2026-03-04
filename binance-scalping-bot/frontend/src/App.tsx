@@ -277,6 +277,7 @@ type MlStatus = {
 }
 
 type SortDirection = 'asc' | 'desc'
+type ModelViewFilter = 'ALL' | 'ML' | 'LIQ_EMA99' | 'ML_TEST'
 type OpenSortKey =
   | 'id'
   | 'symbol'
@@ -292,6 +293,7 @@ type OpenSortKey =
   | 'mark_ts'
   | 'margin_usdt'
   | 'take_profit'
+  | 'tp_pct'
   | 'stop_loss'
   | 'signal_win_probability'
   | 'effective_win_probability'
@@ -300,6 +302,7 @@ type HistorySortKey =
   | 'symbol'
   | 'pnl'
   | 'pnl_pct'
+  | 'margin_usdt'
   | 'mae_pct'
   | 'mfe_pct'
   | 'entry_type'
@@ -307,6 +310,7 @@ type HistorySortKey =
   | 'side'
   | 'status'
   | 'entry_price'
+  | 'tp_pct'
   | 'close_price'
   | 'close_reason'
   | 'result'
@@ -556,6 +560,15 @@ function formatCompactMoney(value?: number | null): string {
 function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
   if (typeof markPrice !== 'number') return null
   return calcPnlPct(trade.side, trade.entry_price, markPrice, trade.leverage)
+}
+
+function calcTargetPnlPct(
+  side: 'LONG' | 'SHORT',
+  entryPrice: number,
+  targetPrice: number,
+  leverage: number,
+): number | null {
+  return calcPnlPct(side, entryPrice, targetPrice, leverage)
 }
 
 function resolveClosedPnlPct(trade: PaperTrade): number | null {
@@ -902,6 +915,7 @@ function App() {
     key: 'id',
     direction: 'desc',
   })
+  const [paperModelFilter, setPaperModelFilter] = useState<ModelViewFilter>('ALL')
 
   const [selectedCoin, setSelectedCoin] = useState('BTC/USDT')
   const [searchCoin, setSearchCoin] = useState('')
@@ -1041,8 +1055,14 @@ function App() {
         switch (key) {
           case 'pnl_pct':
             return resolveClosedPnlPct(a) ?? Number.NEGATIVE_INFINITY
+          case 'margin_usdt':
+            return (typeof a.margin_usdt === 'number'
+              ? a.margin_usdt
+              : calcMarginUsdt(a.entry_price, a.quantity, a.leverage)) ?? Number.NEGATIVE_INFINITY
           case 'model':
             return tradeModelSource(a.entry_type)
+          case 'tp_pct':
+            return calcTargetPnlPct(a.side, a.entry_price, a.take_profit, a.leverage) ?? Number.NEGATIVE_INFINITY
           case 'result':
             return a.result ?? -1
           case 'entry_type':
@@ -1065,8 +1085,14 @@ function App() {
         switch (key) {
           case 'pnl_pct':
             return resolveClosedPnlPct(b) ?? Number.NEGATIVE_INFINITY
+          case 'margin_usdt':
+            return (typeof b.margin_usdt === 'number'
+              ? b.margin_usdt
+              : calcMarginUsdt(b.entry_price, b.quantity, b.leverage)) ?? Number.NEGATIVE_INFINITY
           case 'model':
             return tradeModelSource(b.entry_type)
+          case 'tp_pct':
+            return calcTargetPnlPct(b.side, b.entry_price, b.take_profit, b.leverage) ?? Number.NEGATIVE_INFINITY
           case 'result':
             return b.result ?? -1
           case 'entry_type':
@@ -1142,6 +1168,8 @@ function App() {
           return marginUsdt ?? Number.NEGATIVE_INFINITY
         case 'take_profit':
           return row.take_profit
+        case 'tp_pct':
+          return calcTargetPnlPct(row.side, row.entry_price, row.take_profit, row.leverage) ?? Number.NEGATIVE_INFINITY
         case 'stop_loss':
           return row.stop_loss
         case 'signal_win_probability':
@@ -1166,6 +1194,27 @@ function App() {
 
     return rows
   }, [paperOpenTrades, openSort, paperLivePrices, paperLivePriceTime])
+  const filteredPaperOpenTrades = useMemo(() => {
+    if (paperModelFilter === 'ALL') return sortedPaperOpenTrades
+    return sortedPaperOpenTrades.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
+  }, [sortedPaperOpenTrades, paperModelFilter])
+  const filteredPaperHistory = useMemo(() => {
+    if (paperModelFilter === 'ALL') return sortedPaperHistory
+    return sortedPaperHistory.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
+  }, [sortedPaperHistory, paperModelFilter])
+  const modelFilterCounts = useMemo(() => {
+    const open = { ML: 0, LIQ_EMA99: 0, ML_TEST: 0 }
+    const closed = { ML: 0, LIQ_EMA99: 0, ML_TEST: 0 }
+    for (const row of paperOpenTrades) {
+      const model = tradeModelSource(row.entry_type)
+      if (model in open) open[model] += 1
+    }
+    for (const row of paperHistory) {
+      const model = tradeModelSource(row.entry_type)
+      if (model in closed) closed[model] += 1
+    }
+    return { open, closed }
+  }, [paperOpenTrades, paperHistory])
   const openTradeKeySet = useMemo(() => {
     const set = new Set<string>()
     for (const row of paperOpenTrades) {
@@ -2144,8 +2193,38 @@ function App() {
           </div>
 
           <h3 className="section-title">Open Paper Trades</h3>
+          <div className="tab-row">
+            <button
+              type="button"
+              className={`tab-btn ${paperModelFilter === 'ALL' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('ALL')}
+            >
+              ALL
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${paperModelFilter === 'ML' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('ML')}
+            >
+              ML ({modelFilterCounts.open.ML}/{modelFilterCounts.closed.ML})
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${paperModelFilter === 'LIQ_EMA99' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('LIQ_EMA99')}
+            >
+              LIQ ({modelFilterCounts.open.LIQ_EMA99}/{modelFilterCounts.closed.LIQ_EMA99})
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${paperModelFilter === 'ML_TEST' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('ML_TEST')}
+            >
+              TEST ({modelFilterCounts.open.ML_TEST}/{modelFilterCounts.closed.ML_TEST})
+            </button>
+          </div>
           <div className="content table-wrap">
-            {paperOpenTrades.length === 0 ? (
+            {filteredPaperOpenTrades.length === 0 ? (
               <p>No open paper trades.</p>
             ) : (
               <table>
@@ -2160,6 +2239,7 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_type')}>Type</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('model')}>Model</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('side')}>Side</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('margin_usdt')}>Margin</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_price')}>Entry</button></th>
                     <th>EMA99 15m</th>
                     <th>EMA99 1h</th>
@@ -2167,8 +2247,8 @@ function App() {
                     <th>Zone Score</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mark_price')}>Mark (WS)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mark_ts')}>Mark TS</button></th>
-                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('margin_usdt')}>Margin (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('take_profit')}>TP</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('tp_pct')}>TP%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('stop_loss')}>SL</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('signal_win_probability')}>Signal%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('effective_win_probability')}>Effective%</button></th>
@@ -2176,11 +2256,12 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedPaperOpenTrades.map((row) => {
+                  {filteredPaperOpenTrades.map((row) => {
                     const mark = resolveLivePrice(row.symbol)
                     const markTs = resolveLiveTime(row.symbol)
                     const modelSource = tradeModelSource(row.entry_type)
                     const upnlPct = calcUnrealizedPnlPct(row, mark)
+                    const tpPct = calcTargetPnlPct(row.side, row.entry_price, row.take_profit, row.leverage)
                     const marginUsdt = typeof row.margin_usdt === 'number'
                       ? row.margin_usdt
                       : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
@@ -2234,6 +2315,7 @@ function App() {
                           {row.side}
                         </span>
                       </td>
+                      <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
                       <td>{row.entry_price}</td>
                       <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
                       <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
@@ -2241,8 +2323,8 @@ function App() {
                       <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
                       <td>{typeof mark === 'number' ? mark : '-'}</td>
                       <td>{formatVnTimestamp(markTs)}</td>
-                      <td>{typeof marginUsdt === 'number' ? marginUsdt.toFixed(2) : '-'}</td>
                       <td>{row.take_profit}</td>
+                      <td>{typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'}</td>
                       <td>{row.stop_loss}</td>
                       <td>{(row.signal_win_probability * 100).toFixed(2)}</td>
                       <td>{(row.effective_win_probability * 100).toFixed(2)}</td>
@@ -2268,7 +2350,7 @@ function App() {
 
           <h3 className="section-title">Closed Trade History</h3>
           <div className="content table-wrap">
-            {paperHistory.length === 0 ? (
+            {filteredPaperHistory.length === 0 ? (
               <p>No closed paper trades yet.</p>
             ) : (
               <table>
@@ -2283,8 +2365,10 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('entry_type')}>Type</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('model')}>Model</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('side')}>Side</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('margin_usdt')}>Margin</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('status')}>Status</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('entry_price')}>Entry</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('tp_pct')}>TP%</button></th>
                     <th>EMA99 15m</th>
                     <th>EMA99 1h</th>
                     <th>Liq Zone</th>
@@ -2295,9 +2379,13 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedPaperHistory.map((row) => {
+                  {filteredPaperHistory.map((row) => {
                     const closePnlPct = resolveClosedPnlPct(row)
                     const modelSource = tradeModelSource(row.entry_type)
+                    const tpPct = calcTargetPnlPct(row.side, row.entry_price, row.take_profit, row.leverage)
+                    const marginUsdt = typeof row.margin_usdt === 'number'
+                      ? row.margin_usdt
+                      : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
                     return (
                       <tr key={`${row.id}-${row.status}`}>
                         <td>{row.id}</td>
@@ -2341,8 +2429,10 @@ function App() {
                           </span>
                         </td>
                         <td>{row.side}</td>
+                        <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
                         <td>{row.status}</td>
                         <td>{row.entry_price}</td>
+                        <td>{typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'}</td>
                         <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
                         <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
                         <td>{typeof row.liq_zone_price === 'number' ? row.liq_zone_price : '-'}</td>
@@ -2670,6 +2760,7 @@ function App() {
                   <th>Signal Margin Ratio%</th>
                   <th>Entry</th>
                   <th>TP</th>
+                  <th>TP%</th>
                   <th>SL</th>
                   <th>Liq Zone</th>
                   <th>Liq Value</th>
@@ -2697,6 +2788,13 @@ function App() {
                     </td>
                     <td>{item.predicted_entry_price}</td>
                     <td>{item.take_profit}</td>
+                    <td>
+                      {(() => {
+                        const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
+                        const tpPct = calcTargetPnlPct(item.side, item.predicted_entry_price, item.take_profit, lev)
+                        return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
+                      })()}
+                    </td>
                     <td>{item.stop_loss}</td>
                     <td>{typeof item.liq_zone_price === 'number' ? item.liq_zone_price : '-'}</td>
                     <td>{formatCompactMoney(item.liq_zone_value)}</td>
@@ -2901,6 +2999,7 @@ function App() {
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_win_probability')}>Win%</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_entry_price')}>Entry</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_take_profit')}>TP</button></th>
+                  <th>TP%</th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_stop_loss')}>SL</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleLiqSort('signal_order_type')}>Signal Type</button></th>
                   <th>Liq Trend</th>
@@ -2932,6 +3031,14 @@ function App() {
                     <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
                     <td>{typeof row.signal_entry_price === 'number' ? row.signal_entry_price.toFixed(row.signal_entry_price >= 100 ? 2 : 6) : '-'}</td>
                     <td>{typeof row.signal_take_profit === 'number' ? row.signal_take_profit.toFixed(row.signal_take_profit >= 100 ? 2 : 6) : '-'}</td>
+                    <td>
+                      {(() => {
+                        const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
+                        if (typeof row.signal_side !== 'string' || typeof row.signal_entry_price !== 'number' || typeof row.signal_take_profit !== 'number') return '-'
+                        const tpPct = calcTargetPnlPct(row.signal_side, row.signal_entry_price, row.signal_take_profit, lev)
+                        return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
+                      })()}
+                    </td>
                     <td>{typeof row.signal_stop_loss === 'number' ? row.signal_stop_loss.toFixed(row.signal_stop_loss >= 100 ? 2 : 6) : '-'}</td>
                     <td>{row.signal_order_type ?? '-'}</td>
                     <td><span className={trend === 'LONG' ? 'pill-long' : 'pill-short'}>{trend}</span></td>

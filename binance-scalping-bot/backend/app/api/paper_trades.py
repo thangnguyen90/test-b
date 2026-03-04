@@ -62,6 +62,24 @@ class PaperTradeAPI:
     def bind_price_stream(self, price_stream: object | None) -> None:
         self.price_stream = price_stream
 
+    @staticmethod
+    def _normalize_symbol_key(symbol: str) -> str:
+        return str(symbol or "").upper().strip().replace(":USDT", "")
+
+    def _is_major_symbol(self, symbol: str) -> bool:
+        major_set = {self._normalize_symbol_key(item) for item in settings.paper_trade_major_symbols if item}
+        return self._normalize_symbol_key(symbol) in major_set
+
+    def _resolve_default_leverage(self, symbol: str) -> int:
+        if self._is_major_symbol(symbol):
+            return max(1, int(settings.paper_trade_major_leverage))
+        return max(1, int(settings.paper_trade_leverage))
+
+    def _resolve_max_risk_pct(self, symbol: str) -> float:
+        if self._is_major_symbol(symbol):
+            return max(float(settings.paper_trade_max_risk_pct), float(settings.paper_trade_major_max_risk_pct))
+        return float(settings.paper_trade_max_risk_pct)
+
     def _require_repo(self) -> MySQLTradeRepository:
         if self.repo is None:
             raise HTTPException(status_code=503, detail="Paper trading DB is not configured")
@@ -187,17 +205,18 @@ class PaperTradeAPI:
             min_rr=settings.paper_trade_min_rr,
             max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
         )
-        leverage = req.leverage or settings.paper_trade_leverage
+        leverage = req.leverage or self._resolve_default_leverage(req.symbol)
         risk_pct = calc_estimated_margin_ratio_pct(
             leverage=leverage,
             maint_margin_rate=settings.paper_trade_maint_margin_rate,
         )
-        if risk_pct > settings.paper_trade_max_risk_pct:
+        max_risk_pct = self._resolve_max_risk_pct(req.symbol)
+        if risk_pct > max_risk_pct:
             raise HTTPException(
                 status_code=422,
                 detail=(
                     f"Risk too high for {req.symbol}: {risk_pct:.2f}% > "
-                    f"max {settings.paper_trade_max_risk_pct:.2f}% (est. margin ratio)"
+                    f"max {max_risk_pct:.2f}% (est. margin ratio)"
                 ),
             )
 

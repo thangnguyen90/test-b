@@ -36,6 +36,9 @@ class PaperTradingEngine:
         order_usdt: float = 10.0,
         margin_usdt: float = 0.0,
         leverage: int = 5,
+        major_symbols: list[str] | None = None,
+        major_symbol_leverage: int = 10,
+        major_symbol_max_risk_pct: float = 20.0,
         poll_interval_sec: float = 6.0,
         stream_max_stale_sec: float = 5.0,
         min_sl_pct: float = 0.004,
@@ -51,6 +54,8 @@ class PaperTradingEngine:
         disable_sl: bool = False,
         move_sl_to_entry_pnl_pct: float = 15.0,
         move_sl_lock_pnl_pct: float = 10.0,
+        move_sl_scale_by_leverage: bool = True,
+        move_sl_reference_leverage: float = 5.0,
         liquid_enabled: bool = False,
         liquid_min_win_probability: float = 0.68,
         liquid_top_vol_days: int = 1,
@@ -62,9 +67,19 @@ class PaperTradingEngine:
         btc_filter_min_confidence: float = 0.55,
         btc_filter_block_countertrend: bool = True,
         btc_filter_countertrend_min_win: float = 0.9,
+        btc_overheat_long_block_enabled: bool = True,
+        btc_overheat_rsi_15m_max: float = 80.0,
+        btc_overheat_rsi_1h_max: float = 75.0,
         btc_shock_pause_enabled: bool = True,
         btc_shock_threshold_pct: float = 1.2,
         btc_shock_cooldown_minutes: int = 30,
+        btc_shock_up_long_block_minutes: int = 60,
+        btc_shock_up_require_pullback: bool = True,
+        btc_shock_pullback_ema_period: int = 21,
+        btc_shock_pullback_tolerance_pct: float = 0.0015,
+        btc_reversal_profit_exit_enabled: bool = True,
+        btc_reversal_threshold_pct: float = 0.8,
+        btc_reversal_min_confidence: float = 0.55,
         btc_profit_lock_enabled: bool = True,
         btc_profit_lock_min_confidence: float = 0.6,
         btc_follow_min_corr: float = 0.45,
@@ -87,6 +102,13 @@ class PaperTradingEngine:
         self.order_usdt = max(0.0, order_usdt)
         self.margin_usdt = max(0.0, margin_usdt)
         self.leverage = leverage
+        self.major_symbol_leverage = max(1, int(major_symbol_leverage))
+        self.major_symbol_max_risk_pct = max(0.0, float(major_symbol_max_risk_pct))
+        self.major_symbols = {
+            self._normalize_symbol_key(symbol)
+            for symbol in (major_symbols or [])
+            if symbol
+        }
         self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
         self.min_sl_pct = min_sl_pct
@@ -101,7 +123,9 @@ class PaperTradingEngine:
         self.max_hold_minutes = max(1, max_hold_minutes)
         self.disable_sl = disable_sl
         self.move_sl_to_entry_pnl_pct = max(0.0, move_sl_to_entry_pnl_pct)
-        self.move_sl_lock_pnl_pct = max(0.0, min(float(move_sl_lock_pnl_pct), self.move_sl_to_entry_pnl_pct))
+        self.move_sl_lock_pnl_pct = max(0.0, float(move_sl_lock_pnl_pct))
+        self.move_sl_scale_by_leverage = bool(move_sl_scale_by_leverage)
+        self.move_sl_reference_leverage = max(0.1, float(move_sl_reference_leverage))
         self.liquid_enabled = liquid_enabled
         self.liquid_min_win_probability = max(0.0, liquid_min_win_probability)
         self.liquid_top_vol_days = max(1, min(7, int(liquid_top_vol_days)))
@@ -113,9 +137,19 @@ class PaperTradingEngine:
         self.btc_filter_min_confidence = max(0.5, min(float(btc_filter_min_confidence), 0.99))
         self.btc_filter_block_countertrend = btc_filter_block_countertrend
         self.btc_filter_countertrend_min_win = max(0.5, min(float(btc_filter_countertrend_min_win), 0.99))
+        self.btc_overheat_long_block_enabled = bool(btc_overheat_long_block_enabled)
+        self.btc_overheat_rsi_15m_max = max(50.0, min(float(btc_overheat_rsi_15m_max), 99.0))
+        self.btc_overheat_rsi_1h_max = max(50.0, min(float(btc_overheat_rsi_1h_max), 99.0))
         self.btc_shock_pause_enabled = btc_shock_pause_enabled
         self.btc_shock_threshold_pct = max(0.2, float(btc_shock_threshold_pct))
         self.btc_shock_cooldown_minutes = max(1, int(btc_shock_cooldown_minutes))
+        self.btc_shock_up_long_block_minutes = max(0, int(btc_shock_up_long_block_minutes))
+        self.btc_shock_up_require_pullback = bool(btc_shock_up_require_pullback)
+        self.btc_shock_pullback_ema_period = int(btc_shock_pullback_ema_period)
+        self.btc_shock_pullback_tolerance_pct = max(0.0, float(btc_shock_pullback_tolerance_pct))
+        self.btc_reversal_profit_exit_enabled = bool(btc_reversal_profit_exit_enabled)
+        self.btc_reversal_threshold_pct = max(0.0, float(btc_reversal_threshold_pct))
+        self.btc_reversal_min_confidence = max(0.0, min(float(btc_reversal_min_confidence), 0.99))
         self.btc_profit_lock_enabled = bool(btc_profit_lock_enabled)
         self.btc_profit_lock_min_confidence = max(0.5, min(float(btc_profit_lock_min_confidence), 0.99))
         self.btc_follow_min_corr = max(0.0, min(float(btc_follow_min_corr), 0.99))
@@ -135,6 +169,7 @@ class PaperTradingEngine:
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
         self._open_pause_reason: str | None = None
+        self._btc_up_shock_long_block_until_ts: float = 0.0
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -246,11 +281,12 @@ class PaperTradingEngine:
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
+                leverage = self._resolve_symbol_leverage(symbol)
                 risk_pct = calc_estimated_margin_ratio_pct(
-                    leverage=self.leverage,
+                    leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
                 )
-                if risk_pct > self.max_risk_pct:
+                if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
@@ -260,7 +296,7 @@ class PaperTradingEngine:
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
 
                 self.repo.create_open_trade(
@@ -277,7 +313,7 @@ class PaperTradingEngine:
                         "liq_zone_score": None,
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
-                        "leverage": self.leverage,
+                        "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
@@ -339,11 +375,12 @@ class PaperTradingEngine:
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
+                leverage = self._resolve_symbol_leverage(symbol)
                 risk_pct = calc_estimated_margin_ratio_pct(
-                    leverage=self.leverage,
+                    leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
                 )
-                if risk_pct > self.max_risk_pct:
+                if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
@@ -353,7 +390,7 @@ class PaperTradingEngine:
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
 
                 self.repo.create_open_trade(
@@ -368,7 +405,7 @@ class PaperTradingEngine:
                         "stop_loss": normalized_sl,
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
-                        "leverage": self.leverage,
+                        "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
@@ -440,11 +477,12 @@ class PaperTradingEngine:
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
+                leverage = self._resolve_symbol_leverage(symbol)
                 risk_pct = calc_estimated_margin_ratio_pct(
-                    leverage=self.leverage,
+                    leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
                 )
-                if risk_pct > self.max_risk_pct:
+                if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
@@ -454,7 +492,7 @@ class PaperTradingEngine:
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=self.leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
 
                 self.repo.create_open_trade(
@@ -469,7 +507,7 @@ class PaperTradingEngine:
                         "stop_loss": normalized_sl,
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
-                        "leverage": self.leverage,
+                        "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
@@ -505,17 +543,36 @@ class PaperTradingEngine:
                     mae_pct=next_mae,
                     mfe_pct=next_mfe,
                 )
-            if not self.disable_sl and pnl_pct >= self.move_sl_to_entry_pnl_pct:
+            move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
+            if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
+                lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
                 locked_sl = self._calc_locked_profit_sl(
                     side=side,
                     entry=entry,
                     mark_price=price,
                     leverage=int(trade["leverage"]),
+                    lock_pnl_pct=lock_pnl_pct,
                 )
                 if locked_sl is not None:
                     if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
                         self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
                         sl = locked_sl
+
+            # If BTC reverses down sharply, close profitable LONGs on BTC-following symbols.
+            if self._should_force_close_profit_on_btc_reversal(
+                symbol=symbol,
+                side=side,
+                pnl=pnl,
+                btc_guard=btc_guard,
+            ):
+                self.repo.close_trade(
+                    trade_id=int(trade["id"]),
+                    close_price=price,
+                    pnl=pnl,
+                    result=1,
+                    close_reason="BTC_REVERSAL_PROFIT_EXIT",
+                )
+                continue
 
             # Lock profit when BTC trend flips against this position for BTC-following symbols only.
             if self._should_close_profit_on_btc_trend(
@@ -745,7 +802,15 @@ class PaperTradingEngine:
             "confidence": 0.0,
             "score": 0.0,
             "timeframe": self.btc_filter_timeframe,
+            "mark_price": 0.0,
+            "ema_fast": 0.0,
+            "ema_slow": 0.0,
+            "rsi_15m": 50.0,
+            "rsi_1h": 50.0,
+            "overheat_long_block": False,
+            "close_to_close_pct": 0.0,
             "shock": False,
+            "shock_direction": "FLAT",
             "shock_move_pct": 0.0,
             "shock_range_pct": 0.0,
             "shock_metric_pct": 0.0,
@@ -770,6 +835,19 @@ class PaperTradingEngine:
             else:
                 ema_fast = self._ema_last(closes[-120:], period=21)
                 ema_slow = self._ema_last(closes[-160:], period=55)
+                rsi_15m = self._rsi_last(closes, period=14)
+                rsi_1h = rsi_15m
+                try:
+                    rows_1h = self.market_client.fetch_ohlcv(
+                        symbol="BTC/USDT",
+                        timeframe="1h",
+                        limit=220,
+                    )
+                    closes_1h = [float(row[4]) for row in rows_1h if len(row) >= 5]
+                    if len(closes_1h) >= 20:
+                        rsi_1h = self._rsi_last(closes_1h, period=14)
+                except Exception:
+                    pass
                 base = max(1e-12, abs(closes[-6]))
                 slope_pct = ((closes[-1] - closes[-6]) / base) * 100.0
 
@@ -786,6 +864,7 @@ class PaperTradingEngine:
 
                 last_row = rows[-1] if rows and len(rows[-1]) >= 5 else None
                 prev_close = closes[-2] if len(closes) >= 2 else closes[-1]
+                close_to_close_pct = 0.0
                 shock_move_pct = 0.0
                 shock_range_pct = 0.0
                 if last_row is not None:
@@ -794,18 +873,36 @@ class PaperTradingEngine:
                     low_px = float(last_row[3])
                     close_px = float(last_row[4])
                     if abs(prev_close) > 1e-12:
-                        shock_move_pct = abs((close_px - prev_close) / prev_close) * 100.0
+                        close_to_close_pct = ((close_px - prev_close) / prev_close) * 100.0
+                        shock_move_pct = abs(close_to_close_pct)
                     if abs(open_px) > 1e-12:
                         shock_range_pct = abs((high_px - low_px) / open_px) * 100.0
                 shock_metric_pct = max(shock_move_pct, shock_range_pct)
                 shock = self.btc_shock_pause_enabled and (shock_metric_pct >= self.btc_shock_threshold_pct)
+                overheat_long_block = self.btc_overheat_long_block_enabled and (
+                    rsi_15m >= self.btc_overheat_rsi_15m_max or rsi_1h >= self.btc_overheat_rsi_1h_max
+                )
+                if close_to_close_pct > 0:
+                    shock_direction = "UP"
+                elif close_to_close_pct < 0:
+                    shock_direction = "DOWN"
+                else:
+                    shock_direction = "FLAT"
 
                 payload = {
                     "side": trend_side,
                     "confidence": float(confidence),
                     "score": float(score),
                     "timeframe": self.btc_filter_timeframe,
+                    "mark_price": float(closes[-1]),
+                    "ema_fast": float(ema_fast),
+                    "ema_slow": float(ema_slow),
+                    "rsi_15m": float(rsi_15m),
+                    "rsi_1h": float(rsi_1h),
+                    "overheat_long_block": bool(overheat_long_block),
+                    "close_to_close_pct": float(close_to_close_pct),
                     "shock": bool(shock),
+                    "shock_direction": shock_direction,
                     "shock_move_pct": float(shock_move_pct),
                     "shock_range_pct": float(shock_range_pct),
                     "shock_metric_pct": float(shock_metric_pct),
@@ -817,6 +914,10 @@ class PaperTradingEngine:
         return payload
 
     def _pass_btc_filter(self, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
+        if not self._pass_btc_overheat_long_guard(side=side, btc_guard=btc_guard):
+            return False
+        if not self._pass_btc_up_shock_long_guard(side=side, btc_guard=btc_guard):
+            return False
         if not self.btc_filter_enabled:
             return True
         trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
@@ -859,6 +960,42 @@ class PaperTradingEngine:
         if confidence < self.btc_profit_lock_min_confidence:
             return False
         return self._is_symbol_following_btc(symbol)
+
+    def _should_force_close_profit_on_btc_reversal(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        pnl: float,
+        btc_guard: dict[str, Any],
+    ) -> bool:
+        if not self.btc_reversal_profit_exit_enabled:
+            return False
+        if pnl <= 0:
+            return False
+        if side.upper() != "LONG":
+            return False
+        if not self._is_symbol_following_btc(symbol):
+            return False
+
+        shock_direction = str(btc_guard.get("shock_direction") or "FLAT").upper()
+        if shock_direction != "DOWN":
+            return False
+        try:
+            shock_metric_pct = float(btc_guard.get("shock_metric_pct") or 0.0)
+        except Exception:
+            shock_metric_pct = 0.0
+        if shock_metric_pct < self.btc_reversal_threshold_pct:
+            return False
+
+        trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
+        try:
+            confidence = float(btc_guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if trend_side == "SHORT" and confidence >= self.btc_reversal_min_confidence:
+            return True
+        return shock_metric_pct >= (self.btc_reversal_threshold_pct * 1.2)
 
     def _is_symbol_following_btc(self, symbol: str) -> bool:
         normalized = str(symbol).strip()
@@ -911,6 +1048,44 @@ class PaperTradingEngine:
             self._open_pause_until_ts = pause_until
             metric = float(btc_guard.get("shock_metric_pct") or 0.0)
             self._open_pause_reason = f"BTC_SHOCK_{metric:.2f}%"
+        shock_direction = str(btc_guard.get("shock_direction") or "FLAT").upper()
+        if shock_direction == "UP" and self.btc_shock_up_long_block_minutes > 0:
+            long_block_until = now + (self.btc_shock_up_long_block_minutes * 60)
+            self._btc_up_shock_long_block_until_ts = max(self._btc_up_shock_long_block_until_ts, long_block_until)
+
+    def _pass_btc_up_shock_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
+        if str(side or "").upper() != "LONG":
+            return True
+        if self._btc_up_shock_long_block_until_ts <= 0:
+            return True
+        now = time.time()
+        if now >= self._btc_up_shock_long_block_until_ts:
+            self._btc_up_shock_long_block_until_ts = 0.0
+            return True
+        if self.btc_shock_up_require_pullback and self._btc_pullback_to_ema_met(btc_guard):
+            self._btc_up_shock_long_block_until_ts = 0.0
+            return True
+        return False
+
+    def _pass_btc_overheat_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
+        if str(side or "").upper() != "LONG":
+            return True
+        return not bool(btc_guard.get("overheat_long_block"))
+
+    def _btc_pullback_to_ema_met(self, btc_guard: dict[str, Any]) -> bool:
+        try:
+            mark_price = float(btc_guard.get("mark_price") or 0.0)
+            ema_fast = float(btc_guard.get("ema_fast") or 0.0)
+            ema_slow = float(btc_guard.get("ema_slow") or 0.0)
+        except Exception:
+            return False
+        if mark_price <= 0:
+            return False
+        ema_ref = ema_fast if self.btc_shock_pullback_ema_period <= 21 else ema_slow
+        if ema_ref <= 0:
+            return False
+        threshold = ema_ref * (1.0 + self.btc_shock_pullback_tolerance_pct)
+        return mark_price <= threshold
 
     def _is_open_paused(self) -> bool:
         now = time.time()
@@ -929,6 +1104,25 @@ class PaperTradingEngine:
         for value in values[1:]:
             ema = (float(value) * alpha) + (ema * (1.0 - alpha))
         return float(ema)
+
+    @staticmethod
+    def _rsi_last(values: list[float], period: int = 14) -> float:
+        if len(values) < period + 1:
+            return 50.0
+        gains: list[float] = []
+        losses: list[float] = []
+        for idx in range(1, len(values)):
+            delta = float(values[idx]) - float(values[idx - 1])
+            gains.append(max(delta, 0.0))
+            losses.append(max(-delta, 0.0))
+        window_gains = gains[-period:]
+        window_losses = losses[-period:]
+        avg_gain = sum(window_gains) / max(1, len(window_gains))
+        avg_loss = sum(window_losses) / max(1, len(window_losses))
+        if avg_loss <= 1e-12:
+            return 100.0 if avg_gain > 1e-12 else 50.0
+        rs = avg_gain / avg_loss
+        return float(100.0 - (100.0 / (1.0 + rs)))
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
@@ -1011,13 +1205,21 @@ class PaperTradingEngine:
         move = (mark_price - entry) / entry if side == "LONG" else (entry - mark_price) / entry
         return move * leverage * 100
 
-    def _calc_locked_profit_sl(self, side: str, entry: float, mark_price: float, leverage: int) -> float | None:
+    def _calc_locked_profit_sl(
+        self,
+        side: str,
+        entry: float,
+        mark_price: float,
+        leverage: int,
+        lock_pnl_pct: float | None = None,
+    ) -> float | None:
         if entry <= 0 or leverage <= 0:
             return None
-        if self.move_sl_lock_pnl_pct <= 0:
+        effective_lock_pnl_pct = self.move_sl_lock_pnl_pct if lock_pnl_pct is None else max(0.0, float(lock_pnl_pct))
+        if effective_lock_pnl_pct <= 0:
             return entry
 
-        lock_move_pct = (self.move_sl_lock_pnl_pct / 100.0) / float(leverage)
+        lock_move_pct = (effective_lock_pnl_pct / 100.0) / float(leverage)
         if side == "LONG":
             target = entry * (1.0 + lock_move_pct)
             # Keep SL slightly below mark to avoid accidental instant close on update tick.
@@ -1026,6 +1228,30 @@ class PaperTradingEngine:
         target = entry * (1.0 - lock_move_pct)
         # Keep SL slightly above mark to avoid accidental instant close on update tick.
         return max(target, mark_price * 1.00001)
+
+    def _resolve_move_sl_trigger_pnl_pct(self, leverage: int) -> float:
+        trigger = self.move_sl_to_entry_pnl_pct
+        if self.move_sl_scale_by_leverage and leverage > 0:
+            trigger = trigger * (float(leverage) / self.move_sl_reference_leverage)
+        return max(0.0, trigger)
+
+    @staticmethod
+    def _normalize_symbol_key(symbol: str) -> str:
+        base = str(symbol or "").upper().strip()
+        return base.replace(":USDT", "")
+
+    def _is_major_symbol(self, symbol: str) -> bool:
+        return self._normalize_symbol_key(symbol) in self.major_symbols
+
+    def _resolve_symbol_leverage(self, symbol: str) -> int:
+        if self._is_major_symbol(symbol):
+            return self.major_symbol_leverage
+        return self.leverage
+
+    def _resolve_symbol_max_risk_pct(self, symbol: str) -> float:
+        if self._is_major_symbol(symbol):
+            return max(self.max_risk_pct, self.major_symbol_max_risk_pct)
+        return self.max_risk_pct
 
     def _is_expired(self, opened_at: Any) -> bool:
         if opened_at is None:

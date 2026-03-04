@@ -230,6 +230,7 @@ class MySQLTradeRepository:
                         feature_captured_at DATETIME(6) NULL,
                         result TINYINT NOT NULL,
                         pnl DOUBLE NOT NULL,
+                        pnl_pct DOUBLE NULL,
                         created_at DATETIME(6) NOT NULL,
                         INDEX idx_symbol_created(symbol, created_at),
                         INDEX idx_result_created(result, created_at)
@@ -287,6 +288,19 @@ class MySQLTradeRepository:
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute(
                         "ALTER TABLE ml_feedback ADD COLUMN feature_captured_at DATETIME(6) NULL AFTER feature_snapshot_json"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='pnl_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE ml_feedback ADD COLUMN pnl_pct DOUBLE NULL AFTER pnl"
                     )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
@@ -397,14 +411,29 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone()
                 if row:
+                    pnl_value = float(row.get("pnl") if row.get("pnl") is not None else pnl)
+                    try:
+                        margin_base = float(row.get("margin_usdt") or 0.0)
+                    except Exception:
+                        margin_base = 0.0
+                    if margin_base <= 0:
+                        try:
+                            entry = float(row.get("entry_price") or 0.0)
+                            qty = float(row.get("quantity") or 0.0)
+                            lev = float(row.get("leverage") or 0.0)
+                            if entry > 0 and qty > 0 and lev > 0:
+                                margin_base = (entry * qty) / lev
+                        except Exception:
+                            margin_base = 0.0
+                    pnl_pct = (pnl_value / margin_base) * 100.0 if margin_base > 0 else None
                     cur.execute(
                         """
                         INSERT INTO ml_feedback (
                             paper_trade_id, symbol, side, signal_win_probability,
                             effective_win_probability, mae_pct, mfe_pct,
                             feature_snapshot_json, feature_captured_at,
-                            result, pnl, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            result, pnl, pnl_pct, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             row["id"],
@@ -417,7 +446,8 @@ class MySQLTradeRepository:
                             row.get("feature_snapshot_json"),
                             row.get("feature_captured_at"),
                             result,
-                            pnl,
+                            pnl_value,
+                            pnl_pct,
                             now,
                         ),
                     )
@@ -633,7 +663,7 @@ class MySQLTradeRepository:
                     SELECT result
                     FROM ml_feedback
                     WHERE symbol=%s
-                    ORDER BY created_at DESC
+                    ORDER BY f.created_at DESC
                     LIMIT {safe_lookback}
                     """,
                     (symbol,),
@@ -651,9 +681,20 @@ class MySQLTradeRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT symbol, side, result, mae_pct, mfe_pct, created_at,
-                           feature_snapshot_json, feature_captured_at
-                    FROM ml_feedback
+                    SELECT
+                        f.symbol,
+                        f.side,
+                        f.result,
+                        p.close_reason,
+                        f.mae_pct,
+                        f.mfe_pct,
+                        f.created_at,
+                        f.feature_snapshot_json,
+                        f.feature_captured_at,
+                        f.pnl,
+                        f.pnl_pct
+                    FROM ml_feedback f
+                    LEFT JOIN paper_trades p ON p.id = f.paper_trade_id
                     ORDER BY created_at DESC
                     LIMIT {safe_limit}
                     """
