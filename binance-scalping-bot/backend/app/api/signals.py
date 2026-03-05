@@ -114,6 +114,50 @@ def _evaluate_paper_entry_gate(
         except Exception:
             return False, "Repo unavailable", raw_win_probability, None
 
+        # Align precheck with engine flip rule:
+        # opposite-direction open trades must be profitable before allowing a flip.
+        try:
+            open_rows = repo.list_open_trades()
+        except Exception:
+            open_rows = []
+        target_side = str(side or "").upper()
+        opposite_rows: list[dict] = []
+        for row in open_rows:
+            row_symbol = str(row.get("symbol") or "")
+            row_side = str(row.get("side") or "").upper()
+            if row_symbol != symbol:
+                continue
+            if row_side not in {"LONG", "SHORT"}:
+                continue
+            if row_side == target_side:
+                continue
+            opposite_rows.append(row)
+        if opposite_rows:
+            try:
+                has_non_positive_pnl = False
+                for row in opposite_rows:
+                    row_side = str(row.get("side") or "").upper()
+                    row_entry = float(row.get("entry_price") or 0.0)
+                    row_qty = float(row.get("quantity") or 0.0)
+                    if row_entry <= 0 or row_qty <= 0:
+                        has_non_positive_pnl = True
+                        break
+                    row_pnl = float(
+                        engine._calc_pnl(
+                            side=row_side,
+                            entry=row_entry,
+                            close_price=float(market_price),
+                            quantity=row_qty,
+                        )
+                    )
+                    if row_pnl <= 0:
+                        has_non_positive_pnl = True
+                        break
+                if has_non_positive_pnl:
+                    return False, "Opposite open PnL<=0", raw_win_probability, None
+            except Exception:
+                return False, "Opposite check unavailable", raw_win_probability, None
+
         min_win = float(getattr(engine, "min_win_probability", 0.75))
         if raw_win_probability < min_win:
             return False, f"Win<{min_win * 100:.1f}%", raw_win_probability, None

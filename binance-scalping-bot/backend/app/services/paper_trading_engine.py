@@ -217,6 +217,8 @@ class PaperTradingEngine:
             # Never block TP/SL management because scan failed.
             print(f"[paper-engine] scan failed, continue with open-trade management only: {type(exc).__name__}: {exc}")
         open_trades = self.repo.list_open_trades()
+        open_trades_by_symbol = self._index_open_trades_by_symbol(open_trades)
+        closed_trade_ids: set[int] = set()
         test_symbols: list[str] = []
         if self.test_ml_enabled and self.predictor_test is not None:
             test_symbols = await asyncio.to_thread(get_cached_symbols_snapshot, self.test_ml_max_symbols)
@@ -283,6 +285,14 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+                if not self._handle_opposite_signal_on_touch(
+                    symbol=symbol,
+                    target_side=side,
+                    market_price=float(market_price),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                ):
+                    continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -318,7 +328,7 @@ class PaperTradingEngine:
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
-                self.repo.create_open_trade(
+                trade_id = self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
@@ -338,6 +348,14 @@ class PaperTradingEngine:
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
                     }
+                )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
                 )
 
         # 1a) Optional test model: open separated ML_TEST orders for side-by-side comparison.
@@ -379,6 +397,14 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=raw_prob, btc_guard=btc_guard):
                     continue
+                if not self._handle_opposite_signal_on_touch(
+                    symbol=symbol,
+                    target_side=side,
+                    market_price=float(market_price),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                ):
+                    continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -414,7 +440,7 @@ class PaperTradingEngine:
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
-                self.repo.create_open_trade(
+                trade_id = self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
@@ -432,6 +458,14 @@ class PaperTradingEngine:
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
                     }
+                )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
                 )
                 opened_test_orders += 1
 
@@ -483,6 +517,14 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+                if not self._handle_opposite_signal_on_touch(
+                    symbol=symbol,
+                    target_side=side,
+                    market_price=float(market_price),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                ):
+                    continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -518,7 +560,7 @@ class PaperTradingEngine:
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
-                self.repo.create_open_trade(
+                trade_id = self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
@@ -537,10 +579,21 @@ class PaperTradingEngine:
                         "feature_snapshot": feature_snapshot,
                     }
                 )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
+                )
 
         # 2) Manage open trades: close on TP, otherwise apply timeout policy.
         for trade in open_trades:
             try:
+                trade_id = int(trade.get("id") or 0)
+                if trade_id in closed_trade_ids:
+                    continue
                 symbol = str(trade["symbol"])
                 side = str(trade["side"])
                 price = market_prices.get(symbol)
@@ -682,6 +735,107 @@ class PaperTradingEngine:
                     f"[paper-engine] manage trade failed id={trade_id} symbol={symbol}: "
                     f"{type(exc).__name__}: {exc}"
                 )
+
+    def _index_open_trades_by_symbol(self, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        out: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            key = self._normalize_symbol_key(symbol)
+            out.setdefault(key, []).append(row)
+        return out
+
+    def _cache_open_trade_row(
+        self,
+        *,
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+        trade_id: int,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        quantity: float,
+    ) -> None:
+        key = self._normalize_symbol_key(symbol)
+        open_trades_by_symbol.setdefault(key, []).append(
+            {
+                "id": int(trade_id),
+                "symbol": symbol,
+                "side": side,
+                "status": "OPEN",
+                "entry_price": float(entry_price),
+                "quantity": float(quantity),
+            }
+        )
+
+    def _handle_opposite_signal_on_touch(
+        self,
+        *,
+        symbol: str,
+        target_side: str,
+        market_price: float,
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+        closed_trade_ids: set[int],
+    ) -> bool:
+        key = self._normalize_symbol_key(symbol)
+        bucket = open_trades_by_symbol.get(key, [])
+        if not bucket:
+            return True
+
+        target_side_key = str(target_side or "").upper()
+        opposite_open_rows: list[dict[str, Any]] = []
+        for row in bucket:
+            trade_id = int(row.get("id") or 0)
+            if trade_id in closed_trade_ids:
+                continue
+            status = str(row.get("status") or "OPEN").upper()
+            side = str(row.get("side") or "").upper()
+            if status != "OPEN":
+                continue
+            if side and side != target_side_key:
+                opposite_open_rows.append(row)
+
+        if not opposite_open_rows:
+            return True
+
+        close_items: list[tuple[int, float]] = []
+        for row in opposite_open_rows:
+            try:
+                trade_id = int(row.get("id") or 0)
+                side = str(row.get("side") or "").upper()
+                entry = float(row.get("entry_price") or 0.0)
+                qty = float(row.get("quantity") or 0.0)
+            except Exception:
+                return False
+            if trade_id <= 0 or side not in {"LONG", "SHORT"} or entry <= 0 or qty <= 0:
+                return False
+
+            pnl = self._calc_pnl(side=side, entry=entry, close_price=float(market_price), quantity=qty)
+            if pnl <= 0:
+                return False
+            close_items.append((trade_id, float(pnl)))
+
+        for trade_id, pnl in close_items:
+            try:
+                self.repo.close_trade(
+                    trade_id=trade_id,
+                    close_price=float(market_price),
+                    pnl=float(pnl),
+                    result=1,
+                    close_reason="OPPOSITE_SIGNAL_FLIP",
+                )
+                closed_trade_ids.add(trade_id)
+            except Exception:
+                return False
+
+        kept_rows: list[dict[str, Any]] = []
+        for row in bucket:
+            trade_id = int(row.get("id") or 0)
+            if trade_id in closed_trade_ids:
+                continue
+            kept_rows.append(row)
+        open_trades_by_symbol[key] = kept_rows
+        return True
 
     def _resolve_market_price(self, symbol: str) -> float | None:
         try:
