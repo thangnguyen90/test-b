@@ -8,6 +8,7 @@ class PaperTrade(BaseModel):
     id: int
     symbol: str
     side: str
+    btc_following: Optional[bool] = None
     entry_type: str = "LIMIT"
     signal_win_probability: float
     effective_win_probability: float

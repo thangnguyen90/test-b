@@ -47,6 +47,7 @@ class PaperTradeAPI:
         self.repo: MySQLTradeRepository | None = None
         self.price_stream = None
         self.major_symbol_resolver = None
+        self.btc_follow_resolver = None
         self.market_client = BinanceFuturesClient()
         self.data_pipeline = DataPipeline()
 
@@ -65,6 +66,9 @@ class PaperTradeAPI:
 
     def bind_major_symbol_resolver(self, resolver: object | None) -> None:
         self.major_symbol_resolver = resolver if callable(resolver) else None
+
+    def bind_btc_follow_resolver(self, resolver: object | None) -> None:
+        self.btc_follow_resolver = resolver if callable(resolver) else None
 
     @staticmethod
     def _normalize_symbol_key(symbol: str) -> str:
@@ -94,8 +98,25 @@ class PaperTradeAPI:
             raise HTTPException(status_code=503, detail="Paper trading DB is not configured")
         return self.repo
 
+    def _resolve_btc_follow_map(self, rows: list[dict]) -> dict[str, bool | None]:
+        if not rows:
+            return {}
+        symbols = sorted({str(item.get("symbol") or "").strip() for item in rows if item.get("symbol")})
+        if not symbols:
+            return {}
+        if not callable(self.btc_follow_resolver):
+            return {sym: None for sym in symbols}
+
+        out: dict[str, bool | None] = {}
+        for symbol in symbols:
+            try:
+                out[symbol] = bool(self.btc_follow_resolver(symbol))
+            except Exception:
+                out[symbol] = None
+        return out
+
     @staticmethod
-    def _map_trade(row: dict) -> PaperTrade:
+    def _map_trade(row: dict, btc_following: bool | None = None) -> PaperTrade:
         entry_price = float(row["entry_price"])
         quantity = float(row["quantity"])
         leverage = int(row["leverage"])
@@ -114,6 +135,7 @@ class PaperTradeAPI:
             id=int(row["id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
+            btc_following=btc_following,
             entry_type=str(row.get("entry_type") or "LIMIT"),
             signal_win_probability=float(row["signal_win_probability"]),
             effective_win_probability=float(row.get("effective_win_probability") or row["signal_win_probability"]),
@@ -142,12 +164,18 @@ class PaperTradeAPI:
     def get_open(self) -> PaperTradeListResponse:
         repo = self._require_repo()
         rows = repo.list_open_trades()
-        return PaperTradeListResponse(items=[self._map_trade(row) for row in rows])
+        btc_follow_map = self._resolve_btc_follow_map(rows)
+        return PaperTradeListResponse(
+            items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
+        )
 
     def get_history(self, limit: int = Query(default=200, ge=1, le=2000)) -> PaperTradeListResponse:
         repo = self._require_repo()
         rows = repo.list_recent_trades(limit=limit)
-        return PaperTradeListResponse(items=[self._map_trade(row) for row in rows])
+        btc_follow_map = self._resolve_btc_follow_map(rows)
+        return PaperTradeListResponse(
+            items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
+        )
 
     def get_stats(self) -> PaperTradeStatsResponse:
         repo = self._require_repo()

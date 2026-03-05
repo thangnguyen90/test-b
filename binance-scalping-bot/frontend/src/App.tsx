@@ -139,6 +139,7 @@ type PaperTrade = {
   id: number
   symbol: string
   side: 'LONG' | 'SHORT'
+  btc_following?: boolean | null
   entry_type?: 'LIMIT' | 'MARKET' | string
   signal_win_probability: number
   effective_win_probability: number
@@ -2418,6 +2419,7 @@ function App() {
                   <tr>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
+                    <th>BTC Follow</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
@@ -2458,6 +2460,13 @@ function App() {
                     <tr key={row.id}>
                       <td>{row.id}</td>
                       <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                      <td>
+                        {typeof row.btc_following === 'boolean' ? (
+                          <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
+                            {row.btc_following ? 'YES' : 'NO'}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>
                         {typeof upnlUsdt === 'number' ? (
                           <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -2544,6 +2553,7 @@ function App() {
                   <tr>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('symbol')}>Symbol</button></th>
+                    <th>BTC Follow</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
@@ -2576,6 +2586,13 @@ function App() {
                       <tr key={`${row.id}-${row.status}`}>
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>
+                          {typeof row.btc_following === 'boolean' ? (
+                            <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
+                              {row.btc_following ? 'YES' : 'NO'}
+                            </span>
+                          ) : '-'}
+                        </td>
                         <td>
                           {typeof row.pnl === 'number' ? (
                             <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>

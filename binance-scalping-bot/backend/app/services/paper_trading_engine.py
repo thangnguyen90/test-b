@@ -941,6 +941,9 @@ class PaperTradingEngine:
             return False
         if not self.btc_filter_enabled:
             return True
+        # BTC trend filter only applies to symbols that statistically move with BTC.
+        if not self._is_symbol_following_btc(symbol):
+            return True
         trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
         try:
             confidence = float(btc_guard.get("confidence") or 0.0)
@@ -1303,6 +1306,9 @@ class PaperTradingEngine:
 
     def is_major_symbol(self, symbol: str) -> bool:
         return self._is_major_symbol(symbol)
+
+    def is_symbol_following_btc(self, symbol: str) -> bool:
+        return self._is_symbol_following_btc(symbol)
 
     def _is_major_symbol(self, symbol: str) -> bool:
         key = self._normalize_symbol_key(symbol)

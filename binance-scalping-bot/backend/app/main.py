@@ -53,6 +53,7 @@ async def on_startup() -> None:
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
+    paper_trade_api.bind_btc_follow_resolver(None)
     bind_paper_trade_runtime(None, None)
     if settings.mysql_enabled:
         try:
@@ -134,6 +135,7 @@ async def on_startup() -> None:
                 test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
+            paper_trade_api.bind_btc_follow_resolver(paper_trade_engine.is_symbol_following_btc)
             bind_paper_trade_runtime(paper_trade_repo, paper_trade_engine)
             await paper_trade_engine.start()
         except Exception:
@@ -141,6 +143,7 @@ async def on_startup() -> None:
             paper_trade_engine = None
             paper_trade_api.bind_repo(None)
             paper_trade_api.bind_major_symbol_resolver(None)
+            paper_trade_api.bind_btc_follow_resolver(None)
             bind_paper_trade_runtime(None, None)
 
     await ws_manager.start()
