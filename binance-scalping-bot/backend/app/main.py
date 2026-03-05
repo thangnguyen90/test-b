@@ -45,6 +45,7 @@ async def on_startup() -> None:
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
+    paper_trade_api.bind_major_symbols_snapshot_getter(None)
     if settings.mysql_enabled:
         try:
             paper_trade_repo = MySQLTradeRepository(
@@ -86,6 +87,7 @@ async def on_startup() -> None:
                 maint_margin_rate=settings.paper_trade_maint_margin_rate,
                 max_risk_pct=settings.paper_trade_max_risk_pct,
                 max_hold_minutes=settings.paper_trade_max_hold_minutes,
+                max_open_trades=settings.paper_trade_max_open_trades,
                 disable_sl=settings.paper_trade_disable_sl,
                 move_sl_to_entry_pnl_pct=settings.paper_trade_move_sl_to_entry_pnl_pct,
                 move_sl_lock_pnl_pct=settings.paper_trade_move_sl_lock_pnl_pct,
@@ -127,12 +129,14 @@ async def on_startup() -> None:
                 test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
+            paper_trade_api.bind_major_symbols_snapshot_getter(paper_trade_engine.get_major_symbols_snapshot)
             await paper_trade_engine.start()
         except Exception:
             paper_trade_repo = None
             paper_trade_engine = None
             paper_trade_api.bind_repo(None)
             paper_trade_api.bind_major_symbol_resolver(None)
+            paper_trade_api.bind_major_symbols_snapshot_getter(None)
 
     await ws_manager.start()
     await price_stream.start()
@@ -143,6 +147,8 @@ async def on_startup() -> None:
 async def on_shutdown() -> None:
     if paper_trade_engine is not None:
         await paper_trade_engine.stop()
+    paper_trade_api.bind_major_symbol_resolver(None)
+    paper_trade_api.bind_major_symbols_snapshot_getter(None)
     await auto_trainer.stop()
     await price_stream.stop()
     await ws_manager.stop()

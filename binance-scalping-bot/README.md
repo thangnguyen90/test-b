@@ -230,6 +230,7 @@ PAPER_TRADE_MAX_TP_PCT=15
 PAPER_TRADE_MIN_RR=1.5
 PAPER_TRADE_MAX_RISK_PCT=12
 PAPER_TRADE_MAX_HOLD_MINUTES=120
+PAPER_TRADE_MAX_OPEN_TRADES=120
 PAPER_TRADE_DISABLE_SL=false
 PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
@@ -309,8 +310,14 @@ PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
 : Engine tự chọn coin lớn từ **tín hiệu model hiện tại + hiệu quả DB + dữ liệu nến 5m**.
 : Điều chỉnh bằng `PAPER_TRADE_MAJOR_DYNAMIC_REFRESH_SEC`, `PAPER_TRADE_MAJOR_DYNAMIC_LIMIT`,
 : `PAPER_TRADE_MAJOR_DYNAMIC_CANDIDATES`, `PAPER_TRADE_MAJOR_DYNAMIC_CANDLE_LOOKBACK`.
+- Xem danh sách major dynamic đang áp dụng:
+```bash
+curl -s http://127.0.0.1:8000/api/v1/paper-trades/major-symbols
+```
 - `PAPER_TRADE_MIN_SL_LOSS_PCT` = mức lỗ tối thiểu theo `% giá trị lệnh (order_usdt)` khi chạm SL.  
 : ví dụ đặt `5` thì khoảng cách SL tối thiểu theo giá sẽ là `5%`.
+- `PAPER_TRADE_MAX_OPEN_TRADES` = giới hạn tổng số lệnh `OPEN` cùng lúc (gồm cả `LIMIT`/`MARKET`/`ML_TEST`/`LIQ_EMA99`).
+: đặt `0` để tắt giới hạn.
 - `ML_USE_LIQUIDATION_FEATURES=true` bật thêm nhóm feature liquidation proxy (wick + volume spike trên nến 5m) khi train ML.
 - `LIQUID_ML_ENABLED=true` bật model riêng cho liquid + EMA99 (15m/1h), chạy trên danh sách top volatility coin.
 - Entry của model liquid neo theo EMA99 gần nhất (15m hoặc 1h), sau đó vẫn đi qua normalize TP/SL và rule risk chung trước khi mở lệnh.

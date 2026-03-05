@@ -47,6 +47,7 @@ class PaperTradeAPI:
         self.repo: MySQLTradeRepository | None = None
         self.price_stream = None
         self.major_symbol_resolver = None
+        self.major_symbols_snapshot_getter = None
         self.market_client = BinanceFuturesClient()
         self.data_pipeline = DataPipeline()
 
@@ -54,6 +55,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
+        self.router.add_api_route("/major-symbols", self.get_major_symbols, methods=["GET"])
         self.router.add_api_route("/market-open", self.market_open, methods=["POST"], response_model=PaperTrade)
         self.router.add_api_route("/close/{trade_id}", self.manual_close, methods=["POST"], response_model=PaperTrade)
 
@@ -65,6 +67,9 @@ class PaperTradeAPI:
 
     def bind_major_symbol_resolver(self, resolver: object | None) -> None:
         self.major_symbol_resolver = resolver if callable(resolver) else None
+
+    def bind_major_symbols_snapshot_getter(self, getter: object | None) -> None:
+        self.major_symbols_snapshot_getter = getter if callable(getter) else None
 
     @staticmethod
     def _normalize_symbol_key(symbol: str) -> str:
@@ -167,10 +172,40 @@ class PaperTradeAPI:
         rows = repo.daily_summary(days=days)
         return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
 
+    def get_major_symbols(self) -> dict:
+        if callable(self.major_symbols_snapshot_getter):
+            try:
+                payload = self.major_symbols_snapshot_getter()
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
+        return {
+            "dynamic_enabled": bool(settings.paper_trade_major_dynamic_enabled),
+            "source": "static_fallback",
+            "effective_symbols": [self._normalize_symbol_key(item) for item in settings.paper_trade_major_symbols if item],
+            "runtime_symbols": [],
+            "static_symbols": [self._normalize_symbol_key(item) for item in settings.paper_trade_major_symbols if item],
+            "runtime_updated_at": None,
+            "runtime_ranked": [],
+            "major_leverage": int(settings.paper_trade_major_leverage),
+            "major_max_risk_pct": float(settings.paper_trade_major_max_risk_pct),
+        }
+
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._require_repo()
         if repo.has_open_trade(symbol=req.symbol, side=req.side):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
+        if settings.paper_trade_max_open_trades > 0:
+            open_count = len(repo.list_open_trades())
+            if open_count >= settings.paper_trade_max_open_trades:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Open trade limit reached: "
+                        f"{open_count}/{settings.paper_trade_max_open_trades}"
+                    ),
+                )
 
         market_price = req.entry_price
         if market_price is None:
