@@ -61,3 +61,7 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-04T21:31:33.264369+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-05T00:29:49.921990+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-05T01:31:56.831384+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-05T04:05:59.129773+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-05T04:33:58.836121+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-05T04:36:58.111803+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-05T04:45:16.606006+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

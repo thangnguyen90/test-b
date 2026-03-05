@@ -342,6 +342,7 @@ const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
+const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
 const FALLBACK_COINS = [
@@ -539,6 +540,20 @@ function calcMarginUsdt(entryPrice: number, quantity: number, leverage: number):
   return (entryPrice * quantity) / leverage
 }
 
+function isEntryTouchedNow(
+  side: 'LONG' | 'SHORT',
+  entryPrice: number,
+  markPrice?: number,
+): boolean {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return false
+  if (!Number.isFinite(markPrice) || (markPrice as number) <= 0) return false
+  const touchUp = entryPrice * (1 + ENTRY_TOUCH_SLIPPAGE)
+  const touchDown = entryPrice * (1 - ENTRY_TOUCH_SLIPPAGE)
+  return side === 'LONG'
+    ? (markPrice as number) <= touchUp
+    : (markPrice as number) >= touchDown
+}
+
 function formatVnTimestamp(value?: string | null): string {
   if (!value) return '-'
   const date = new Date(value)
@@ -560,6 +575,10 @@ function formatCompactMoney(value?: number | null): string {
 function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
   if (typeof markPrice !== 'number') return null
   return calcPnlPct(trade.side, trade.entry_price, markPrice, trade.leverage)
+}
+
+function highWinSignalKey(symbol: string, side: 'LONG' | 'SHORT'): string {
+  return `${canonicalSymbol(symbol)}:${side}`
 }
 
 function calcTargetPnlPct(
@@ -866,6 +885,9 @@ function App() {
   const [marketPriceTime, setMarketPriceTime] = useState<string | null>(null)
   const [hoverInfo, setHoverInfo] = useState<HoverPayload | null>(null)
   const [highWinSignals, setHighWinSignals] = useState<ScanSignalItem[]>([])
+  const [highWinLivePrices, setHighWinLivePrices] = useState<Record<string, number>>({})
+  const [highWinLivePriceTime, setHighWinLivePriceTime] = useState<Record<string, string>>({})
+  const [highWinBlockedReasons, setHighWinBlockedReasons] = useState<Record<string, 'Risk' | 'API' | 'No liq zone'>>({})
   const [scannedCount, setScannedCount] = useState(0)
   const [signalsWsStatus, setSignalsWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [klineSeries, setKlineSeries] = useState<number[]>([])
@@ -1047,6 +1069,24 @@ function App() {
     })
     return rows
   }, [liqOverview, liqSort])
+  const sortedHighWinSignals = useMemo(() => {
+    const rows = [...highWinSignals]
+    rows.sort((a, b) => {
+      if (a.win_probability !== b.win_probability) {
+        return b.win_probability - a.win_probability
+      }
+      return a.symbol.localeCompare(b.symbol)
+    })
+    return rows
+  }, [highWinSignals])
+  const highWinWsSymbols = useMemo(() => {
+    const set = new Set<string>()
+    for (const row of highWinSignals) {
+      if (!row?.symbol) continue
+      set.add(row.symbol)
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [highWinSignals])
   const sortedPaperHistory = useMemo(() => {
     const rows = [...paperHistory]
     const { key, direction } = historySort
@@ -1297,6 +1337,21 @@ function App() {
     )
   }
 
+  function classifyBlockedReasonFromError(message: string): 'Risk' | 'API' | 'No liq zone' {
+    const text = message.toLowerCase()
+    if (text.includes('risk too high')) return 'Risk'
+    if (text.includes('liq') && text.includes('zone')) return 'No liq zone'
+    return 'API'
+  }
+
+  function getHighWinBlockedReason(item: ScanSignalItem): 'Duplicate' | 'Risk' | 'API' | 'No liq zone' | '-' {
+    const key = highWinSignalKey(item.symbol, item.side)
+    if (openTradeKeySet.has(key)) return 'Duplicate'
+    if (highWinBlockedReasons[key]) return highWinBlockedReasons[key]
+    if (!(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)) return 'No liq zone'
+    return '-'
+  }
+
   async function openFromLiqRow(row: LiquidationOverviewItem) {
     if (!canOpenFromLiq(row) || !row.signal_side) return
     await openPaperMarketOrder({
@@ -1335,6 +1390,24 @@ function App() {
     if (paperLivePriceTime[symbol] != null) return paperLivePriceTime[symbol]
     const key = canonicalSymbol(symbol)
     for (const [k, v] of Object.entries(paperLivePriceTime)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
+  }
+
+  function resolveHighWinPrice(symbol: string): number | undefined {
+    if (highWinLivePrices[symbol] != null) return highWinLivePrices[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(highWinLivePrices)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
+  }
+
+  function resolveHighWinTime(symbol: string): string | undefined {
+    if (highWinLivePriceTime[symbol] != null) return highWinLivePriceTime[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(highWinLivePriceTime)) {
       if (canonicalSymbol(k) === key) return v
     }
     return undefined
@@ -1471,7 +1544,6 @@ function App() {
     const data = (await response.json()) as ScanSignalsResponse
     setHighWinSignals(data.signals ?? [])
     setScannedCount(data.scanned ?? 0)
-    setSignalsWsStatus('fallback')
   }
 
   async function fetchPaperTradingStats() {
@@ -1663,8 +1735,7 @@ function App() {
     const liqEntry = item.liq_zone_price
     const entryPrice = (useLiqZone && typeof liqEntry === 'number' && liqEntry > 0) ? liqEntry : baseEntry
     if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
-      setError(`Invalid entry price for ${item.symbol}`)
-      return
+      throw new Error(`Invalid entry price for ${item.symbol}`)
     }
 
     const tpDist = Math.abs(item.take_profit - baseEntry)
@@ -1695,7 +1766,7 @@ function App() {
       }
       await fetchPendingOrders()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error')
+      throw err
     } finally {
       setIsLoadingOrder(false)
     }
@@ -1985,7 +2056,6 @@ function App() {
   }, [autoLiqMarketEnabled, sortedLiqOverview, isOpeningMarketOrder])
 
   useEffect(() => {
-    setSignalsWsStatus('fallback')
     fetchHighWinSignals().catch(() => {
       // Initial fetch.
     })
@@ -1998,6 +2068,117 @@ function App() {
       window.clearInterval(timer)
     }
   }, [])
+
+  useEffect(() => {
+    if (highWinWsSymbols.length === 0) {
+      setSignalsWsStatus('fallback')
+      setHighWinLivePrices({})
+      setHighWinLivePriceTime({})
+      return () => undefined
+    }
+
+    let socket: WebSocket | null = null
+    let reconnectTimer: number | null = null
+    let fallbackTimer: number | null = null
+    let mounted = true
+
+    const fetchBatchFallback = async () => {
+      const response = await fetch(
+        `${API_BASE}/api/v1/market/prices?symbols=${encodeURIComponent(highWinWsSymbols.join(','))}`,
+      )
+      if (!response.ok) throw new Error('Cannot fetch high-win market prices')
+      const data = await response.json() as MarketPricesBatchResponse
+      const prices = data.prices ?? {}
+      if (!mounted) return
+      setHighWinLivePrices((prev) => ({ ...prev, ...prices }))
+      if (data.timestamps && Object.keys(data.timestamps).length > 0) {
+        setHighWinLivePriceTime((prev) => ({ ...prev, ...data.timestamps }))
+      } else if (data.timestamp) {
+        const stamp = data.timestamp
+        const updates: Record<string, string> = {}
+        for (const key of Object.keys(prices)) updates[key] = stamp
+        setHighWinLivePriceTime((prev) => ({ ...prev, ...updates }))
+      }
+    }
+
+    const stopFallback = () => {
+      if (fallbackTimer != null) {
+        window.clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
+    }
+
+    const startFallback = () => {
+      if (fallbackTimer != null) return
+      setSignalsWsStatus('fallback')
+      fallbackTimer = window.setInterval(() => {
+        fetchBatchFallback().catch(() => {
+          // Keep last prices if fallback request fails.
+        })
+      }, 2000)
+    }
+
+    const connect = () => {
+      if (!mounted) return
+      setSignalsWsStatus('connecting')
+      const wsUrl = `${WS_BASE}/ws/prices?symbols=${encodeURIComponent(highWinWsSymbols.join(','))}&interval_sec=1`
+      socket = new WebSocket(wsUrl)
+
+      socket.onopen = () => {
+        if (!mounted) return
+        setSignalsWsStatus('live')
+        stopFallback()
+      }
+
+      socket.onmessage = (event) => {
+        if (!mounted) return
+        try {
+          const payload = JSON.parse(event.data) as PriceStreamMessage
+          if (payload.type === 'prices_error') {
+            startFallback()
+            return
+          }
+          if (payload.type !== 'prices' || !payload.prices) return
+          setSignalsWsStatus('live')
+          stopFallback()
+          setHighWinLivePrices((prev) => ({ ...prev, ...payload.prices }))
+          if (payload.timestamps && Object.keys(payload.timestamps).length > 0) {
+            setHighWinLivePriceTime((prev) => ({ ...prev, ...payload.timestamps! }))
+          } else if (payload.timestamp) {
+            const stamp = payload.timestamp
+            const updates: Record<string, string> = {}
+            for (const key of Object.keys(payload.prices)) updates[key] = stamp
+            setHighWinLivePriceTime((prev) => ({ ...prev, ...updates }))
+          }
+        } catch {
+          // ignore malformed payload
+        }
+      }
+
+      socket.onerror = () => {
+        if (!mounted) return
+        startFallback()
+      }
+
+      socket.onclose = () => {
+        if (!mounted) return
+        startFallback()
+        reconnectTimer = window.setTimeout(connect, 4000)
+      }
+    }
+
+    fetchBatchFallback().catch(() => {
+      // WS may still connect and recover.
+    })
+    connect()
+
+    return () => {
+      mounted = false
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
+      stopFallback()
+      socket?.close()
+    }
+  }, [highWinWsSymbols])
 
   useEffect(() => {
     let socket: WebSocket | null = null
@@ -2747,7 +2928,7 @@ function App() {
           </div>
         </header>
         <div className="content table-wrap">
-          {highWinSignals.length === 0 ? (
+          {sortedHighWinSignals.length === 0 ? (
             <p>No coin currently above 70% win probability.</p>
           ) : (
             <table>
@@ -2759,6 +2940,9 @@ function App() {
                   <th>Win%</th>
                   <th>Signal Margin Ratio%</th>
                   <th>Entry</th>
+                  <th>Mark (WS)</th>
+                  <th>Can Enter</th>
+                  <th>Blocked Reason</th>
                   <th>TP</th>
                   <th>TP%</th>
                   <th>SL</th>
@@ -2768,7 +2952,12 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {highWinSignals.map((item) => (
+                {sortedHighWinSignals.map((item) => {
+                  const mark = resolveHighWinPrice(item.symbol)
+                  const markTs = resolveHighWinTime(item.symbol)
+                  const canEnter = isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
+                  const blockedReason = getHighWinBlockedReason(item)
+                  return (
                   <tr key={`${item.symbol}-${item.side}`}>
                     <td>
                       {renderSymbolJump(item.symbol, item.predicted_entry_price)}
@@ -2787,6 +2976,15 @@ function App() {
                       </span>
                     </td>
                     <td>{item.predicted_entry_price}</td>
+                    <td title={markTs ? `WS: ${formatVnTimestamp(markTs)}` : 'No WS timestamp'}>
+                      {typeof mark === 'number' ? mark : '-'}
+                    </td>
+                    <td>
+                      <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
+                        {canEnter ? 'READY' : 'WAIT'}
+                      </span>
+                    </td>
+                    <td>{blockedReason}</td>
                     <td>{item.take_profit}</td>
                     <td>
                       {(() => {
@@ -2808,6 +3006,7 @@ function App() {
                             || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
                           }
                           onClick={() => {
+                            const key = highWinSignalKey(item.symbol, item.side)
                             openPaperMarketOrder({
                               symbol: item.symbol,
                               side: item.side,
@@ -2815,7 +3014,19 @@ function App() {
                               entry_price: item.predicted_entry_price,
                               take_profit: item.take_profit,
                               stop_loss: item.stop_loss,
+                            }).then(() => {
+                              setHighWinBlockedReasons((prev) => {
+                                if (!(key in prev)) return prev
+                                const next = { ...prev }
+                                delete next[key]
+                                return next
+                              })
                             }).catch((err) => {
+                              const message = err instanceof Error ? err.message : 'Unknown error'
+                              setHighWinBlockedReasons((prev) => ({
+                                ...prev,
+                                [key]: classifyBlockedReasonFromError(message),
+                              }))
                               setError(err instanceof Error ? err.message : 'Unknown error')
                             })
                           }}
@@ -2831,8 +3042,19 @@ function App() {
                             || !(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)
                           }
                           onClick={() => {
+                            const key = highWinSignalKey(item.symbol, item.side)
+                            if (!(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)) {
+                              setHighWinBlockedReasons((prev) => ({ ...prev, [key]: 'No liq zone' }))
+                              setError(`No liq zone for ${item.symbol}`)
+                              return
+                            }
                             createPendingFromHighWin(item, true).catch((err) => {
-                              setError(err instanceof Error ? err.message : 'Unknown error')
+                              const message = err instanceof Error ? err.message : 'Unknown error'
+                              setHighWinBlockedReasons((prev) => ({
+                                ...prev,
+                                [key]: classifyBlockedReasonFromError(message),
+                              }))
+                              setError(message)
                             })
                           }}
                         >
@@ -2841,7 +3063,7 @@ function App() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                )})}
               </tbody>
             </table>
           )}

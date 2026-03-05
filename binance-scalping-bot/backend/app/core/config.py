@@ -107,7 +107,6 @@ class Settings(BaseModel):
     paper_trade_min_rr: float = float(os.getenv("PAPER_TRADE_MIN_RR", "1.5"))
     paper_trade_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAX_RISK_PCT", "12"))
     paper_trade_max_hold_minutes: int = int(os.getenv("PAPER_TRADE_MAX_HOLD_MINUTES", "120"))
-    paper_trade_max_open_trades: int = int(os.getenv("PAPER_TRADE_MAX_OPEN_TRADES", "120"))
     paper_trade_disable_sl: bool = os.getenv("PAPER_TRADE_DISABLE_SL", "false").lower() == "true"
     paper_trade_move_sl_to_entry_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT", "15"))
     paper_trade_move_sl_lock_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT", "10"))
@@ -119,9 +118,6 @@ class Settings(BaseModel):
     paper_trade_btc_filter_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE", "0.55"))
     paper_trade_btc_filter_block_countertrend: bool = os.getenv("PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND", "true").lower() == "true"
     paper_trade_btc_filter_countertrend_min_win: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN", "0.9"))
-    paper_trade_btc_overheat_long_block_enabled: bool = os.getenv("PAPER_TRADE_BTC_OVERHEAT_LONG_BLOCK_ENABLED", "true").lower() == "true"
-    paper_trade_btc_overheat_rsi_15m_max: float = float(os.getenv("PAPER_TRADE_BTC_OVERHEAT_RSI_15M_MAX", "80"))
-    paper_trade_btc_overheat_rsi_1h_max: float = float(os.getenv("PAPER_TRADE_BTC_OVERHEAT_RSI_1H_MAX", "75"))
     paper_trade_btc_shock_pause_enabled: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED", "true").lower() == "true"
     paper_trade_btc_shock_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT", "1.2"))
     paper_trade_btc_shock_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES", "30"))

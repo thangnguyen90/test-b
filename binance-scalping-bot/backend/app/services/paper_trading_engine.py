@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import math
 import time
+import traceback
 from typing import Any
 
 from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
@@ -56,7 +57,6 @@ class PaperTradingEngine:
         maint_margin_rate: float = 0.02,
         max_risk_pct: float = 12.0,
         max_hold_minutes: int = 120,
-        max_open_trades: int = 120,
         disable_sl: bool = False,
         move_sl_to_entry_pnl_pct: float = 15.0,
         move_sl_lock_pnl_pct: float = 10.0,
@@ -73,9 +73,6 @@ class PaperTradingEngine:
         btc_filter_min_confidence: float = 0.55,
         btc_filter_block_countertrend: bool = True,
         btc_filter_countertrend_min_win: float = 0.9,
-        btc_overheat_long_block_enabled: bool = True,
-        btc_overheat_rsi_15m_max: float = 80.0,
-        btc_overheat_rsi_1h_max: float = 75.0,
         btc_shock_pause_enabled: bool = True,
         btc_shock_threshold_pct: float = 1.2,
         btc_shock_cooldown_minutes: int = 30,
@@ -121,12 +118,9 @@ class PaperTradingEngine:
             if symbol
         }
         self.major_symbols_runtime: set[str] = set()
-        self.major_symbols_runtime_ranked: list[dict[str, Any]] = []
         self._major_symbols_runtime_updated_ts: float = 0.0
         self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
-        # Close logic may use slightly stale stream price when REST is unavailable (e.g. 418/503).
-        self.stream_max_stale_close_sec = max(self.stream_max_stale_sec, 120.0)
         self.min_sl_pct = min_sl_pct
         self.min_sl_loss_pct = max(0.0, min_sl_loss_pct)
         self.sl_extra_buffer_pct = max(0.0, sl_extra_buffer_pct)
@@ -137,7 +131,6 @@ class PaperTradingEngine:
         self.maint_margin_rate = max(0.0, maint_margin_rate)
         self.max_risk_pct = max(0.0, max_risk_pct)
         self.max_hold_minutes = max(1, max_hold_minutes)
-        self.max_open_trades = max(0, int(max_open_trades))
         self.disable_sl = disable_sl
         self.move_sl_to_entry_pnl_pct = max(0.0, move_sl_to_entry_pnl_pct)
         self.move_sl_lock_pnl_pct = max(0.0, float(move_sl_lock_pnl_pct))
@@ -154,9 +147,6 @@ class PaperTradingEngine:
         self.btc_filter_min_confidence = max(0.5, min(float(btc_filter_min_confidence), 0.99))
         self.btc_filter_block_countertrend = btc_filter_block_countertrend
         self.btc_filter_countertrend_min_win = max(0.5, min(float(btc_filter_countertrend_min_win), 0.99))
-        self.btc_overheat_long_block_enabled = bool(btc_overheat_long_block_enabled)
-        self.btc_overheat_rsi_15m_max = max(50.0, min(float(btc_overheat_rsi_15m_max), 99.0))
-        self.btc_overheat_rsi_1h_max = max(50.0, min(float(btc_overheat_rsi_1h_max), 99.0))
         self.btc_shock_pause_enabled = btc_shock_pause_enabled
         self.btc_shock_threshold_pct = max(0.2, float(btc_shock_threshold_pct))
         self.btc_shock_cooldown_minutes = max(1, int(btc_shock_cooldown_minutes))
@@ -184,7 +174,6 @@ class PaperTradingEngine:
         self._top_vol_cache: tuple[float, list[str]] | None = None
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
-        self._price_skip_log_ts: dict[int, float] = {}
         self._open_pause_until_ts: float = 0.0
         self._open_pause_reason: str | None = None
         self._btc_up_shock_long_block_until_ts: float = 0.0
@@ -208,18 +197,23 @@ class PaperTradingEngine:
         while self._running:
             try:
                 await self._run_once()
-            except Exception:
-                # Keep the worker alive even if one iteration fails.
-                pass
+            except Exception as exc:
+                # Keep the worker alive even if one iteration fails, but do not fail silently.
+                print(f"[paper-engine] loop error: {type(exc).__name__}: {exc}")
+                traceback.print_exc()
             await asyncio.sleep(self.poll_interval_sec)
 
     async def _run_once(self) -> None:
-        snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
-        signals = snapshot.get("signals", [])
-        if self.major_dynamic_enabled:
-            await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)
+        signals: list[dict[str, Any]] = []
+        try:
+            snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
+            signals = snapshot.get("signals", [])
+            if self.major_dynamic_enabled:
+                await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)
+        except Exception as exc:
+            # Never block TP/SL management because scan failed.
+            print(f"[paper-engine] scan failed, continue with open-trade management only: {type(exc).__name__}: {exc}")
         open_trades = self.repo.list_open_trades()
-        open_trade_count = len(open_trades)
         test_symbols: list[str] = []
         if self.test_ml_enabled and self.predictor_test is not None:
             test_symbols = await asyncio.to_thread(get_cached_symbols_snapshot, self.test_ml_max_symbols)
@@ -253,8 +247,6 @@ class PaperTradingEngine:
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
         if not open_paused:
             for item in signals:
-                if self.max_open_trades > 0 and open_trade_count >= self.max_open_trades:
-                    break
                 raw_prob = float(item.get("win_probability") or 0.0)
                 if raw_prob < self.min_win_probability:
                     continue
@@ -342,14 +334,11 @@ class PaperTradingEngine:
                         "feature_snapshot": feature_snapshot,
                     }
                 )
-                open_trade_count += 1
 
         # 1a) Optional test model: open separated ML_TEST orders for side-by-side comparison.
         if (not open_paused) and self.test_ml_enabled and self.predictor_test is not None:
             opened_test_orders = 0
             for symbol in test_symbols:
-                if self.max_open_trades > 0 and open_trade_count >= self.max_open_trades:
-                    break
                 if opened_test_orders >= self.test_ml_max_orders_per_cycle:
                     break
                 market_price = market_prices.get(symbol)
@@ -438,13 +427,10 @@ class PaperTradingEngine:
                     }
                 )
                 opened_test_orders += 1
-                open_trade_count += 1
 
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
         if (not open_paused) and self.liquid_enabled and self.liquid_predictor is not None:
             for symbol in top_vol_symbols:
-                if self.max_open_trades > 0 and open_trade_count >= self.max_open_trades:
-                    break
                 market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
@@ -542,158 +528,151 @@ class PaperTradingEngine:
                         "feature_snapshot": feature_snapshot,
                     }
                 )
-                open_trade_count += 1
 
         # 2) Manage open trades: close on TP, otherwise apply timeout policy.
         for trade in open_trades:
-            trade_id = int(trade["id"])
-            symbol = str(trade["symbol"])
-            side = str(trade["side"])
-            price = market_prices.get(symbol)
-            if price is None:
-                stream_price = await self._resolve_stream_price(symbol)
-                if stream_price is not None:
-                    price = stream_price
-                else:
-                    # Fallback: if fresh WS is missing, still use WS cache up to a wider age window
-                    # so TP/SL can be evaluated even when REST is rate-limited.
-                    stale_stream_price = await self._resolve_stream_price_allow_stale(
-                        symbol=symbol,
-                        max_age_sec=self.stream_max_stale_close_sec,
+            try:
+                symbol = str(trade["symbol"])
+                side = str(trade["side"])
+                price = market_prices.get(symbol)
+                if price is None:
+                    stream_price = await self._resolve_stream_price(symbol)
+                    price = stream_price if stream_price is not None else await asyncio.to_thread(self._resolve_market_price, symbol)
+                if price is None:
+                    continue
+
+                entry = float(trade["entry_price"])
+                tp = float(trade["take_profit"])
+                sl = float(trade["stop_loss"])
+                qty = float(trade["quantity"])
+                pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
+
+                # Once ROI reaches trigger, move SL to a locked-profit level.
+                pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
+                prev_mae = float(trade.get("mae_pct") or 0.0)
+                prev_mfe = float(trade.get("mfe_pct") or 0.0)
+                next_mae = min(prev_mae, pnl_pct)
+                next_mfe = max(prev_mfe, pnl_pct)
+                if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
+                    self.repo.update_trade_excursions(
+                        trade_id=int(trade["id"]),
+                        mae_pct=next_mae,
+                        mfe_pct=next_mfe,
                     )
-                    if stale_stream_price is not None:
-                        price = stale_stream_price
-                    else:
-                        price = await asyncio.to_thread(self._resolve_market_price, symbol)
-            if price is None:
-                self._maybe_log_price_skip(trade_id=trade_id, symbol=symbol)
-                continue
+                move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
+                if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
+                    lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
+                    locked_sl = self._calc_locked_profit_sl(
+                        side=side,
+                        entry=entry,
+                        mark_price=price,
+                        leverage=int(trade["leverage"]),
+                        lock_pnl_pct=lock_pnl_pct,
+                    )
+                    if locked_sl is not None:
+                        if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
+                            self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
+                            sl = locked_sl
 
-            entry = float(trade["entry_price"])
-            tp = float(trade["take_profit"])
-            sl = float(trade["stop_loss"])
-            qty = float(trade["quantity"])
-            pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
-
-            # Once ROI reaches trigger, move SL to a locked-profit level.
-            pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
-            prev_mae = float(trade.get("mae_pct") or 0.0)
-            prev_mfe = float(trade.get("mfe_pct") or 0.0)
-            next_mae = min(prev_mae, pnl_pct)
-            next_mfe = max(prev_mfe, pnl_pct)
-            if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
-                self.repo.update_trade_excursions(
-                    trade_id=int(trade["id"]),
-                    mae_pct=next_mae,
-                    mfe_pct=next_mfe,
-                )
-            move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
-            if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
-                lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
-                locked_sl = self._calc_locked_profit_sl(
+                # If BTC reverses down sharply, close profitable LONGs on BTC-following symbols.
+                if self._should_force_close_profit_on_btc_reversal(
+                    symbol=symbol,
                     side=side,
-                    entry=entry,
-                    mark_price=price,
-                    leverage=int(trade["leverage"]),
-                    lock_pnl_pct=lock_pnl_pct,
-                )
-                if locked_sl is not None:
-                    if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
-                        self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
-                        sl = locked_sl
-
-            # If BTC reverses down sharply, close profitable LONGs on BTC-following symbols.
-            if self._should_force_close_profit_on_btc_reversal(
-                symbol=symbol,
-                side=side,
-                pnl=pnl,
-                btc_guard=btc_guard,
-            ):
-                self.repo.close_trade(
-                    trade_id=trade_id,
-                    close_price=price,
                     pnl=pnl,
-                    result=1,
-                    close_reason="BTC_REVERSAL_PROFIT_EXIT",
-                )
-                continue
+                    btc_guard=btc_guard,
+                ):
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=1,
+                        close_reason="BTC_REVERSAL_PROFIT_EXIT",
+                    )
+                    continue
 
-            # Lock profit when BTC trend flips against this position for BTC-following symbols only.
-            if self._should_close_profit_on_btc_trend(
-                symbol=symbol,
-                side=side,
-                pnl=pnl,
-                btc_guard=btc_guard,
-            ):
-                self.repo.close_trade(
-                    trade_id=trade_id,
-                    close_price=price,
+                # Lock profit when BTC trend flips against this position for BTC-following symbols only.
+                if self._should_close_profit_on_btc_trend(
+                    symbol=symbol,
+                    side=side,
                     pnl=pnl,
-                    result=1,
-                    close_reason="BTC_TREND_PROFIT_LOCK",
-                )
-                continue
+                    btc_guard=btc_guard,
+                ):
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=1,
+                        close_reason="BTC_TREND_PROFIT_LOCK",
+                    )
+                    continue
 
-            # SL has higher priority than TP per user requirement.
-            sl_hit = False
-            if not self.disable_sl:
-                sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
-            if sl_hit:
+                # SL has higher priority than TP per user requirement.
+                sl_hit = False
+                if not self.disable_sl:
+                    sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
+                if sl_hit:
+                    close_reason = 1 if pnl >= 0 else 0
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=close_reason,
+                        close_reason="SL",
+                    )
+                    continue
+
+                # Immediate TP exit.
+                tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
+                if tp_hit:
+                    close_reason = 1 if pnl >= 0 else 0
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=close_reason,
+                        close_reason="TP",
+                    )
+                    continue
+
+                # Timeout policy.
+                if not self._is_expired(trade.get("opened_at")):
+                    continue
+
+                if pnl > 0:
+                    close_reason = 1
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=close_reason,
+                        close_reason="TIMEOUT_PROFIT",
+                    )
+                    continue
+
+                # If expired but still in loss: move TP to entry and wait for breakeven exit.
+                if abs(tp - entry) > max(1e-9, abs(entry) * 1e-8):
+                    self.repo.update_take_profit(trade_id=int(trade["id"]), take_profit=entry)
+
+                recovered_to_entry = (side == "LONG" and price >= entry) or (side == "SHORT" and price <= entry)
+                if not recovered_to_entry:
+                    continue
+
                 close_reason = 1 if pnl >= 0 else 0
+
                 self.repo.close_trade(
-                    trade_id=trade_id,
+                    trade_id=int(trade["id"]),
                     close_price=price,
                     pnl=pnl,
                     result=close_reason,
-                    close_reason="SL",
+                    close_reason="TIMEOUT_BREAKEVEN",
                 )
-                continue
-
-            # Immediate TP exit.
-            tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
-            if tp_hit:
-                close_reason = 1 if pnl >= 0 else 0
-                self.repo.close_trade(
-                    trade_id=trade_id,
-                    close_price=price,
-                    pnl=pnl,
-                    result=close_reason,
-                    close_reason="TP",
+            except Exception as exc:
+                trade_id = trade.get("id")
+                symbol = trade.get("symbol")
+                print(
+                    f"[paper-engine] manage trade failed id={trade_id} symbol={symbol}: "
+                    f"{type(exc).__name__}: {exc}"
                 )
-                continue
-
-            # Timeout policy.
-            if not self._is_expired(trade.get("opened_at")):
-                continue
-
-            if pnl > 0:
-                close_reason = 1
-                self.repo.close_trade(
-                    trade_id=trade_id,
-                    close_price=price,
-                    pnl=pnl,
-                    result=close_reason,
-                    close_reason="TIMEOUT_PROFIT",
-                )
-                continue
-
-            # If expired but still in loss: move TP to entry and wait for breakeven exit.
-            if abs(tp - entry) > max(1e-9, abs(entry) * 1e-8):
-                self.repo.update_take_profit(trade_id=int(trade["id"]), take_profit=entry)
-
-            recovered_to_entry = (side == "LONG" and price >= entry) or (side == "SHORT" and price <= entry)
-            if not recovered_to_entry:
-                continue
-
-            close_reason = 1 if pnl >= 0 else 0
-
-            self.repo.close_trade(
-                trade_id=trade_id,
-                close_price=price,
-                pnl=pnl,
-                result=close_reason,
-                close_reason="TIMEOUT_BREAKEVEN",
-            )
 
     def _resolve_market_price(self, symbol: str) -> float | None:
         try:
@@ -802,32 +781,9 @@ class PaperTradingEngine:
         except Exception:
             return None
 
-    async def _resolve_stream_price_allow_stale(self, symbol: str, max_age_sec: float) -> float | None:
-        if self.price_stream is None:
-            return None
-        try:
-            price, ts = await self.price_stream.get_price(symbol=symbol)
-            if price is None:
-                return None
-            if not self._is_stream_timestamp_within(ts, max_age_sec=max_age_sec):
-                return None
-            return float(price)
-        except Exception:
-            return None
-
     def _is_stream_timestamp_fresh(self, timestamp: str | None) -> bool:
-        return self._is_stream_timestamp_within(timestamp, max_age_sec=self.stream_max_stale_sec)
-
-    def _is_stream_timestamp_within(self, timestamp: str | None, max_age_sec: float) -> bool:
-        age = self._stream_timestamp_age_sec(timestamp)
-        if age is None:
-            return False
-        return age <= max(0.0, float(max_age_sec))
-
-    @staticmethod
-    def _stream_timestamp_age_sec(timestamp: str | None) -> float | None:
         if not timestamp:
-            return None
+            return False
         try:
             text = str(timestamp).strip()
             if text.endswith("Z"):
@@ -835,20 +791,10 @@ class PaperTradingEngine:
             dt = datetime.fromisoformat(text)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+            age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+            return age <= self.stream_max_stale_sec
         except Exception:
-            return None
-
-    def _maybe_log_price_skip(self, trade_id: int, symbol: str) -> None:
-        now = time.time()
-        last = self._price_skip_log_ts.get(trade_id, 0.0)
-        if (now - last) < 30.0:
-            return
-        self._price_skip_log_ts[trade_id] = now
-        print(
-            f"[paper-engine] skip manage trade id={trade_id} symbol={symbol}: "
-            "no usable price (fresh WS missing, stale WS too old, REST unavailable)"
-        )
+            return False
 
     async def _resolve_symbol_atr(self, symbol: str) -> float | None:
         if self.sl_atr_multiplier <= 0:
@@ -956,9 +902,6 @@ class PaperTradingEngine:
                         shock_range_pct = abs((high_px - low_px) / open_px) * 100.0
                 shock_metric_pct = max(shock_move_pct, shock_range_pct)
                 shock = self.btc_shock_pause_enabled and (shock_metric_pct >= self.btc_shock_threshold_pct)
-                overheat_long_block = self.btc_overheat_long_block_enabled and (
-                    rsi_15m >= self.btc_overheat_rsi_15m_max or rsi_1h >= self.btc_overheat_rsi_1h_max
-                )
                 if close_to_close_pct > 0:
                     shock_direction = "UP"
                 elif close_to_close_pct < 0:
@@ -976,7 +919,7 @@ class PaperTradingEngine:
                     "ema_slow": float(ema_slow),
                     "rsi_15m": float(rsi_15m),
                     "rsi_1h": float(rsi_1h),
-                    "overheat_long_block": bool(overheat_long_block),
+                    "overheat_long_block": False,
                     "close_to_close_pct": float(close_to_close_pct),
                     "shock": bool(shock),
                     "shock_direction": shock_direction,
@@ -991,8 +934,6 @@ class PaperTradingEngine:
         return payload
 
     def _pass_btc_filter(self, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
-        if not self._pass_btc_overheat_long_guard(side=side, btc_guard=btc_guard):
-            return False
         if not self._pass_btc_up_shock_long_guard(side=side, btc_guard=btc_guard):
             return False
         if not self.btc_filter_enabled:
@@ -1144,11 +1085,6 @@ class PaperTradingEngine:
             return True
         return False
 
-    def _pass_btc_overheat_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
-        if str(side or "").upper() != "LONG":
-            return True
-        return not bool(btc_guard.get("overheat_long_block"))
-
     def _btc_pullback_to_ema_met(self, btc_guard: dict[str, Any]) -> bool:
         try:
             mark_price = float(btc_guard.get("mark_price") or 0.0)
@@ -1218,9 +1154,18 @@ class PaperTradingEngine:
 
     @staticmethod
     def _entry_touched(side: str, market_price: float, entry: float) -> bool:
-        # Fill only when mark is near entry (avoid opening stale LIMIT entries far away).
-        tolerance = entry * 0.0008
-        return abs(market_price - entry) <= tolerance
+        # Allow directional touch with a small slippage buffer so fast moves do not miss fills.
+        # LONG: fill when mark <= entry (or up to +0.15% above entry)
+        # SHORT: fill when mark >= entry (or up to -0.15% below entry)
+        side_key = str(side or "").upper()
+        if entry <= 0:
+            return False
+        buffer_pct = 0.0015
+        if side_key == "LONG":
+            return market_price <= (entry * (1.0 + buffer_pct))
+        if side_key == "SHORT":
+            return market_price >= (entry * (1.0 - buffer_pct))
+        return False
 
     @staticmethod
     def _pct_returns(closes: list[float]) -> list[float]:
@@ -1322,8 +1267,6 @@ class PaperTradingEngine:
 
     def _is_major_symbol(self, symbol: str) -> bool:
         key = self._normalize_symbol_key(symbol)
-        if self.major_dynamic_enabled and self.major_symbols_runtime:
-            return key in self.major_symbols_runtime
         if key in self.major_symbols_runtime:
             return True
         return key in self.major_symbols_static
@@ -1361,7 +1304,7 @@ class PaperTradingEngine:
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         selected = candidates[: self.major_dynamic_candidates]
-        scores: list[dict[str, Any]] = []
+        scores: list[tuple[str, float]] = []
 
         turnovers: dict[str, float] = {}
         momentum_abs: dict[str, float] = {}
@@ -1418,50 +1361,13 @@ class PaperTradingEngine:
                 + (0.20 * hist_acc_map.get(key, 0.5))
                 + (0.05 * momentum_norm)
             )
-            scores.append(
-                {
-                    "symbol": key,
-                    "score": float(score),
-                    "turnover_norm": float(turnover_norm),
-                    "win_prob": float(win_prob_map.get(key, 0.0)),
-                    "hist_acc": float(hist_acc_map.get(key, 0.5)),
-                    "momentum_norm": float(momentum_norm),
-                    "turnover_usd_5m_avg": float(turnovers.get(key, 0.0)),
-                    "momentum_abs": float(momentum_raw),
-                }
-            )
+            scores.append((key, score))
 
-        scores.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
-        runtime = {str(row.get("symbol")) for row in scores[: self.major_dynamic_limit] if row.get("symbol")}
-        self.major_symbols_runtime = runtime
-        self.major_symbols_runtime_ranked = scores
-        self._major_symbols_runtime_updated_ts = now
-
-    def get_major_symbols_snapshot(self) -> dict[str, Any]:
-        updated_at = None
-        if self._major_symbols_runtime_updated_ts > 0:
-            updated_at = datetime.fromtimestamp(self._major_symbols_runtime_updated_ts, tz=timezone.utc).isoformat()
-        if self.major_dynamic_enabled and self.major_symbols_runtime:
-            effective = sorted(self.major_symbols_runtime)
-            source = "dynamic"
-        else:
-            effective = sorted(self.major_symbols_static)
-            source = "static_fallback"
-        return {
-            "dynamic_enabled": self.major_dynamic_enabled,
-            "dynamic_refresh_sec": self.major_dynamic_refresh_sec,
-            "dynamic_limit": self.major_dynamic_limit,
-            "dynamic_candidates": self.major_dynamic_candidates,
-            "dynamic_candle_lookback": self.major_dynamic_candle_lookback,
-            "major_leverage": self.major_symbol_leverage,
-            "major_max_risk_pct": self.major_symbol_max_risk_pct,
-            "source": source,
-            "effective_symbols": effective,
-            "runtime_symbols": sorted(self.major_symbols_runtime),
-            "static_symbols": sorted(self.major_symbols_static),
-            "runtime_updated_at": updated_at,
-            "runtime_ranked": self.major_symbols_runtime_ranked[: max(self.major_dynamic_limit, 20)],
-        }
+        scores.sort(key=lambda x: x[1], reverse=True)
+        runtime = {symbol_key for symbol_key, _ in scores[: self.major_dynamic_limit]}
+        if runtime:
+            self.major_symbols_runtime = runtime
+            self._major_symbols_runtime_updated_ts = now
 
     def _is_expired(self, opened_at: Any) -> bool:
         if opened_at is None:
