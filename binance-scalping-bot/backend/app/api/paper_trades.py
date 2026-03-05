@@ -101,7 +101,13 @@ class PaperTradeAPI:
     def _resolve_btc_follow_map(self, rows: list[dict]) -> dict[str, bool | None]:
         if not rows:
             return {}
-        symbols = sorted({str(item.get("symbol") or "").strip() for item in rows if item.get("symbol")})
+        symbols = sorted(
+            {
+                str(item.get("symbol") or "").strip()
+                for item in rows
+                if item.get("symbol") and self._coerce_optional_bool(item.get("btc_following")) is None
+            }
+        )
         if not symbols:
             return {}
         if not callable(self.btc_follow_resolver):
@@ -116,7 +122,22 @@ class PaperTradeAPI:
         return out
 
     @staticmethod
-    def _map_trade(row: dict, btc_following: bool | None = None) -> PaperTrade:
+    def _coerce_optional_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y"}:
+            return True
+        if text in {"0", "false", "no", "n"}:
+            return False
+        return None
+
+    @classmethod
+    def _map_trade(cls, row: dict, btc_following: bool | None = None) -> PaperTrade:
         entry_price = float(row["entry_price"])
         quantity = float(row["quantity"])
         leverage = int(row["leverage"])
@@ -131,11 +152,14 @@ class PaperTradeAPI:
         if pnl is not None and margin_usdt > 0:
             pnl_pct = (pnl / margin_usdt) * 100
 
+        row_btc_follow = cls._coerce_optional_bool(row.get("btc_following"))
+        resolved_btc_follow = row_btc_follow if row_btc_follow is not None else btc_following
+
         return PaperTrade(
             id=int(row["id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
-            btc_following=btc_following,
+            btc_following=resolved_btc_follow,
             entry_type=str(row.get("entry_type") or "LIMIT"),
             signal_win_probability=float(row["signal_win_probability"]),
             effective_win_probability=float(row.get("effective_win_probability") or row["signal_win_probability"]),
@@ -274,11 +298,18 @@ class PaperTradeAPI:
                 leverage=leverage,
             )
         feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, req.symbol, req.side)
+        btc_following: bool | None = None
+        if callable(self.btc_follow_resolver):
+            try:
+                btc_following = bool(self.btc_follow_resolver(req.symbol))
+            except Exception:
+                btc_following = None
 
         trade_id = repo.create_open_trade(
             {
                 "symbol": req.symbol,
                 "side": req.side,
+                "btc_following": btc_following,
                 "entry_type": "MARKET",
                 "signal_win_probability": req.signal_win_probability,
                 "effective_win_probability": req.effective_win_probability or req.signal_win_probability,

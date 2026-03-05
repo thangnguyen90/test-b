@@ -45,6 +45,7 @@ class MySQLTradeRepository:
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         symbol VARCHAR(64) NOT NULL,
                         side VARCHAR(10) NOT NULL,
+                        btc_following TINYINT NULL,
                         entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT',
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
@@ -76,6 +77,17 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='btc_following'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute("ALTER TABLE paper_trades ADD COLUMN btc_following TINYINT NULL AFTER side")
                 cur.execute(
                     """
                     SELECT COUNT(*) AS cnt
@@ -323,16 +335,17 @@ class MySQLTradeRepository:
                 cur.execute(
                     """
                     INSERT INTO paper_trades (
-                        symbol, side, entry_type, signal_win_probability, effective_win_probability,
+                        symbol, side, btc_following, entry_type, signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
                         quantity, margin_usdt, leverage, mae_pct, mfe_pct,
                         feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
                         payload["side"],
+                        payload.get("btc_following"),
                         payload.get("entry_type", "LIMIT"),
                         payload["signal_win_probability"],
                         payload["effective_win_probability"],

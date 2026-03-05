@@ -316,11 +316,13 @@ class PaperTradingEngine:
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                btc_following = self._resolve_btc_following_flag(symbol)
 
                 self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
+                        "btc_following": btc_following,
                         "entry_type": "LIMIT",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
@@ -410,11 +412,13 @@ class PaperTradingEngine:
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                btc_following = self._resolve_btc_following_flag(symbol)
 
                 self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
+                        "btc_following": btc_following,
                         "entry_type": "ML_TEST",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": raw_prob,
@@ -512,11 +516,13 @@ class PaperTradingEngine:
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                btc_following = self._resolve_btc_following_flag(symbol)
 
                 self.repo.create_open_trade(
                     {
                         "symbol": symbol,
                         "side": side,
+                        "btc_following": btc_following,
                         "entry_type": "LIQ_EMA99",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
@@ -1309,6 +1315,12 @@ class PaperTradingEngine:
 
     def is_symbol_following_btc(self, symbol: str) -> bool:
         return self._is_symbol_following_btc(symbol)
+
+    def _resolve_btc_following_flag(self, symbol: str) -> bool | None:
+        try:
+            return bool(self._is_symbol_following_btc(symbol))
+        except Exception:
+            return None
 
     def _is_major_symbol(self, symbol: str) -> bool:
         key = self._normalize_symbol_key(symbol)
