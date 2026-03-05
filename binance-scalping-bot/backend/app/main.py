@@ -115,6 +115,7 @@ async def on_startup() -> None:
                 btc_shock_threshold_pct=settings.paper_trade_btc_shock_threshold_pct,
                 btc_shock_cooldown_minutes=settings.paper_trade_btc_shock_cooldown_minutes,
                 btc_shock_up_long_block_minutes=settings.paper_trade_btc_shock_up_long_block_minutes,
+                btc_shock_down_short_block_minutes=settings.paper_trade_btc_shock_down_short_block_minutes,
                 btc_shock_up_require_pullback=settings.paper_trade_btc_shock_up_require_pullback,
                 btc_shock_pullback_ema_period=settings.paper_trade_btc_shock_pullback_ema_period,
                 btc_shock_pullback_tolerance_pct=settings.paper_trade_btc_shock_pullback_tolerance_pct,

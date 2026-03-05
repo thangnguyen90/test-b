@@ -77,6 +77,7 @@ class PaperTradingEngine:
         btc_shock_threshold_pct: float = 1.2,
         btc_shock_cooldown_minutes: int = 30,
         btc_shock_up_long_block_minutes: int = 60,
+        btc_shock_down_short_block_minutes: int = 60,
         btc_shock_up_require_pullback: bool = True,
         btc_shock_pullback_ema_period: int = 21,
         btc_shock_pullback_tolerance_pct: float = 0.0015,
@@ -151,6 +152,7 @@ class PaperTradingEngine:
         self.btc_shock_threshold_pct = max(0.2, float(btc_shock_threshold_pct))
         self.btc_shock_cooldown_minutes = max(1, int(btc_shock_cooldown_minutes))
         self.btc_shock_up_long_block_minutes = max(0, int(btc_shock_up_long_block_minutes))
+        self.btc_shock_down_short_block_minutes = max(0, int(btc_shock_down_short_block_minutes))
         self.btc_shock_up_require_pullback = bool(btc_shock_up_require_pullback)
         self.btc_shock_pullback_ema_period = int(btc_shock_pullback_ema_period)
         self.btc_shock_pullback_tolerance_pct = max(0.0, float(btc_shock_pullback_tolerance_pct))
@@ -177,6 +179,7 @@ class PaperTradingEngine:
         self._open_pause_until_ts: float = 0.0
         self._open_pause_reason: str | None = None
         self._btc_up_shock_long_block_until_ts: float = 0.0
+        self._btc_down_shock_short_block_until_ts: float = 0.0
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -273,7 +276,7 @@ class PaperTradingEngine:
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
                 if effective_prob < self.min_win_probability:
                     continue
-                if not self._pass_btc_filter(side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
 
                 # Trigger condition: market touches/gets through entry.
@@ -372,7 +375,7 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
-                if not self._pass_btc_filter(side=side, effective_prob=raw_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=raw_prob, btc_guard=btc_guard):
                     continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
@@ -474,7 +477,7 @@ class PaperTradingEngine:
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
                 if effective_prob < self.min_win_probability:
                     continue
-                if not self._pass_btc_filter(side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
@@ -933,8 +936,8 @@ class PaperTradingEngine:
         self._btc_trend_cache = (now, payload)
         return payload
 
-    def _pass_btc_filter(self, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
-        if not self._pass_btc_up_shock_long_guard(side=side, btc_guard=btc_guard):
+    def _pass_btc_filter(self, symbol: str, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
+        if not self._pass_btc_shock_directional_guard(symbol=symbol, side=side, btc_guard=btc_guard):
             return False
         if not self.btc_filter_enabled:
             return True
@@ -1061,17 +1064,50 @@ class PaperTradingEngine:
         if not bool(btc_guard.get("shock")):
             return
         now = time.time()
-        pause_until = now + (self.btc_shock_cooldown_minutes * 60)
-        if pause_until > self._open_pause_until_ts:
-            self._open_pause_until_ts = pause_until
-            metric = float(btc_guard.get("shock_metric_pct") or 0.0)
-            self._open_pause_reason = f"BTC_SHOCK_{metric:.2f}%"
         shock_direction = str(btc_guard.get("shock_direction") or "FLAT").upper()
         if shock_direction == "UP" and self.btc_shock_up_long_block_minutes > 0:
-            long_block_until = now + (self.btc_shock_up_long_block_minutes * 60)
+            block_minutes = max(self.btc_shock_cooldown_minutes, self.btc_shock_up_long_block_minutes)
+            long_block_until = now + (block_minutes * 60)
             self._btc_up_shock_long_block_until_ts = max(self._btc_up_shock_long_block_until_ts, long_block_until)
+        if shock_direction == "DOWN" and self.btc_shock_down_short_block_minutes > 0:
+            block_minutes = max(self.btc_shock_cooldown_minutes, self.btc_shock_down_short_block_minutes)
+            short_block_until = now + (block_minutes * 60)
+            self._btc_down_shock_short_block_until_ts = max(self._btc_down_shock_short_block_until_ts, short_block_until)
+
+    def _pass_btc_shock_directional_guard(self, symbol: str, side: str, btc_guard: dict[str, Any]) -> bool:
+        if not self.btc_shock_pause_enabled:
+            return True
+        if not self._is_symbol_following_btc(symbol):
+            return True
+
+        side_key = str(side or "").upper()
+        now = time.time()
+        if side_key == "LONG":
+            if self._btc_up_shock_long_block_until_ts <= 0:
+                return True
+            if now >= self._btc_up_shock_long_block_until_ts:
+                self._btc_up_shock_long_block_until_ts = 0.0
+                return True
+            if self.btc_shock_up_require_pullback and self._btc_pullback_to_ema_met(side="LONG", btc_guard=btc_guard):
+                self._btc_up_shock_long_block_until_ts = 0.0
+                return True
+            return False
+
+        if side_key == "SHORT":
+            if self._btc_down_shock_short_block_until_ts <= 0:
+                return True
+            if now >= self._btc_down_shock_short_block_until_ts:
+                self._btc_down_shock_short_block_until_ts = 0.0
+                return True
+            if self.btc_shock_up_require_pullback and self._btc_pullback_to_ema_met(side="SHORT", btc_guard=btc_guard):
+                self._btc_down_shock_short_block_until_ts = 0.0
+                return True
+            return False
+
+        return True
 
     def _pass_btc_up_shock_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
+        # Backward-compatible helper used by external precheck code.
         if str(side or "").upper() != "LONG":
             return True
         if self._btc_up_shock_long_block_until_ts <= 0:
@@ -1080,12 +1116,12 @@ class PaperTradingEngine:
         if now >= self._btc_up_shock_long_block_until_ts:
             self._btc_up_shock_long_block_until_ts = 0.0
             return True
-        if self.btc_shock_up_require_pullback and self._btc_pullback_to_ema_met(btc_guard):
+        if self.btc_shock_up_require_pullback and self._btc_pullback_to_ema_met(side="LONG", btc_guard=btc_guard):
             self._btc_up_shock_long_block_until_ts = 0.0
             return True
         return False
 
-    def _btc_pullback_to_ema_met(self, btc_guard: dict[str, Any]) -> bool:
+    def _btc_pullback_to_ema_met(self, side: str, btc_guard: dict[str, Any]) -> bool:
         try:
             mark_price = float(btc_guard.get("mark_price") or 0.0)
             ema_fast = float(btc_guard.get("ema_fast") or 0.0)
@@ -1097,15 +1133,18 @@ class PaperTradingEngine:
         ema_ref = ema_fast if self.btc_shock_pullback_ema_period <= 21 else ema_slow
         if ema_ref <= 0:
             return False
-        threshold = ema_ref * (1.0 + self.btc_shock_pullback_tolerance_pct)
-        return mark_price <= threshold
+        tolerance = self.btc_shock_pullback_tolerance_pct
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            # After strong UP shock, wait BTC to cool down near EMA before allowing new LONG.
+            return mark_price <= (ema_ref * (1.0 + tolerance))
+        if side_key == "SHORT":
+            # After strong DOWN shock, wait BTC to pull back up near EMA before allowing new SHORT.
+            return mark_price >= (ema_ref * (1.0 - tolerance))
+        return False
 
     def _is_open_paused(self) -> bool:
-        now = time.time()
-        if now < self._open_pause_until_ts:
-            return True
-        self._open_pause_until_ts = 0.0
-        self._open_pause_reason = None
+        # BTC shock logic is directional and symbol-specific; no global open pause.
         return False
 
     @staticmethod

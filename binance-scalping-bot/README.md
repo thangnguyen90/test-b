@@ -245,6 +245,7 @@ PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED=true
 PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT=1.2
 PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES=30
 PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES=60
+PAPER_TRADE_BTC_SHOCK_DOWN_SHORT_BLOCK_MINUTES=60
 PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK=true
 PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD=21
 PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT=0.0015
@@ -275,9 +276,10 @@ PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
 - `PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true` sẽ tự scale ngưỡng theo leverage thực tế của lệnh.  
 : ví dụ cấu hình `trigger=5`, `reference_leverage=5` thì lệnh 10x sẽ kích hoạt ở `10%` PnL margin.
 - `PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT` là ngưỡng sốc BTC theo `%` (dựa trên biến động close-to-close hoặc range nến).
-- `PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES` tạm dừng mở lệnh mới sau shock.
+- `PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES` là thời gian khóa tối thiểu cho lệnh cùng chiều sau shock.
 - `PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES` khóa riêng lệnh `LONG` sau shock tăng mạnh của BTC.
-- `PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK=true` chỉ mở lại `LONG` khi BTC pullback về EMA.
+- `PAPER_TRADE_BTC_SHOCK_DOWN_SHORT_BLOCK_MINUTES` khóa riêng lệnh `SHORT` sau shock giảm mạnh của BTC.
+- `PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK=true` chỉ mở lại lệnh cùng chiều shock khi BTC pullback về EMA (UP: chờ hạ nhiệt để mở LONG, DOWN: chờ hồi lên để mở SHORT).
 - `PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD` chọn EMA dùng xác nhận pullback (`21` hoặc `55`).
 - `PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT` là biên độ cho phép quanh EMA để tính là đã pullback.
 - `PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED=true` sẽ đóng nhanh các lệnh `LONG` đang lãi khi BTC đảo chiều giảm mạnh.

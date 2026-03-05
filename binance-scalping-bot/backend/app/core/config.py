@@ -122,6 +122,7 @@ class Settings(BaseModel):
     paper_trade_btc_shock_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT", "1.2"))
     paper_trade_btc_shock_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES", "30"))
     paper_trade_btc_shock_up_long_block_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES", "60"))
+    paper_trade_btc_shock_down_short_block_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_DOWN_SHORT_BLOCK_MINUTES", "60"))
     paper_trade_btc_shock_up_require_pullback: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK", "true").lower() == "true"
     paper_trade_btc_shock_pullback_ema_period: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD", "21"))
     paper_trade_btc_shock_pullback_tolerance_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT", "0.0015"))

@@ -121,6 +121,7 @@ type ScanSignalItem = {
   mark_price?: number
   can_enter?: boolean
   blocked_reason?: string
+  btc_following?: boolean | null
   liq_zone_price?: number
   liq_zone_value?: number
 }
@@ -2947,6 +2948,7 @@ function App() {
                   <th>Mark (WS)</th>
                   <th>Can Enter</th>
                   <th>Blocked Reason</th>
+                  <th>BTC Follow</th>
                   <th>TP</th>
                   <th>TP%</th>
                   <th>SL</th>
@@ -2964,6 +2966,7 @@ function App() {
                     : isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
                   const backendBlockedReason = (item.blocked_reason ?? '').trim()
                   const blockedReason = backendBlockedReason || getHighWinBlockedReason(item)
+                  const btcFollow = typeof item.btc_following === 'boolean' ? item.btc_following : null
                   return (
                   <tr key={`${item.symbol}-${item.side}`}>
                     <td>
@@ -2992,6 +2995,13 @@ function App() {
                       </span>
                     </td>
                     <td>{blockedReason}</td>
+                    <td>
+                      {btcFollow == null ? '-' : (
+                        <span className={`badge ${btcFollow ? 'success' : 'neutral'}`}>
+                          {btcFollow ? 'YES' : 'NO'}
+                        </span>
+                      )}
+                    </td>
                     <td>{item.take_profit}</td>
                     <td>
                       {(() => {

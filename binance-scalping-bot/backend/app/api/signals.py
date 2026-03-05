@@ -92,31 +92,31 @@ def _evaluate_paper_entry_gate(
     take_profit: float,
     stop_loss: float,
     market_price: float,
-) -> tuple[bool, str, float]:
+) -> tuple[bool, str, float, bool | None]:
     try:
         repo, engine = get_paper_trade_runtime()
         if repo is None or engine is None:
-            return False, "Paper engine offline", raw_win_probability
+            return False, "Paper engine offline", raw_win_probability, None
 
         if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
-            return False, "Invalid TP/SL", raw_win_probability
+            return False, "Invalid TP/SL", raw_win_probability, None
 
         try:
             if bool(engine._is_open_paused()):
                 pause_reason = str(getattr(engine, "_open_pause_reason", "") or "").strip()
-                return False, (pause_reason or "Open paused"), raw_win_probability
+                return False, (pause_reason or "Open paused"), raw_win_probability, None
         except Exception:
             pass
 
         try:
             if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
-                return False, "Duplicate", raw_win_probability
+                return False, "Duplicate", raw_win_probability, None
         except Exception:
-            return False, "Repo unavailable", raw_win_probability
+            return False, "Repo unavailable", raw_win_probability, None
 
         min_win = float(getattr(engine, "min_win_probability", 0.75))
         if raw_win_probability < min_win:
-            return False, f"Win<{min_win * 100:.1f}%", raw_win_probability
+            return False, f"Win<{min_win * 100:.1f}%", raw_win_probability, None
 
         try:
             hist_acc = repo.symbol_accuracy(symbol=symbol, lookback=300)
@@ -128,7 +128,7 @@ def _evaluate_paper_entry_gate(
             else raw_win_probability
         )
         if effective_probability < min_win:
-            return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability
+            return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, None
 
         btc_guard: dict = {}
         try:
@@ -136,9 +136,16 @@ def _evaluate_paper_entry_gate(
         except Exception:
             btc_guard = {}
 
+        btc_following: bool | None
+        try:
+            btc_following = bool(engine._is_symbol_following_btc(symbol))
+        except Exception:
+            btc_following = None
+
         try:
             pass_btc_filter = bool(
                 engine._pass_btc_filter(
+                    symbol=symbol,
                     side=side,
                     effective_prob=effective_probability,
                     btc_guard=btc_guard,
@@ -147,12 +154,12 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass_btc_filter = True
         if not pass_btc_filter:
-            try:
-                blocked_by_up_shock = not bool(engine._pass_btc_up_shock_long_guard(side=side, btc_guard=btc_guard))
-            except Exception:
-                blocked_by_up_shock = False
-            if blocked_by_up_shock:
-                return False, "BTC up-shock long block", effective_probability
+            follows_btc = bool(btc_following)
+            shock_direction = str((btc_guard or {}).get("shock_direction") or "FLAT").upper()
+            if follows_btc and str(side).upper() == "LONG" and shock_direction == "UP":
+                return False, "BTC up-shock long block", effective_probability, btc_following
+            if follows_btc and str(side).upper() == "SHORT" and shock_direction == "DOWN":
+                return False, "BTC down-shock short block", effective_probability, btc_following
 
             trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
             confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
@@ -164,15 +171,15 @@ def _evaluate_paper_entry_gate(
                 and str(side).upper() != trend_side
                 and confidence >= min_conf
             ):
-                return False, f"BTC trend {trend_side}", effective_probability
-            return False, "BTC filter", effective_probability
+                return False, f"BTC trend {trend_side}", effective_probability, btc_following
+            return False, "BTC filter", effective_probability, btc_following
 
         try:
             touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
         except Exception:
             touched = False
         if not touched:
-            return False, "Entry not touched", effective_probability
+            return False, "Entry not touched", effective_probability, btc_following
 
         try:
             leverage = max(1, int(engine._resolve_symbol_leverage(symbol)))
@@ -183,13 +190,13 @@ def _evaluate_paper_entry_gate(
                 maint_margin_rate=maint_margin_rate,
             )
             if risk_pct > max_risk_pct:
-                return False, f"Risk {risk_pct:.2f}%>{max_risk_pct:.2f}%", effective_probability
+                return False, f"Risk {risk_pct:.2f}%>{max_risk_pct:.2f}%", effective_probability, btc_following
         except Exception:
-            return False, "Risk check unavailable", effective_probability
+            return False, "Risk check unavailable", effective_probability, btc_following
 
-        return True, "-", effective_probability
+        return True, "-", effective_probability, btc_following
     except Exception:
-        return False, "Precheck unavailable", raw_win_probability
+        return False, "Precheck unavailable", raw_win_probability, None
 
 
 def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
@@ -257,7 +264,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 ticker=ticker if isinstance(ticker, dict) else {},
             )
             try:
-                can_enter, blocked_reason, effective_win_probability = _evaluate_paper_entry_gate(
+                can_enter, blocked_reason, effective_win_probability, btc_following = _evaluate_paper_entry_gate(
                     symbol=signal.symbol,
                     side=signal.side,
                     raw_win_probability=float(signal.win_probability),
@@ -270,6 +277,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 can_enter = False
                 blocked_reason = "Precheck unavailable"
                 effective_win_probability = float(signal.win_probability)
+                btc_following = None
             matches.append(
                 {
                     "symbol": signal.symbol,
@@ -283,6 +291,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                     "mark_price": last_price,
                     "can_enter": can_enter,
                     "blocked_reason": blocked_reason,
+                    "btc_following": btc_following,
                     "liq_zone_price": liq_zone_price,
                     "liq_zone_value": liq_zone_value,
                 }
