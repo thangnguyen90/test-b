@@ -175,6 +175,7 @@ TRAINING_SYMBOLS=SOL/USDT,XRP/USDT,ADA/USDT,DOGE/USDT
 ML_FEEDBACK_TRAIN_LIMIT=1200
 ML_FEEDBACK_MAE_PENALTY_PCT=20
 ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true
+ML_FEEDBACK_HARD_FLIP_MAE_PCT=10
 ML_FEEDBACK_RECOVERY_PENALTY_ENABLED=true
 ML_FEEDBACK_RECOVERY_PENALTY_MAE_PCT=10
 ML_FEEDBACK_RECOVERY_PENALTY_MAX_PNL_PCT=2
@@ -258,6 +259,14 @@ PAPER_TRADE_BTC_FOLLOW_MIN_CORR=0.45
 PAPER_TRADE_BTC_FOLLOW_MIN_BETA=0.20
 PAPER_TRADE_BTC_FOLLOW_LOOKBACK=120
 PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
+PAPER_TRADE_VOLATILITY_GUARD_ENABLED=true
+PAPER_TRADE_VOLATILITY_GUARD_TIMEFRAME=5m
+PAPER_TRADE_VOLATILITY_GUARD_LIMIT=60
+PAPER_TRADE_VOLATILITY_GUARD_CACHE_SEC=12
+PAPER_TRADE_VOLATILITY_GUARD_MAX_ATR_PCT=1.4
+PAPER_TRADE_VOLATILITY_GUARD_MAX_RANGE_PCT=2.6
+PAPER_TRADE_VOLATILITY_GUARD_MAX_BODY_PCT=1.8
+PAPER_TRADE_VOLATILITY_GUARD_MAX_RANGE_ATR_RATIO=2.8
 ```
 
 - `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
@@ -285,10 +294,12 @@ PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
 - `PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED=true` sẽ đóng nhanh các lệnh `LONG` đang lãi khi BTC đảo chiều giảm mạnh.
 - `PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT` là ngưỡng đảo chiều mạnh theo `%` để kích hoạt đóng nhanh.
 - `PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE` là độ tin cậy trend SHORT tối thiểu để đóng nhanh (nếu chưa đủ thì vẫn có nhánh fallback khi shock cực mạnh).
+- `PAPER_TRADE_VOLATILITY_GUARD_*` chặn lệnh khi nến hiện tại biến động quá mạnh (ATR%/range%/body% hoặc range/ATR quá cao), giúp giảm case vừa vào đã âm sâu.
 - DB lưu thêm `mae_pct`/`mfe_pct` cho mỗi paper trade (theo % margin), dùng để đánh giá quality tín hiệu.
 - Khi train từ `ml_feedback`, nhãn được ưu tiên theo `close_reason`:
 : `TP` => mẫu tốt (`WIN`), `SL` => mẫu xấu (`LOSS`).
 - Khi train từ `ml_feedback`, nếu `ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE=true` và lệnh WIN nhưng `mae_pct <= -ML_FEEDBACK_MAE_PENALTY_PCT`, sample sẽ bị đổi nhãn thành LOSS để phạt setup bị âm quá sâu.
+- `ML_FEEDBACK_HARD_FLIP_MAE_PCT` là ngưỡng flip cứng (mặc định 10%): lệnh WIN có `mae_pct` âm sâu hơn ngưỡng này sẽ luôn bị đổi thành LOSS khi train.
 - Với case "âm sâu lâu, cuối cùng chỉ hồi nhẹ/breakeven", bật:
 : `ML_FEEDBACK_RECOVERY_PENALTY_ENABLED=true`.
 : Khi `mae_pct <= -ML_FEEDBACK_RECOVERY_PENALTY_MAE_PCT` và `pnl_pct <= ML_FEEDBACK_RECOVERY_PENALTY_MAX_PNL_PCT`,

@@ -224,6 +224,16 @@ def _evaluate_paper_entry_gate(
             touched = False
         if not touched:
             return False, "Entry not touched", effective_probability, btc_following
+        try:
+            pass_volatility_guard, volatility_reason = engine.evaluate_symbol_volatility_guard(
+                symbol=symbol,
+                market_price=float(market_price),
+            )
+        except Exception:
+            pass_volatility_guard = True
+            volatility_reason = "-"
+        if not pass_volatility_guard:
+            return False, (str(volatility_reason or "Volatility spike")), effective_probability, btc_following
 
         try:
             leverage = max(1, int(engine._resolve_symbol_leverage(symbol)))

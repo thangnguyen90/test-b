@@ -503,20 +503,23 @@ class MLPredictor:
 
             deep_drawdown_recovery = False
             good_signal = False
-            if settings.ml_feedback_flip_win_on_deep_mae and label == 1:
-                mae_pct = row.get("mae_pct")
-                try:
-                    mae_value = float(mae_pct) if mae_pct is not None else 0.0
-                except Exception:
-                    mae_value = 0.0
-                if mae_value <= -abs(settings.ml_feedback_mae_penalty_pct):
+            try:
+                mae_value = float(row.get("mae_pct") or 0.0)
+            except Exception:
+                mae_value = 0.0
+            hard_flip_threshold = max(0.0, abs(float(settings.ml_feedback_hard_flip_mae_pct)))
+            configured_flip_threshold = max(0.0, abs(float(settings.ml_feedback_mae_penalty_pct)))
+            if label == 1:
+                hard_flip = (hard_flip_threshold > 0) and (mae_value <= -hard_flip_threshold)
+                configured_flip = (
+                    bool(settings.ml_feedback_flip_win_on_deep_mae)
+                    and (configured_flip_threshold > 0)
+                    and (mae_value <= -configured_flip_threshold)
+                )
+                if hard_flip or configured_flip:
                     label = 0
                     penalized_count += 1
             if settings.ml_feedback_recovery_penalty_enabled and label == 1:
-                try:
-                    mae_value = float(row.get("mae_pct") or 0.0)
-                except Exception:
-                    mae_value = 0.0
                 try:
                     pnl_pct_value = float(row.get("pnl_pct") or 0.0)
                 except Exception:
@@ -529,10 +532,6 @@ class MLPredictor:
                     recovery_penalized_count += 1
 
             if settings.ml_feedback_good_signal_boost_enabled and label == 1 and not deep_drawdown_recovery:
-                try:
-                    mae_value = float(row.get("mae_pct") or 0.0)
-                except Exception:
-                    mae_value = 0.0
                 try:
                     pnl_pct_value = float(row.get("pnl_pct") or 0.0)
                 except Exception:

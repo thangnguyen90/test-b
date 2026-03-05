@@ -90,6 +90,14 @@ class PaperTradingEngine:
         btc_follow_min_beta: float = 0.2,
         btc_follow_lookback: int = 120,
         btc_follow_cache_sec: float = 300.0,
+        volatility_guard_enabled: bool = True,
+        volatility_guard_timeframe: str = "5m",
+        volatility_guard_limit: int = 60,
+        volatility_guard_cache_sec: float = 12.0,
+        volatility_guard_max_atr_pct: float = 1.4,
+        volatility_guard_max_range_pct: float = 2.6,
+        volatility_guard_max_body_pct: float = 1.8,
+        volatility_guard_max_range_atr_ratio: float = 2.8,
         test_ml_enabled: bool = False,
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
@@ -165,6 +173,14 @@ class PaperTradingEngine:
         self.btc_follow_min_beta = max(0.0, float(btc_follow_min_beta))
         self.btc_follow_lookback = max(60, min(500, int(btc_follow_lookback)))
         self.btc_follow_cache_sec = max(30.0, float(btc_follow_cache_sec))
+        self.volatility_guard_enabled = bool(volatility_guard_enabled)
+        self.volatility_guard_timeframe = (volatility_guard_timeframe or "5m").strip() or "5m"
+        self.volatility_guard_limit = max(30, min(300, int(volatility_guard_limit)))
+        self.volatility_guard_cache_sec = max(2.0, float(volatility_guard_cache_sec))
+        self.volatility_guard_max_atr_pct = max(0.1, float(volatility_guard_max_atr_pct))
+        self.volatility_guard_max_range_pct = max(0.1, float(volatility_guard_max_range_pct))
+        self.volatility_guard_max_body_pct = max(0.05, float(volatility_guard_max_body_pct))
+        self.volatility_guard_max_range_atr_ratio = max(1.0, float(volatility_guard_max_range_atr_ratio))
         self.test_ml_enabled = bool(test_ml_enabled)
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
@@ -176,6 +192,7 @@ class PaperTradingEngine:
         self._top_vol_cache: tuple[float, list[str]] | None = None
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
+        self._volatility_guard_cache: dict[str, tuple[float, bool, str]] = {}
         self._open_pause_until_ts: float = 0.0
         self._open_pause_reason: str | None = None
         self._btc_up_shock_long_block_until_ts: float = 0.0
@@ -284,6 +301,12 @@ class PaperTradingEngine:
                 # Trigger condition: market touches/gets through entry.
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
+                    continue
+                pass_vol_guard, _ = self.evaluate_symbol_volatility_guard(
+                    symbol=symbol,
+                    market_price=float(market_price),
+                )
+                if not pass_vol_guard:
                     continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -396,6 +419,12 @@ class PaperTradingEngine:
                 if not touched:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=raw_prob, btc_guard=btc_guard):
+                    continue
+                pass_vol_guard, _ = self.evaluate_symbol_volatility_guard(
+                    symbol=symbol,
+                    market_price=float(market_price),
+                )
+                if not pass_vol_guard:
                     continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -516,6 +545,12 @@ class PaperTradingEngine:
                 if effective_prob < self.min_win_probability:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                    continue
+                pass_vol_guard, _ = self.evaluate_symbol_volatility_guard(
+                    symbol=symbol,
+                    market_price=float(market_price),
+                )
+                if not pass_vol_guard:
                     continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -981,6 +1016,66 @@ class PaperTradingEngine:
             return value
         except Exception:
             return None
+
+    def evaluate_symbol_volatility_guard(self, symbol: str, market_price: float) -> tuple[bool, str]:
+        if not self.volatility_guard_enabled:
+            return True, "-"
+
+        key = self._normalize_symbol_key(symbol)
+        now = time.time()
+        cached = self._volatility_guard_cache.get(key)
+        if cached is not None and (now - cached[0]) <= self.volatility_guard_cache_sec:
+            return bool(cached[1]), str(cached[2])
+
+        try:
+            rows = self.market_client.fetch_ohlcv(
+                symbol=symbol,
+                timeframe=self.volatility_guard_timeframe,
+                limit=self.volatility_guard_limit,
+            )
+        except Exception:
+            rows = []
+
+        ok = True
+        reason = "-"
+        try:
+            if rows and len(rows) >= 20:
+                atr = calc_atr_from_ohlcv(rows=rows, period=14)
+                last = rows[-1] if len(rows[-1]) >= 5 else None
+                mark = float(market_price) if market_price and float(market_price) > 0 else 0.0
+                if mark <= 0 and last is not None:
+                    mark = float(last[4])
+                if mark > 0 and last is not None and atr is not None and atr > 0:
+                    open_px = float(last[1])
+                    high_px = float(last[2])
+                    low_px = float(last[3])
+                    close_px = float(last[4])
+                    range_abs = max(0.0, high_px - low_px)
+                    body_abs = abs(close_px - open_px)
+                    atr_pct = (float(atr) / mark) * 100.0
+                    range_pct = (range_abs / max(1e-12, abs(open_px))) * 100.0
+                    body_pct = (body_abs / max(1e-12, abs(open_px))) * 100.0
+                    range_atr_ratio = range_abs / max(1e-12, float(atr))
+                    if atr_pct > self.volatility_guard_max_atr_pct:
+                        ok = False
+                        reason = f"Vol ATR {atr_pct:.2f}%>{self.volatility_guard_max_atr_pct:.2f}%"
+                    elif range_pct > self.volatility_guard_max_range_pct:
+                        ok = False
+                        reason = f"Vol range {range_pct:.2f}%>{self.volatility_guard_max_range_pct:.2f}%"
+                    elif body_pct > self.volatility_guard_max_body_pct:
+                        ok = False
+                        reason = f"Vol body {body_pct:.2f}%>{self.volatility_guard_max_body_pct:.2f}%"
+                    elif range_atr_ratio > self.volatility_guard_max_range_atr_ratio:
+                        ok = False
+                        reason = (
+                            f"Vol range/ATR {range_atr_ratio:.2f}>{self.volatility_guard_max_range_atr_ratio:.2f}"
+                        )
+        except Exception:
+            ok = True
+            reason = "-"
+
+        self._volatility_guard_cache[key] = (now, ok, reason)
+        return ok, reason
 
     def _resolve_btc_trend_guard(self) -> dict[str, Any]:
         neutral = {

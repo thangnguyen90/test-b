@@ -40,6 +40,7 @@ class Settings(BaseModel):
     ml_feedback_train_limit: int = int(os.getenv("ML_FEEDBACK_TRAIN_LIMIT", "1200"))
     ml_feedback_mae_penalty_pct: float = float(os.getenv("ML_FEEDBACK_MAE_PENALTY_PCT", "20"))
     ml_feedback_flip_win_on_deep_mae: bool = os.getenv("ML_FEEDBACK_FLIP_WIN_ON_DEEP_MAE", "true").lower() == "true"
+    ml_feedback_hard_flip_mae_pct: float = float(os.getenv("ML_FEEDBACK_HARD_FLIP_MAE_PCT", "10"))
     ml_feedback_use_pnl_weight: bool = os.getenv("ML_FEEDBACK_USE_PNL_WEIGHT", "true").lower() == "true"
     ml_feedback_pnl_weight_factor: float = float(os.getenv("ML_FEEDBACK_PNL_WEIGHT_FACTOR", "0.02"))
     ml_feedback_pnl_weight_max_boost: float = float(os.getenv("ML_FEEDBACK_PNL_WEIGHT_MAX_BOOST", "2.0"))
@@ -135,6 +136,16 @@ class Settings(BaseModel):
     paper_trade_btc_follow_min_beta: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_BETA", "0.2"))
     paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
     paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
+    paper_trade_volatility_guard_enabled: bool = os.getenv("PAPER_TRADE_VOLATILITY_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_volatility_guard_timeframe: str = os.getenv("PAPER_TRADE_VOLATILITY_GUARD_TIMEFRAME", "5m")
+    paper_trade_volatility_guard_limit: int = int(os.getenv("PAPER_TRADE_VOLATILITY_GUARD_LIMIT", "60"))
+    paper_trade_volatility_guard_cache_sec: float = float(os.getenv("PAPER_TRADE_VOLATILITY_GUARD_CACHE_SEC", "12"))
+    paper_trade_volatility_guard_max_atr_pct: float = float(os.getenv("PAPER_TRADE_VOLATILITY_GUARD_MAX_ATR_PCT", "1.4"))
+    paper_trade_volatility_guard_max_range_pct: float = float(os.getenv("PAPER_TRADE_VOLATILITY_GUARD_MAX_RANGE_PCT", "2.6"))
+    paper_trade_volatility_guard_max_body_pct: float = float(os.getenv("PAPER_TRADE_VOLATILITY_GUARD_MAX_BODY_PCT", "1.8"))
+    paper_trade_volatility_guard_max_range_atr_ratio: float = float(
+        os.getenv("PAPER_TRADE_VOLATILITY_GUARD_MAX_RANGE_ATR_RATIO", "2.8")
+    )
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
