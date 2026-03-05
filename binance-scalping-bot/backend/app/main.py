@@ -14,7 +14,15 @@ from app.api.paper_trades import router as paper_trades_router
 from app.api.signals import get_scan_snapshot
 from app.api.signals import router as signals_router
 from app.core.config import settings
-from app.deps import auto_trainer, liquid_ml_predictor, ml_predictor, ml_test_predictor, price_stream, ws_manager
+from app.deps import (
+    auto_trainer,
+    bind_paper_trade_runtime,
+    liquid_ml_predictor,
+    ml_predictor,
+    ml_test_predictor,
+    price_stream,
+    ws_manager,
+)
 from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
@@ -45,6 +53,7 @@ async def on_startup() -> None:
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
+    bind_paper_trade_runtime(None, None)
     if settings.mysql_enabled:
         try:
             paper_trade_repo = MySQLTradeRepository(
@@ -124,12 +133,14 @@ async def on_startup() -> None:
                 test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
+            bind_paper_trade_runtime(paper_trade_repo, paper_trade_engine)
             await paper_trade_engine.start()
         except Exception:
             paper_trade_repo = None
             paper_trade_engine = None
             paper_trade_api.bind_repo(None)
             paper_trade_api.bind_major_symbol_resolver(None)
+            bind_paper_trade_runtime(None, None)
 
     await ws_manager.start()
     await price_stream.start()

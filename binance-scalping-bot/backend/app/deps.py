@@ -1,3 +1,5 @@
+from typing import Any
+
 from app.core.config import settings
 from app.services.auto_trainer import AutoTrainer
 from app.services.binance_price_stream import BinancePriceStream
@@ -31,3 +33,17 @@ auto_trainer = AutoTrainer(
     rr_ratio=settings.auto_train_rr_ratio,
     symbols=settings.training_symbols,
 )
+
+# Runtime references so APIs can expose true paper-trade enterability state.
+paper_trade_repo: Any | None = None
+paper_trade_engine: Any | None = None
+
+
+def bind_paper_trade_runtime(repo: Any | None, engine: Any | None) -> None:
+    global paper_trade_repo, paper_trade_engine
+    paper_trade_repo = repo
+    paper_trade_engine = engine
+
+
+def get_paper_trade_runtime() -> tuple[Any | None, Any | None]:
+    return paper_trade_repo, paper_trade_engine

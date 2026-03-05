@@ -114,9 +114,13 @@ type ScanSignalItem = {
   side: 'LONG' | 'SHORT'
   signal_source?: string
   win_probability: number
+  effective_win_probability?: number
   predicted_entry_price: number
   stop_loss: number
   take_profit: number
+  mark_price?: number
+  can_enter?: boolean
+  blocked_reason?: string
   liq_zone_price?: number
   liq_zone_value?: number
 }
@@ -2953,10 +2957,13 @@ function App() {
               </thead>
               <tbody>
                 {sortedHighWinSignals.map((item) => {
-                  const mark = resolveHighWinPrice(item.symbol)
+                  const mark = resolveHighWinPrice(item.symbol) ?? item.mark_price
                   const markTs = resolveHighWinTime(item.symbol)
-                  const canEnter = isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
-                  const blockedReason = getHighWinBlockedReason(item)
+                  const canEnter = typeof item.can_enter === 'boolean'
+                    ? item.can_enter
+                    : isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
+                  const backendBlockedReason = (item.blocked_reason ?? '').trim()
+                  const blockedReason = backendBlockedReason || getHighWinBlockedReason(item)
                   return (
                   <tr key={`${item.symbol}-${item.side}`}>
                     <td>

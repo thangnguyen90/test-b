@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
-from app.deps import ml_predictor
+from app.deps import get_paper_trade_runtime, ml_predictor
 from app.services.binance_client import BinanceFuturesClient
+from app.services.risk_manager import calc_estimated_margin_ratio_pct
 
 router = APIRouter(prefix="/api/v1/signals", tags=["signals"])
 market_client = BinanceFuturesClient()
@@ -82,6 +83,115 @@ def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int = 600) -> list[s
     return symbols[:max_symbols]
 
 
+def _evaluate_paper_entry_gate(
+    *,
+    symbol: str,
+    side: str,
+    raw_win_probability: float,
+    entry: float,
+    take_profit: float,
+    stop_loss: float,
+    market_price: float,
+) -> tuple[bool, str, float]:
+    try:
+        repo, engine = get_paper_trade_runtime()
+        if repo is None or engine is None:
+            return False, "Paper engine offline", raw_win_probability
+
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
+            return False, "Invalid TP/SL", raw_win_probability
+
+        try:
+            if bool(engine._is_open_paused()):
+                pause_reason = str(getattr(engine, "_open_pause_reason", "") or "").strip()
+                return False, (pause_reason or "Open paused"), raw_win_probability
+        except Exception:
+            pass
+
+        try:
+            if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+                return False, "Duplicate", raw_win_probability
+        except Exception:
+            return False, "Repo unavailable", raw_win_probability
+
+        min_win = float(getattr(engine, "min_win_probability", 0.75))
+        if raw_win_probability < min_win:
+            return False, f"Win<{min_win * 100:.1f}%", raw_win_probability
+
+        try:
+            hist_acc = repo.symbol_accuracy(symbol=symbol, lookback=300)
+        except Exception:
+            hist_acc = None
+        effective_probability = (
+            (raw_win_probability * 0.8 + hist_acc * 0.2)
+            if hist_acc is not None
+            else raw_win_probability
+        )
+        if effective_probability < min_win:
+            return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability
+
+        btc_guard: dict = {}
+        try:
+            btc_guard = engine._resolve_btc_trend_guard()
+        except Exception:
+            btc_guard = {}
+
+        try:
+            pass_btc_filter = bool(
+                engine._pass_btc_filter(
+                    side=side,
+                    effective_prob=effective_probability,
+                    btc_guard=btc_guard,
+                )
+            )
+        except Exception:
+            pass_btc_filter = True
+        if not pass_btc_filter:
+            try:
+                blocked_by_up_shock = not bool(engine._pass_btc_up_shock_long_guard(side=side, btc_guard=btc_guard))
+            except Exception:
+                blocked_by_up_shock = False
+            if blocked_by_up_shock:
+                return False, "BTC up-shock long block", effective_probability
+
+            trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+            confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
+            min_conf = float(getattr(engine, "btc_filter_min_confidence", 0.0))
+            block_countertrend = bool(getattr(engine, "btc_filter_block_countertrend", False))
+            if (
+                block_countertrend
+                and trend_side in {"LONG", "SHORT"}
+                and str(side).upper() != trend_side
+                and confidence >= min_conf
+            ):
+                return False, f"BTC trend {trend_side}", effective_probability
+            return False, "BTC filter", effective_probability
+
+        try:
+            touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
+        except Exception:
+            touched = False
+        if not touched:
+            return False, "Entry not touched", effective_probability
+
+        try:
+            leverage = max(1, int(engine._resolve_symbol_leverage(symbol)))
+            max_risk_pct = max(0.0, float(engine._resolve_symbol_max_risk_pct(symbol)))
+            maint_margin_rate = max(0.0, float(getattr(engine, "maint_margin_rate", 0.02)))
+            risk_pct = calc_estimated_margin_ratio_pct(
+                leverage=leverage,
+                maint_margin_rate=maint_margin_rate,
+            )
+            if risk_pct > max_risk_pct:
+                return False, f"Risk {risk_pct:.2f}%>{max_risk_pct:.2f}%", effective_probability
+        except Exception:
+            return False, "Risk check unavailable", effective_probability
+
+        return True, "-", effective_probability
+    except Exception:
+        return False, "Precheck unavailable", raw_win_probability
+
+
 def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
     global _LAST_SCAN_CACHE, _BLOCK_UNTIL_TS
 
@@ -146,15 +256,33 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 side=signal.side,
                 ticker=ticker if isinstance(ticker, dict) else {},
             )
+            try:
+                can_enter, blocked_reason, effective_win_probability = _evaluate_paper_entry_gate(
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    raw_win_probability=float(signal.win_probability),
+                    entry=float(signal.predicted_entry_price),
+                    take_profit=float(signal.take_profit),
+                    stop_loss=float(signal.stop_loss),
+                    market_price=float(last_price),
+                )
+            except Exception:
+                can_enter = False
+                blocked_reason = "Precheck unavailable"
+                effective_win_probability = float(signal.win_probability)
             matches.append(
                 {
                     "symbol": signal.symbol,
                     "side": signal.side,
                     "signal_source": "ML",
                     "win_probability": signal.win_probability,
+                    "effective_win_probability": effective_win_probability,
                     "predicted_entry_price": signal.predicted_entry_price,
                     "stop_loss": signal.stop_loss,
                     "take_profit": signal.take_profit,
+                    "mark_price": last_price,
+                    "can_enter": can_enter,
+                    "blocked_reason": blocked_reason,
                     "liq_zone_price": liq_zone_price,
                     "liq_zone_value": liq_zone_value,
                 }

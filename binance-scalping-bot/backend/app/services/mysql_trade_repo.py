@@ -661,7 +661,7 @@ class MySQLTradeRepository:
                 cur.execute(
                     f"""
                     SELECT result
-                    FROM ml_feedback
+                    FROM ml_feedback f
                     WHERE symbol=%s
                     ORDER BY f.created_at DESC
                     LIMIT {safe_lookback}
@@ -695,7 +695,7 @@ class MySQLTradeRepository:
                         f.pnl_pct
                     FROM ml_feedback f
                     LEFT JOIN paper_trades p ON p.id = f.paper_trade_id
-                    ORDER BY created_at DESC
+                    ORDER BY f.created_at DESC
                     LIMIT {safe_limit}
                     """
                 )
