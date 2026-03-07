@@ -70,6 +70,10 @@ class PaperTradeStats(BaseModel):
 
 class PaperTradeListResponse(BaseModel):
     items: list[PaperTrade]
+    total: Optional[int] = None
+    page: Optional[int] = None
+    page_size: Optional[int] = None
+    total_pages: Optional[int] = None
 
 
 class PaperTradeStatsResponse(BaseModel):

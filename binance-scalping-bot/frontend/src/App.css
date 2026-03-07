@@ -80,6 +80,21 @@ h1 {
   color: #2f3f52;
 }
 
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.history-size-select {
+  min-width: 110px;
+  margin-top: 0;
+  padding: 0.34rem 0.5rem;
+  font-size: 0.8rem;
+}
+
 .grid {
   display: grid;
   gap: 0.95rem;

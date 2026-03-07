@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import math
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -193,12 +194,31 @@ class PaperTradeAPI:
             items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
         )
 
-    def get_history(self, limit: int = Query(default=200, ge=1, le=2000)) -> PaperTradeListResponse:
+    def get_history(
+        self,
+        limit: int = Query(default=200, ge=1, le=2000),
+        page: int | None = Query(default=None, ge=1),
+        page_size: int | None = Query(default=None, ge=1, le=200),
+    ) -> PaperTradeListResponse:
         repo = self._require_repo()
-        rows = repo.list_recent_trades(limit=limit)
+        if page is None and page_size is None:
+            rows = repo.list_recent_trades(limit=limit)
+            btc_follow_map = self._resolve_btc_follow_map(rows)
+            return PaperTradeListResponse(
+                items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
+            )
+
+        target_page = page or 1
+        target_page_size = page_size or min(limit, 200)
+        rows, total = repo.list_recent_trades_paged(page=target_page, page_size=target_page_size)
         btc_follow_map = self._resolve_btc_follow_map(rows)
+        total_pages = max(1, math.ceil(total / target_page_size)) if total > 0 else 1
         return PaperTradeListResponse(
-            items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
+            items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows],
+            total=total,
+            page=min(target_page, total_pages),
+            page_size=target_page_size,
+            total_pages=total_pages,
         )
 
     def get_stats(self) -> PaperTradeStatsResponse:

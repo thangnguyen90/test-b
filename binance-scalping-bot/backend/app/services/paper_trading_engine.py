@@ -668,6 +668,22 @@ class PaperTradingEngine:
                     )
                     continue
 
+                # Close any counter-trend open trade when BTC filter has high confidence.
+                if self._should_force_close_countertrend_on_btc_filter(
+                    symbol=symbol,
+                    side=side,
+                    pnl=pnl,
+                    btc_guard=btc_guard,
+                ):
+                    self.repo.close_trade(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        result=1,
+                        close_reason="BTC_TREND_COUNTER_EXIT",
+                    )
+                    continue
+
                 # SL has higher priority than TP per user requirement.
                 sl_hit = False
                 if not self.disable_sl:
@@ -1144,6 +1160,34 @@ class PaperTradingEngine:
         if confidence < self.btc_profit_lock_min_confidence:
             return False
         return self._is_symbol_following_btc(symbol)
+
+    def _should_force_close_countertrend_on_btc_filter(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        pnl: float,
+        btc_guard: dict[str, Any],
+    ) -> bool:
+        if pnl <= 0:
+            return False
+        if not self.btc_filter_enabled:
+            return False
+        if not self.btc_filter_block_countertrend:
+            return False
+        if not self._is_symbol_following_btc(symbol):
+            return False
+
+        trend_side = str(btc_guard.get("side") or "NEUTRAL").upper()
+        if trend_side not in {"LONG", "SHORT"}:
+            return False
+        if side.upper() == trend_side:
+            return False
+        try:
+            confidence = float(btc_guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        return confidence >= self.btc_filter_min_confidence
 
     def _should_force_close_profit_on_btc_reversal(
         self,

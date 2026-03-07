@@ -52,6 +52,13 @@ class Settings(BaseModel):
     ml_feedback_good_signal_min_pnl_pct: float = float(os.getenv("ML_FEEDBACK_GOOD_SIGNAL_MIN_PNL_PCT", "8"))
     ml_feedback_good_signal_max_mae_pct: float = float(os.getenv("ML_FEEDBACK_GOOD_SIGNAL_MAX_MAE_PCT", "4"))
     ml_feedback_good_signal_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_GOOD_SIGNAL_WEIGHT_MULTIPLIER", "1.4"))
+    ml_feedback_early_loss_penalty_enabled: bool = os.getenv("ML_FEEDBACK_EARLY_LOSS_PENALTY_ENABLED", "true").lower() == "true"
+    ml_feedback_early_loss_max_hold_minutes: int = int(os.getenv("ML_FEEDBACK_EARLY_LOSS_MAX_HOLD_MINUTES", "25"))
+    ml_feedback_early_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_EARLY_LOSS_WEIGHT_MULTIPLIER", "5.0"))
+    ml_feedback_long_hold_bad_penalty_enabled: bool = os.getenv("ML_FEEDBACK_LONG_HOLD_BAD_PENALTY_ENABLED", "true").lower() == "true"
+    ml_feedback_long_hold_min_hold_minutes: int = int(os.getenv("ML_FEEDBACK_LONG_HOLD_MIN_HOLD_MINUTES", "90"))
+    ml_feedback_long_hold_max_pnl_pct: float = float(os.getenv("ML_FEEDBACK_LONG_HOLD_MAX_PNL_PCT", "1.0"))
+    ml_feedback_long_hold_bad_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_LONG_HOLD_BAD_WEIGHT_MULTIPLIER", "4.0"))
     auto_train_enabled: bool = os.getenv("AUTO_TRAIN_ENABLED", "true").lower() == "true"
     auto_train_interval_minutes: int = int(os.getenv("AUTO_TRAIN_INTERVAL_MINUTES", "240"))
     auto_train_startup_delay_sec: int = int(os.getenv("AUTO_TRAIN_STARTUP_DELAY_SEC", "30"))

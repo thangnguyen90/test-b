@@ -516,6 +516,22 @@ class MySQLTradeRepository:
                 )
                 return list(cur.fetchall())
 
+    def list_recent_trades_paged(self, page: int = 1, page_size: int = 50) -> tuple[list[dict[str, Any]], int]:
+        safe_page = max(1, int(page))
+        safe_page_size = max(1, min(int(page_size), 200))
+        offset = (safe_page - 1) * safe_page_size
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS cnt FROM paper_trades")
+                total_row = cur.fetchone() or {}
+                total = int(total_row.get("cnt") or 0)
+                cur.execute(
+                    "SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT %s OFFSET %s",
+                    (safe_page_size, offset),
+                )
+                rows = list(cur.fetchall())
+        return rows, total
+
     def stats(self) -> dict[str, Any]:
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -699,6 +715,8 @@ class MySQLTradeRepository:
                         f.side,
                         f.result,
                         p.close_reason,
+                        p.opened_at,
+                        p.closed_at,
                         f.mae_pct,
                         f.mfe_pct,
                         f.created_at,

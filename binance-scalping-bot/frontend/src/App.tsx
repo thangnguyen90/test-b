@@ -199,6 +199,14 @@ type PaperTradeStats = {
   limit_avg_pnl_pct: number
 }
 
+type PaperTradeHistoryResponse = {
+  items: PaperTrade[]
+  total?: number
+  page?: number
+  page_size?: number
+  total_pages?: number
+}
+
 type DailyTradeSummary = {
   trade_date: string
   total_trades: number
@@ -911,6 +919,9 @@ function App() {
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
+  const [historyPage, setHistoryPage] = useState(1)
+  const [historyPageSize, setHistoryPageSize] = useState(30)
+  const [historyTotalItems, setHistoryTotalItems] = useState(0)
   const [tradeToasts, setTradeToasts] = useState<TradeToast[]>([])
   const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
   const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
@@ -1272,6 +1283,10 @@ function App() {
     () => Math.max(1, Math.ceil((liqTotalSymbols || 0) / liqPageSize)),
     [liqTotalSymbols, liqPageSize],
   )
+  const historyMaxPage = useMemo(
+    () => Math.max(1, Math.ceil((historyTotalItems || 0) / historyPageSize)),
+    [historyTotalItems, historyPageSize],
+  )
 
   function toggleVolSort(key: keyof VolatilityItem) {
     setVolSort((prev) => {
@@ -1552,11 +1567,11 @@ function App() {
     setScannedCount(data.scanned ?? 0)
   }
 
-  async function fetchPaperTradingStats() {
+  async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
     const [statsRes, openRes, historyRes] = await Promise.all([
       fetch(`${API_BASE}/api/v1/paper-trades/stats`),
       fetch(`${API_BASE}/api/v1/paper-trades/open`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=120`),
+      fetch(`${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}`),
     ])
     const errors: string[] = []
 
@@ -1575,10 +1590,17 @@ function App() {
     }
 
     if (historyRes.ok) {
-      const historyPayload = await historyRes.json() as { items: PaperTrade[] }
+      const historyPayload = await historyRes.json() as PaperTradeHistoryResponse
       const nextHistory = historyPayload.items ?? []
       processCloseToasts(nextHistory)
       setPaperHistory(nextHistory)
+      const nextPageSize = Math.max(1, historyPayload.page_size ?? targetPageSize)
+      const nextTotal = historyPayload.total ?? nextHistory.length
+      const nextMaxPage = Math.max(1, Math.ceil(nextTotal / nextPageSize))
+      const nextPage = Math.min(Math.max(1, historyPayload.page ?? targetPage), nextMaxPage)
+      setHistoryTotalItems(nextTotal)
+      if (nextPageSize !== historyPageSize) setHistoryPageSize(nextPageSize)
+      if (nextPage !== historyPage) setHistoryPage(nextPage)
     } else {
       errors.push(`history:${historyRes.status}`)
     }
@@ -1877,7 +1899,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [showPaperScreen])
+  }, [showPaperScreen, historyPage, historyPageSize])
 
   useEffect(() => {
     if (!showDailyScreen) return
@@ -1896,6 +1918,10 @@ function App() {
       window.clearInterval(timer)
     }
   }, [showDailyScreen])
+
+  useEffect(() => {
+    setHistoryPage(1)
+  }, [paperModelFilter])
 
   useEffect(() => {
     if (!showPaperScreen || paperOpenTrades.length === 0) return
@@ -2543,7 +2569,44 @@ function App() {
             <p className="symbols-text">Open trade WS status: {paperPriceWsStatus}</p>
           </div>
 
-          <h3 className="section-title">Closed Trade History</h3>
+          <div className="history-header">
+            <h3 className="section-title">Closed Trade History</h3>
+            <div className="scan-actions">
+              <span className="badge neutral">Page {historyPage}/{historyMaxPage}</span>
+              <span className="badge neutral">Rows: {historyTotalItems}</span>
+              <select
+                className="select-control history-size-select"
+                value={historyPageSize}
+                onChange={(event) => {
+                  const nextSize = Number(event.target.value)
+                  if (!Number.isFinite(nextSize) || nextSize <= 0) return
+                  setHistoryPage(1)
+                  setHistoryPageSize(nextSize)
+                }}
+              >
+                <option value={20}>20 / page</option>
+                <option value={30}>30 / page</option>
+                <option value={50}>50 / page</option>
+                <option value={100}>100 / page</option>
+              </select>
+              <button
+                type="button"
+                className="btn-inline btn-secondary"
+                disabled={historyPage <= 1}
+                onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                className="btn-inline btn-secondary"
+                disabled={historyPage >= historyMaxPage}
+                onClick={() => setHistoryPage((p) => Math.min(historyMaxPage, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </div>
           <div className="content table-wrap">
             {filteredPaperHistory.length === 0 ? (
               <p>No closed paper trades yet.</p>

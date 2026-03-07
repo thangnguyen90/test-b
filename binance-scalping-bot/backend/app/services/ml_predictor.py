@@ -69,6 +69,8 @@ class MLPredictor:
         self.last_feedback_penalized_samples: int = 0
         self.last_feedback_recovery_penalized_samples: int = 0
         self.last_feedback_good_boosted_samples: int = 0
+        self.last_feedback_early_loss_penalized_samples: int = 0
+        self.last_feedback_long_hold_bad_penalized_samples: int = 0
         self.train_log_path = BASE_DIR / ".runtime" / "ml_train.log"
         self.train_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_model_if_exists()
@@ -147,11 +149,15 @@ class MLPredictor:
                 feedback_penalized,
                 feedback_recovery_penalized,
                 feedback_good_boosted,
+                feedback_early_loss_penalized,
+                feedback_long_hold_bad_penalized,
                 feedback_weights,
             ) = self._build_feedback_dataset(feedback_rows)
             self.last_feedback_penalized_samples = int(feedback_penalized)
             self.last_feedback_recovery_penalized_samples = int(feedback_recovery_penalized)
             self.last_feedback_good_boosted_samples = int(feedback_good_boosted)
+            self.last_feedback_early_loss_penalized_samples = int(feedback_early_loss_penalized)
+            self.last_feedback_long_hold_bad_penalized_samples = int(feedback_long_hold_bad_penalized)
             if not feedback_prepared.features.empty:
                 prepared = PreparedData(
                     features=pd.concat([prepared.features, feedback_prepared.features], ignore_index=True),
@@ -170,6 +176,8 @@ class MLPredictor:
                     "feedback_penalized_samples": int(feedback_penalized),
                     "feedback_recovery_penalized_samples": int(feedback_recovery_penalized),
                     "feedback_good_boosted_samples": int(feedback_good_boosted),
+                    "feedback_early_loss_penalized_samples": int(feedback_early_loss_penalized),
+                    "feedback_long_hold_bad_penalized_samples": int(feedback_long_hold_bad_penalized),
                 }
                 self._finish_train(
                     result="SKIPPED",
@@ -262,6 +270,8 @@ class MLPredictor:
                 "feedback_penalized_samples": int(feedback_penalized),
                 "feedback_recovery_penalized_samples": int(feedback_recovery_penalized),
                 "feedback_good_boosted_samples": int(feedback_good_boosted),
+                "feedback_early_loss_penalized_samples": int(feedback_early_loss_penalized),
+                "feedback_long_hold_bad_penalized_samples": int(feedback_long_hold_bad_penalized),
                 "side_long_samples_raw": int(side_long_raw),
                 "side_short_samples_raw": int(side_short_raw),
                 "side_long_samples_used": int(side_long_used),
@@ -312,6 +322,8 @@ class MLPredictor:
             "last_feedback_penalized_samples": self.last_feedback_penalized_samples,
             "last_feedback_recovery_penalized_samples": self.last_feedback_recovery_penalized_samples,
             "last_feedback_good_boosted_samples": self.last_feedback_good_boosted_samples,
+            "last_feedback_early_loss_penalized_samples": self.last_feedback_early_loss_penalized_samples,
+            "last_feedback_long_hold_bad_penalized_samples": self.last_feedback_long_hold_bad_penalized_samples,
             "liquidation_features_enabled": self.use_liquidation_features,
             "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
@@ -472,9 +484,9 @@ class MLPredictor:
         except Exception:
             return []
 
-    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int, int, int, list[float]]:
+    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int, int, int, int, int, list[float]]:
         if not feedback_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, []
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, 0, 0, []
 
         feature_rows: list[pd.Series] = []
         labels: list[int] = []
@@ -482,6 +494,8 @@ class MLPredictor:
         penalized_count = 0
         recovery_penalized_count = 0
         good_boosted_count = 0
+        early_loss_penalized_count = 0
+        long_hold_bad_penalized_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
 
         for row in feedback_rows:
@@ -503,6 +517,13 @@ class MLPredictor:
 
             deep_drawdown_recovery = False
             good_signal = False
+            early_loss = False
+            long_hold_bad = False
+            hold_minutes = self._calc_hold_minutes(row.get("opened_at"), row.get("closed_at"))
+            try:
+                pnl_pct_value = float(row.get("pnl_pct") or 0.0)
+            except Exception:
+                pnl_pct_value = 0.0
             if settings.ml_feedback_flip_win_on_deep_mae and label == 1:
                 mae_pct = row.get("mae_pct")
                 try:
@@ -517,10 +538,6 @@ class MLPredictor:
                     mae_value = float(row.get("mae_pct") or 0.0)
                 except Exception:
                     mae_value = 0.0
-                try:
-                    pnl_pct_value = float(row.get("pnl_pct") or 0.0)
-                except Exception:
-                    pnl_pct_value = 0.0
                 if (
                     mae_value <= -abs(settings.ml_feedback_recovery_penalty_mae_pct)
                     and pnl_pct_value <= float(settings.ml_feedback_recovery_penalty_max_pnl_pct)
@@ -533,16 +550,27 @@ class MLPredictor:
                     mae_value = float(row.get("mae_pct") or 0.0)
                 except Exception:
                     mae_value = 0.0
-                try:
-                    pnl_pct_value = float(row.get("pnl_pct") or 0.0)
-                except Exception:
-                    pnl_pct_value = 0.0
                 if (
                     pnl_pct_value >= float(settings.ml_feedback_good_signal_min_pnl_pct)
                     and mae_value >= -abs(float(settings.ml_feedback_good_signal_max_mae_pct))
                 ):
                     good_signal = True
                     good_boosted_count += 1
+            if settings.ml_feedback_early_loss_penalty_enabled and label == 0:
+                max_hold_minutes = max(1, int(settings.ml_feedback_early_loss_max_hold_minutes))
+                if hold_minutes is not None and hold_minutes <= float(max_hold_minutes):
+                    early_loss = True
+                    early_loss_penalized_count += 1
+
+            if settings.ml_feedback_long_hold_bad_penalty_enabled and hold_minutes is not None:
+                min_hold_minutes = max(1, int(settings.ml_feedback_long_hold_min_hold_minutes))
+                weak_pnl_threshold = float(settings.ml_feedback_long_hold_max_pnl_pct)
+                if hold_minutes >= float(min_hold_minutes) and (label == 0 or pnl_pct_value < weak_pnl_threshold):
+                    # Long-hold but weak outcome is considered a bad signal.
+                    if pnl_pct_value < weak_pnl_threshold:
+                        label = 0
+                    long_hold_bad = True
+                    long_hold_bad_penalized_count += 1
 
             feature_snapshot = self._parse_feature_snapshot(row.get("feature_snapshot_json"))
             if feature_snapshot is None:
@@ -575,6 +603,8 @@ class MLPredictor:
                     label=label,
                     deep_drawdown_recovery=deep_drawdown_recovery,
                     good_signal=good_signal,
+                    early_loss=early_loss,
+                    long_hold_bad=long_hold_bad,
                 )
             )
 
@@ -584,6 +614,8 @@ class MLPredictor:
                 penalized_count,
                 recovery_penalized_count,
                 good_boosted_count,
+                early_loss_penalized_count,
+                long_hold_bad_penalized_count,
                 [],
             )
 
@@ -594,6 +626,8 @@ class MLPredictor:
             penalized_count,
             recovery_penalized_count,
             good_boosted_count,
+            early_loss_penalized_count,
+            long_hold_bad_penalized_count,
             weights,
         )
 
@@ -603,6 +637,8 @@ class MLPredictor:
         label: int,
         deep_drawdown_recovery: bool = False,
         good_signal: bool = False,
+        early_loss: bool = False,
+        long_hold_bad: bool = False,
     ) -> float:
         weight = 1.0
         if settings.ml_feedback_use_pnl_weight:
@@ -624,7 +660,49 @@ class MLPredictor:
         if good_signal:
             boost = max(1.0, float(settings.ml_feedback_good_signal_weight_multiplier))
             weight *= boost
+        if early_loss:
+            heavy_penalty = max(1.0, float(settings.ml_feedback_early_loss_weight_multiplier))
+            weight *= heavy_penalty
+        if long_hold_bad:
+            long_hold_penalty = max(1.0, float(settings.ml_feedback_long_hold_bad_weight_multiplier))
+            weight *= long_hold_penalty
         return max(0.05, weight)
+
+    @staticmethod
+    def _calc_hold_minutes(opened_at_raw: object, closed_at_raw: object) -> float | None:
+        opened_at = MLPredictor._parse_datetime(opened_at_raw)
+        closed_at = MLPredictor._parse_datetime(closed_at_raw)
+        if opened_at is None or closed_at is None:
+            return None
+        if opened_at.tzinfo is not None:
+            opened_at = opened_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if closed_at.tzinfo is not None:
+            closed_at = closed_at.astimezone(timezone.utc).replace(tzinfo=None)
+        hold_minutes = (closed_at - opened_at).total_seconds() / 60.0
+        if hold_minutes < 0:
+            return None
+        return hold_minutes
+
+    @staticmethod
+    def _parse_datetime(raw: object) -> datetime | None:
+        if raw is None:
+            return None
+        if isinstance(raw, datetime):
+            return raw
+        if isinstance(raw, str):
+            text = raw.strip()
+            if not text:
+                return None
+            normalized = text.replace("Z", "+00:00")
+            try:
+                return datetime.fromisoformat(normalized)
+            except Exception:
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        return datetime.strptime(text, fmt)
+                    except Exception:
+                        continue
+        return None
 
     @staticmethod
     def _parse_feature_snapshot(raw: object) -> dict[str, float] | None:
