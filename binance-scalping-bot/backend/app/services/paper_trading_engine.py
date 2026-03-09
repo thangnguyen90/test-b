@@ -756,6 +756,8 @@ class PaperTradingEngine:
 
                 if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="FUNDING_ARB"):
                     continue
+                if getattr(self.repo, "has_recent_trade", None) and self.repo.has_recent_trade(symbol=symbol, side=side, entry_type="FUNDING_ARB", minutes=60):
+                    continue
 
                 market_price = market_prices.get(symbol)
                 if market_price is None:

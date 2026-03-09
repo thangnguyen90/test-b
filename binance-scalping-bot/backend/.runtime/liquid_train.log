@@ -22,3 +22,5 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-09T04:32:23.879517+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-09T05:50:10.146557+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-09T05:57:05.243756+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-09T09:57:08.768378+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-09T10:14:08.210155+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
