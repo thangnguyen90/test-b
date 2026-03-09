@@ -120,3 +120,25 @@ Python là ngôn ngữ tiêu chuẩn và mạnh mẽ nhất cho Machine Learning
 ## Yêu cầu Phê duyệt từ Người dùng
 > [!IMPORTANT]
 > Cập nhật Kế hoạch mới nhất phản ánh tính năng chuyển đổi từ Market Orders sang Limit Orders (Pending). Bạn có đồng ý với logic PENDING -> OPEN -> CLOSED trên ứng dụng này không để tôi bắt tay vào code?
+
+---
+
+## Giai đoạn Cải tiến 3: Lọc Coin Rác & Cải thiện Điểm vào (Volatile/Shitcoin Filter)
+
+> [!IMPORTANT]
+> Người dùng yêu cầu hạn chế rủi ro dính râu quét thanh lý (wick SL) trên các đồng coin Low-Cap/Rác (như RIVER, SAHARA) biến động mạnh do Market Maker thao túng.
+
+**Giải pháp Kỹ thuật:**
+
+1. **Nhận diện Coin Biến Động Kéo Điểm Vào (Wick Pullback Entry):**
+   - Định nghĩa `shitcoin/high_vol_coin`: Các coin KHÔNG nằm trong danh sách `major_symbols` VÀ có độ dịch chuyển / Funding Rate bất thường.
+   - **Xử lý Điểm Vào (Entry Adjustment):** Nếu phát hiện coin thao túng, Bot KHÔNG vào lệnh ngay khi giá chạm điểm AI phím. Mức giá Entry sẽ được "dời sâu hơn" (Bù trừ 1-2 lần ATR - Average True Range) để hứng mũi kim râu nến, sau đó bắt lấy nhịp hồi thay vì mua đuổi sớm.
+
+2. **Quản lý Vốn Động (Volatility-Based Sizing) & Giãn Stop Loss:**
+   - **Giãn SL:** Tự động nhân hệ số ATR cho Stop Loss lên (ví dụ x2.5 lần bình thường) để SL đủ xa, tránh quét râu liếm SL trên các con sóng giật.
+   - **Scale tiền:** Nếu SL bị kéo giãn ra thành > 5%, Bot sẽ tự động **giảm Volume (Quantity)** vào lệnh sao cho Tổng rủi ro tiền mất (risk in USD) vẫn **Bằng với một lệnh thông thường cắn SL 1%**. (VD: Bình thường mất $0.5, giờ SL 5% thì đánh Volume chỉ còn 1/5 để chạm SL mới mất $0.5).
+
+**Thay đổi Code (Backend):**
+- Thêm cơ chế `_apply_shitcoin_wick_entry_adjustment` trong `PaperTradingEngine` trước lúc tạo `open_trade`.
+- Điều chỉnh hàm `normalize_tp_sl` hoặc sử dụng ATR động (multiplier lớn hơn) với các con shitcoin.
+- Tính toán lại Volume Margin USD ngay tại vòng lặp `_run_once` nếu phát hiện là coin Low-cap biến động.

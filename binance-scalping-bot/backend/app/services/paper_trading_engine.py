@@ -325,6 +325,28 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
+                # --- SHITCOIN/VOLATILITY CHECK ---
+                is_shitcoin = False
+                if symbol not in self.major_symbols_static and symbol not in self.major_symbols_runtime:
+                    if abs(funding_rate) >= settings.shitcoin_funding_threshold:
+                        is_shitcoin = True
+
+                atr_val = await self._resolve_symbol_atr(symbol)
+                
+                if is_shitcoin and atr_val is not None and atr_val > 0:
+                    # Adjust entry deeper to catch wick
+                    entry_buffer = atr_val * settings.shitcoin_entry_atr_buffer
+                    if side == "LONG":
+                        entry = entry - entry_buffer
+                        # Update TP/SL distances proportionally or keep original prices, 
+                        # but normalize_tp_sl will handle SL later. Let's just shift them down.
+                        tp = tp - entry_buffer
+                        sl = sl - entry_buffer
+                    else:
+                        entry = entry + entry_buffer
+                        tp = tp + entry_buffer
+                        sl = sl + entry_buffer
+
                 market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
@@ -357,6 +379,7 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                active_sl_atr_multiplier = settings.shitcoin_atr_multiplier if is_shitcoin else self.sl_atr_multiplier
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -367,8 +390,8 @@ class PaperTradingEngine:
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
                     ),
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
-                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    atr_value=atr_val,
+                    sl_atr_multiplier=active_sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
@@ -385,14 +408,24 @@ class PaperTradingEngine:
                 if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
 
-                quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
-                    order_usdt=self.order_usdt,
-                    fallback_quantity=self.quantity,
-                )
+                # Volatility-Based Position Sizing: Reduce margin if SL% is large
+                sl_distance_pct = abs(entry - normalized_sl) / entry
+                # Baseline SL% is approx min_sl_pct (e.g. 0.008 or 0.8%)
+                baseline_sl_pct = max(self.min_sl_pct, 0.008)
+                
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    
+                if is_shitcoin and sl_distance_pct > baseline_sl_pct:
+                    # Scale down quantity/margin to maintain same USD risk
+                    scale_factor = baseline_sl_pct / sl_distance_pct
+                    margin_usdt = margin_usdt * scale_factor
+                    quantity = calc_quantity_from_order_usdt(
+                        entry_price=entry,
+                        order_usdt=margin_usdt * leverage,
+                        fallback_quantity=self.quantity
+                    )
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -639,6 +672,27 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
+                # --- SHITCOIN/VOLATILITY CHECK ---
+                is_shitcoin = False
+                if symbol not in self.major_symbols_static and symbol not in self.major_symbols_runtime:
+                    if abs(funding_rate) >= settings.shitcoin_funding_threshold:
+                        is_shitcoin = True
+
+                atr_val = await self._resolve_symbol_atr(symbol)
+                
+                if is_shitcoin and atr_val is not None and atr_val > 0:
+                    # Adjust entry deeper to catch wick
+                    entry_buffer = atr_val * settings.shitcoin_entry_atr_buffer
+                    if side == "LONG":
+                        entry = entry - entry_buffer
+                        # Update TP/SL distances proportionally (normalize_tp_sl will fix SL floor later)
+                        tp = tp - entry_buffer
+                        sl = sl - entry_buffer
+                    else:
+                        entry = entry + entry_buffer
+                        tp = tp + entry_buffer
+                        sl = sl + entry_buffer
+
                 if not self._entry_touched(side=side, market_price=float(market_price), entry=float(entry)):
                     continue
 
@@ -662,6 +716,7 @@ class PaperTradingEngine:
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
 
+                active_sl_atr_multiplier = settings.shitcoin_atr_multiplier if is_shitcoin else self.sl_atr_multiplier
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -672,8 +727,8 @@ class PaperTradingEngine:
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
                     ),
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
-                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    atr_value=atr_val,
+                    sl_atr_multiplier=active_sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
@@ -690,14 +745,24 @@ class PaperTradingEngine:
                 if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
 
-                quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
-                    order_usdt=self.order_usdt,
-                    fallback_quantity=self.quantity,
-                )
+                # Volatility-Based Position Sizing: Reduce margin if SL% is large
+                sl_distance_pct = abs(entry - normalized_sl) / entry
+                # Baseline SL% is approx min_sl_pct (e.g. 0.008 or 0.8%)
+                baseline_sl_pct = max(self.min_sl_pct, 0.008)
+
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+
+                if is_shitcoin and sl_distance_pct > baseline_sl_pct:
+                    # Scale down quantity/margin to maintain same USD risk
+                    scale_factor = baseline_sl_pct / sl_distance_pct
+                    margin_usdt = margin_usdt * scale_factor
+                    quantity = calc_quantity_from_order_usdt(
+                        entry_price=entry,
+                        order_usdt=margin_usdt * leverage,
+                        fallback_quantity=self.quantity
+                    )
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
                 liq_zone_price = self._safe_metric_float(

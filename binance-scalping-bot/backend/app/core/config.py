@@ -166,5 +166,9 @@ class Settings(BaseModel):
     funding_arb_sl_pct: float = float(os.getenv("FUNDING_ARB_SL_PCT", "0.01"))
     funding_arb_hold_minutes: int = int(os.getenv("FUNDING_ARB_HOLD_MINUTES", "45"))
 
+    shitcoin_funding_threshold: float = float(os.getenv("SHITCOIN_FUNDING_THRESHOLD", "0.0015"))
+    shitcoin_atr_multiplier: float = float(os.getenv("SHITCOIN_ATR_MULTIPLIER", "2.5"))
+    shitcoin_entry_atr_buffer: float = float(os.getenv("SHITCOIN_ENTRY_ATR_BUFFER", "1.5"))
+
 
 settings = Settings()
