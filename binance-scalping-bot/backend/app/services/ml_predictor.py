@@ -467,6 +467,8 @@ class MLPredictor:
                 user=settings.mysql_user,
                 password=settings.mysql_password,
                 database=settings.mysql_database,
+                paper_trades_table=settings.mysql_paper_trades_table,
+                ml_feedback_table=settings.mysql_ml_feedback_table,
             )
             return repo.list_feedback(limit=limit)
         except Exception:

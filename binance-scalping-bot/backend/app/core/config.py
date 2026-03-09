@@ -80,6 +80,8 @@ class Settings(BaseModel):
     mysql_user: str = os.getenv("MYSQL_USER", "root")
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
     mysql_database: str = os.getenv("MYSQL_DATABASE", "trading_bot")
+    mysql_paper_trades_table: str = os.getenv("MYSQL_PAPER_TRADES_TABLE", "paper_trades_liq")
+    mysql_ml_feedback_table: str = os.getenv("MYSQL_ML_FEEDBACK_TABLE", "ml_feedback_liq")
 
     paper_trade_min_win_probability: float = float(os.getenv("PAPER_TRADE_MIN_WIN", "0.75"))
     paper_trade_quantity: float = float(os.getenv("PAPER_TRADE_QUANTITY", "0.01"))
@@ -95,14 +97,31 @@ class Settings(BaseModel):
     paper_trade_major_dynamic_candle_lookback: int = int(os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_CANDLE_LOOKBACK", "24"))
     paper_trade_major_leverage: int = int(os.getenv("PAPER_TRADE_MAJOR_LEVERAGE", "10"))
     paper_trade_major_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAJOR_MAX_RISK_PCT", "20"))
+    paper_trade_dynamic_major_leverage_cap: int = int(
+        os.getenv(
+            "PAPER_TRADE_DYNAMIC_MAJOR_LEVERAGE_CAP",
+            os.getenv("PAPER_TRADE_LEVERAGE", "5"),
+        )
+    )
+    paper_trade_dynamic_major_min_turnover_usdt: float = float(
+        os.getenv("PAPER_TRADE_DYNAMIC_MAJOR_MIN_TURNOVER_USDT", "5000000")
+    )
     paper_trade_poll_interval_sec: float = float(os.getenv("PAPER_TRADE_POLL_INTERVAL_SEC", "6"))
     paper_trade_stream_max_stale_sec: float = float(os.getenv("PAPER_TRADE_STREAM_MAX_STALE_SEC", "5"))
+    paper_trade_entry_touch_buffer_pct: float = float(os.getenv("PAPER_TRADE_ENTRY_TOUCH_BUFFER_PCT", "0.0008"))
     paper_trade_min_sl_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_PCT", "0.008"))
     paper_trade_min_sl_loss_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_LOSS_PCT", "5"))
     paper_trade_sl_extra_buffer_pct: float = float(os.getenv("PAPER_TRADE_SL_EXTRA_BUFFER_PCT", "0.002"))
     paper_trade_sl_atr_multiplier: float = float(os.getenv("PAPER_TRADE_SL_ATR_MULTIPLIER", "1.2"))
     paper_trade_sl_atr_timeframe: str = os.getenv("PAPER_TRADE_SL_ATR_TIMEFRAME", "5m")
     paper_trade_sl_atr_limit: int = int(os.getenv("PAPER_TRADE_SL_ATR_LIMIT", "120"))
+    paper_trade_small_cap_oi_hard_floor: float = float(os.getenv("PAPER_TRADE_SMALL_CAP_OI_HARD_FLOOR", "8000000"))
+    paper_trade_small_cap_oi_soft_floor: float = float(os.getenv("PAPER_TRADE_SMALL_CAP_OI_SOFT_FLOOR", "25000000"))
+    paper_trade_low_oi_entry_extra_pct: float = float(os.getenv("PAPER_TRADE_LOW_OI_ENTRY_EXTRA_PCT", "0.01"))
+    paper_trade_small_cap_max_leverage: int = int(os.getenv("PAPER_TRADE_SMALL_CAP_MAX_LEVERAGE", "3"))
+    paper_trade_max_abs_funding_rate: float = float(os.getenv("PAPER_TRADE_MAX_ABS_FUNDING_RATE", "0.0012"))
+    paper_trade_min_long_short_ratio: float = float(os.getenv("PAPER_TRADE_MIN_LONG_SHORT_RATIO", "0.65"))
+    paper_trade_max_long_short_ratio: float = float(os.getenv("PAPER_TRADE_MAX_LONG_SHORT_RATIO", "1.85"))
     paper_trade_max_tp_pct: float = float(os.getenv("PAPER_TRADE_MAX_TP_PCT", "15"))
     paper_trade_min_rr: float = float(os.getenv("PAPER_TRADE_MIN_RR", "1.5"))
     paper_trade_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAX_RISK_PCT", "12"))
@@ -139,6 +158,13 @@ class Settings(BaseModel):
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
+
+    funding_arb_enabled: bool = os.getenv("FUNDING_ARB_ENABLED", "true").lower() == "true"
+    funding_arb_min_rate: float = float(os.getenv("FUNDING_ARB_MIN_RATE", "0.0008"))
+    funding_arb_max_minutes: int = int(os.getenv("FUNDING_ARB_MAX_MINUTES", "15"))
+    funding_arb_tp_pct: float = float(os.getenv("FUNDING_ARB_TP_PCT", "0.004"))
+    funding_arb_sl_pct: float = float(os.getenv("FUNDING_ARB_SL_PCT", "0.01"))
+    funding_arb_hold_minutes: int = int(os.getenv("FUNDING_ARB_HOLD_MINUTES", "45"))
 
 
 settings = Settings()

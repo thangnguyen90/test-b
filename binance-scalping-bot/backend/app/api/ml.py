@@ -31,11 +31,19 @@ def get_test_model_status() -> ModelStatus:
 
 @router.post("/train", response_model=TrainResponse)
 def train_model(req: TrainRequest) -> TrainResponse:
+    symbols = [
+        str(item.get("symbol"))
+        for item in analytics_service.top_volatility(days=settings.liquid_ml_top_vol_days, limit=settings.liquid_ml_max_symbols)
+        if item.get("symbol")
+    ]
+    if not symbols:
+        symbols = settings.training_symbols
     result = ml_predictor.train(
         limit=req.limit,
         horizon=req.horizon,
         rr_ratio=req.rr_ratio,
-        symbols=settings.training_symbols,
+        symbols=symbols,
+        trigger="manual_primary",
     )
     return TrainResponse(**result)
 

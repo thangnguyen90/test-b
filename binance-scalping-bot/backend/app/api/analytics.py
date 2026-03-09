@@ -34,7 +34,7 @@ def get_liquidation_overview(
         "total_symbols": payload["total_symbols"],
         "count": payload["count"],
         "items": payload["items"],
-        "note": "Liquidation zone/value are estimated proxies based on OI, mark price, and long-short ratio.",
+        "note": "Liquidation zone/value are estimated proxies based on OI, funding, mark price, and long-short ratio.",
     }
 
 

@@ -5,15 +5,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.services.ml_predictor import MLPredictor
-
 logger = logging.getLogger(__name__)
 
 
 class AutoTrainer:
     def __init__(
         self,
-        predictor: MLPredictor,
+        predictor: Any,
         *,
         enabled: bool,
         interval_minutes: int,

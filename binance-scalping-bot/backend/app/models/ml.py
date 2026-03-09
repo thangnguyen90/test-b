@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 
 
 class TrainRequest(BaseModel):
-    limit: int = Field(default=800, ge=200, le=2000)
-    horizon: int = Field(default=4, ge=1, le=24)
+    limit: int = Field(default=900, ge=300, le=2000)
+    horizon: int = Field(default=16, ge=4, le=64)
     rr_ratio: float = Field(default=1.5, ge=1.0, le=5.0)
 
 
@@ -24,6 +24,7 @@ class TrainResponse(BaseModel):
     accuracy: float | None
     roc_auc: float | None
     trained_at: datetime | None
+    near_ema_samples: int = 0
     feedback_samples: int = 0
     side_long_samples_raw: int = 0
     side_short_samples_raw: int = 0

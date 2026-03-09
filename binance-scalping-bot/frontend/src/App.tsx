@@ -118,6 +118,7 @@ type ScanSignalItem = {
   predicted_entry_price: number
   stop_loss: number
   take_profit: number
+  tp?: number
   mark_price?: number
   can_enter?: boolean
   blocked_reason?: string
@@ -131,6 +132,7 @@ type ScanSignalsResponse = {
   scanned: number
   count: number
   signals: ScanSignalItem[]
+  funding_arb_signals?: ScanSignalItem[]
   source?: string
   timestamp?: string
 }
@@ -141,10 +143,14 @@ type PaperTrade = {
   side: 'LONG' | 'SHORT'
   btc_following?: boolean | null
   entry_type?: 'LIMIT' | 'MARKET' | string
+  can_enter?: boolean | null
+  blocked_reason?: string | null
+  entry_logic_flag?: string | null
   signal_win_probability: number
   effective_win_probability: number
   entry_price: number
   take_profit: number
+  tp?: number | null
   stop_loss: number
   liq_ema99_15m?: number | null
   liq_ema99_1h?: number | null
@@ -216,6 +222,20 @@ type VolatilityItem = {
   from_price: number
   to_price: number
   days: number
+  mark_price?: number | null
+  funding_rate?: number | null
+  funding_interval_hours?: number | null
+  next_funding_time_ms?: number | null
+  minutes_to_funding?: number | null
+  funding_cycle?: string | null
+  signal_side?: 'LONG' | 'SHORT' | null
+  signal_win_probability?: number | null
+  suggested_entry_price?: number | null
+  suggested_take_profit?: number | null
+  suggested_stop_loss?: number | null
+  entry_dist_pct?: number | null
+  entry_strategy?: string | null
+  signal_order_type?: 'LIMIT' | 'MARKET' | null
 }
 
 type LiquidationOverviewItem = {
@@ -345,10 +365,10 @@ type PaperManualCloseRequest = {
 
 const API_BASE = 'http://127.0.0.1:8000'
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
-const AUTO_LIQ_MIN_WIN = 0.7
+const AUTO_LIQ_MIN_WIN = 0.6
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
-const ENTRY_TOUCH_SLIPPAGE = 0.0015
+const ENTRY_TOUCH_SLIPPAGE = 0.0008
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
 const FALLBACK_COINS = [
@@ -893,6 +913,7 @@ function App() {
   const [highWinSignals, setHighWinSignals] = useState<ScanSignalItem[]>([])
   const [highWinLivePrices, setHighWinLivePrices] = useState<Record<string, number>>({})
   const [highWinLivePriceTime, setHighWinLivePriceTime] = useState<Record<string, string>>({})
+  const [fundingArbSignals, setFundingArbSignals] = useState<ScanSignalItem[]>([])
   const [highWinBlockedReasons, setHighWinBlockedReasons] = useState<Record<string, 'Risk' | 'API' | 'No liq zone'>>({})
   const [scannedCount, setScannedCount] = useState(0)
   const [signalsWsStatus, setSignalsWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
@@ -921,6 +942,9 @@ function App() {
   const [closeModalTrade, setCloseModalTrade] = useState<PaperTrade | null>(null)
   const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
   const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
+  const [topVolLivePrices, setTopVolLivePrices] = useState<Record<string, number>>({})
+  const [topVolLivePriceTime, setTopVolLivePriceTime] = useState<Record<string, string>>({})
+  const [topVolWsStatus, setTopVolWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [liqOverview, setLiqOverview] = useState<LiquidationOverviewItem[]>([])
   const [liqPage, setLiqPage] = useState(1)
   const [liqPageSize] = useState(30)
@@ -1093,6 +1117,14 @@ function App() {
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b))
   }, [highWinSignals])
+  const topVolWsSymbols = useMemo(() => {
+    const set = new Set<string>()
+    for (const row of topVolatility) {
+      if (!row?.symbol) continue
+      set.add(row.symbol)
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [topVolatility])
   const sortedPaperHistory = useMemo(() => {
     const rows = [...paperHistory]
     const { key, direction } = historySort
@@ -1419,6 +1451,24 @@ function App() {
     return undefined
   }
 
+  function resolveTopVolPrice(symbol: string): number | undefined {
+    if (topVolLivePrices[symbol] != null) return topVolLivePrices[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(topVolLivePrices)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
+  }
+
+  function resolveTopVolTime(symbol: string): string | undefined {
+    if (topVolLivePriceTime[symbol] != null) return topVolLivePriceTime[symbol]
+    const key = canonicalSymbol(symbol)
+    for (const [k, v] of Object.entries(topVolLivePriceTime)) {
+      if (canonicalSymbol(k) === key) return v
+    }
+    return undefined
+  }
+
   function pushTradeToast(row: PaperTrade, closeReason: 'TP' | 'SL') {
     const toastId = Date.now() + Math.floor(Math.random() * 100000)
     const toast: TradeToast = {
@@ -1544,11 +1594,12 @@ function App() {
 
   async function fetchHighWinSignals() {
     const response = await fetch(
-      `${API_BASE}/api/v1/signals/scan?min_win=0.7&max_symbols=80`,
+      `${API_BASE}/api/v1/signals/scan?min_win=${AUTO_LIQ_MIN_WIN}&max_symbols=80`,
     )
     if (!response.ok) throw new Error('Cannot scan high-win signals')
     const data = (await response.json()) as ScanSignalsResponse
     setHighWinSignals(data.signals ?? [])
+    setFundingArbSignals(data.funding_arb_signals ?? [])
     setScannedCount(data.scanned ?? 0)
   }
 
@@ -2187,6 +2238,117 @@ function App() {
   }, [highWinWsSymbols])
 
   useEffect(() => {
+    if (topVolWsSymbols.length === 0) {
+      setTopVolWsStatus('fallback')
+      setTopVolLivePrices({})
+      setTopVolLivePriceTime({})
+      return () => undefined
+    }
+
+    let socket: WebSocket | null = null
+    let reconnectTimer: number | null = null
+    let fallbackTimer: number | null = null
+    let mounted = true
+
+    const fetchBatchFallback = async () => {
+      const response = await fetch(
+        `${API_BASE}/api/v1/market/prices?symbols=${encodeURIComponent(topVolWsSymbols.join(','))}`,
+      )
+      if (!response.ok) throw new Error('Cannot fetch top-vol market prices')
+      const data = await response.json() as MarketPricesBatchResponse
+      const prices = data.prices ?? {}
+      if (!mounted) return
+      setTopVolLivePrices((prev) => ({ ...prev, ...prices }))
+      if (data.timestamps && Object.keys(data.timestamps).length > 0) {
+        setTopVolLivePriceTime((prev) => ({ ...prev, ...data.timestamps }))
+      } else if (data.timestamp) {
+        const stamp = data.timestamp
+        const updates: Record<string, string> = {}
+        for (const key of Object.keys(prices)) updates[key] = stamp
+        setTopVolLivePriceTime((prev) => ({ ...prev, ...updates }))
+      }
+    }
+
+    const stopFallback = () => {
+      if (fallbackTimer != null) {
+        window.clearInterval(fallbackTimer)
+        fallbackTimer = null
+      }
+    }
+
+    const startFallback = () => {
+      if (fallbackTimer != null) return
+      setTopVolWsStatus('fallback')
+      fallbackTimer = window.setInterval(() => {
+        fetchBatchFallback().catch(() => {
+          // Keep last prices if fallback request fails.
+        })
+      }, 2000)
+    }
+
+    const connect = () => {
+      if (!mounted) return
+      setTopVolWsStatus('connecting')
+      const wsUrl = `${WS_BASE}/ws/prices?symbols=${encodeURIComponent(topVolWsSymbols.join(','))}&interval_sec=1`
+      socket = new WebSocket(wsUrl)
+
+      socket.onopen = () => {
+        if (!mounted) return
+        setTopVolWsStatus('live')
+        stopFallback()
+      }
+
+      socket.onmessage = (event) => {
+        if (!mounted) return
+        try {
+          const payload = JSON.parse(event.data) as PriceStreamMessage
+          if (payload.type === 'prices_error') {
+            startFallback()
+            return
+          }
+          if (payload.type !== 'prices' || !payload.prices) return
+          setTopVolWsStatus('live')
+          stopFallback()
+          setTopVolLivePrices((prev) => ({ ...prev, ...payload.prices }))
+          if (payload.timestamps && Object.keys(payload.timestamps).length > 0) {
+            setTopVolLivePriceTime((prev) => ({ ...prev, ...payload.timestamps! }))
+          } else if (payload.timestamp) {
+            const stamp = payload.timestamp
+            const updates: Record<string, string> = {}
+            for (const key of Object.keys(payload.prices)) updates[key] = stamp
+            setTopVolLivePriceTime((prev) => ({ ...prev, ...updates }))
+          }
+        } catch {
+          // ignore malformed payload
+        }
+      }
+
+      socket.onerror = () => {
+        if (!mounted) return
+        startFallback()
+      }
+
+      socket.onclose = () => {
+        if (!mounted) return
+        startFallback()
+        reconnectTimer = window.setTimeout(connect, 4000)
+      }
+    }
+
+    fetchBatchFallback().catch(() => {
+      // WS may still connect and recover.
+    })
+    connect()
+
+    return () => {
+      mounted = false
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
+      stopFallback()
+      socket?.close()
+    }
+  }, [topVolWsSymbols])
+
+  useEffect(() => {
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
     let fallbackTimer: number | null = null
@@ -2420,6 +2582,9 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
+                    <th>Can Enter</th>
+                    <th>Blocked Reason</th>
+                    <th>Logic Flag</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
@@ -2457,86 +2622,96 @@ function App() {
                       ? (marginUsdt * upnlPct / 100)
                       : null
                     return (
-                    <tr key={row.id}>
-                      <td>{row.id}</td>
-                      <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
-                      <td>
-                        {typeof row.btc_following === 'boolean' ? (
-                          <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
-                            {row.btc_following ? 'YES' : 'NO'}
+                      <tr key={row.id}>
+                        <td>{row.id}</td>
+                        <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>
+                          {typeof row.btc_following === 'boolean' ? (
+                            <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
+                              {row.btc_following ? 'YES' : 'NO'}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.can_enter === 'boolean' ? (
+                            <span className={`badge ${row.can_enter ? 'success' : 'warn'}`}>
+                              {row.can_enter ? 'READY' : 'WAIT'}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>{row.blocked_reason ?? '-'}</td>
+                        <td>{row.entry_logic_flag ?? '-'}</td>
+                        <td>
+                          {typeof upnlUsdt === 'number' ? (
+                            <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${upnlUsdt >= 0 ? '+' : ''}${upnlUsdt.toFixed(4)}`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof upnlPct === 'number' ? (
+                            <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.mae_pct === 'number' ? (
+                            <span className={row.mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.mae_pct >= 0 ? '+' : ''}${row.mae_pct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.mfe_pct === 'number' ? (
+                            <span className={row.mfe_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.mfe_pct >= 0 ? '+' : ''}${row.mfe_pct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          <span className={`badge ${row.entry_type === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
+                            {row.entry_type ?? '-'}
                           </span>
-                        ) : '-'}
-                      </td>
-                      <td>
-                        {typeof upnlUsdt === 'number' ? (
-                          <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                            {`${upnlUsdt >= 0 ? '+' : ''}${upnlUsdt.toFixed(4)}`}
+                        </td>
+                        <td>
+                          <span className={`badge ${tradeModelBadge(modelSource)}`}>
+                            {modelSource}
                           </span>
-                        ) : '-'}
-                      </td>
-                      <td>
-                        {typeof upnlPct === 'number' ? (
-                          <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                            {`${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`}
+                        </td>
+                        <td>
+                          <span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>
+                            {row.side}
                           </span>
-                        ) : '-'}
-                      </td>
-                      <td>
-                        {typeof row.mae_pct === 'number' ? (
-                          <span className={row.mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                            {`${row.mae_pct >= 0 ? '+' : ''}${row.mae_pct.toFixed(2)}%`}
-                          </span>
-                        ) : '-'}
-                      </td>
-                      <td>
-                        {typeof row.mfe_pct === 'number' ? (
-                          <span className={row.mfe_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                            {`${row.mfe_pct >= 0 ? '+' : ''}${row.mfe_pct.toFixed(2)}%`}
-                          </span>
-                        ) : '-'}
-                      </td>
-                      <td>
-                        <span className={`badge ${row.entry_type === 'LIQ_EMA99' ? 'warn' : 'neutral'}`}>
-                          {row.entry_type ?? '-'}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={`badge ${tradeModelBadge(modelSource)}`}>
-                          {modelSource}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>
-                          {row.side}
-                        </span>
-                      </td>
-                      <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
-                      <td>{row.entry_price}</td>
-                      <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
-                      <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
-                      <td>{typeof row.liq_zone_price === 'number' ? row.liq_zone_price : '-'}</td>
-                      <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
-                      <td>{typeof mark === 'number' ? mark : '-'}</td>
-                      <td>{formatVnTimestamp(markTs)}</td>
-                      <td>{row.take_profit}</td>
-                      <td>{typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'}</td>
-                      <td>{row.stop_loss}</td>
-                      <td>{(row.signal_win_probability * 100).toFixed(2)}</td>
-                      <td>{(row.effective_win_probability * 100).toFixed(2)}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn-inline btn-secondary"
-                          disabled={closingTradeId === row.id}
-                          onClick={() => {
-                            requestCloseTrade(row)
-                          }}
-                        >
-                          {closingTradeId === row.id ? 'Closing...' : 'Close...'}
-                        </button>
-                      </td>
-                    </tr>
-                  )})}
+                        </td>
+                        <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
+                        <td>{row.entry_price}</td>
+                        <td>{typeof row.liq_ema99_15m === 'number' ? row.liq_ema99_15m : '-'}</td>
+                        <td>{typeof row.liq_ema99_1h === 'number' ? row.liq_ema99_1h : '-'}</td>
+                        <td>{typeof row.liq_zone_price === 'number' ? row.liq_zone_price : '-'}</td>
+                        <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
+                        <td>{typeof mark === 'number' ? mark : '-'}</td>
+                        <td>{formatVnTimestamp(markTs)}</td>
+                        <td>{row.take_profit}</td>
+                        <td>{typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'}</td>
+                        <td>{row.stop_loss}</td>
+                        <td>{(row.signal_win_probability * 100).toFixed(2)}</td>
+                        <td>{(row.effective_win_probability * 100).toFixed(2)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn-inline btn-secondary"
+                            disabled={closingTradeId === row.id}
+                            onClick={() => {
+                              requestCloseTrade(row)
+                            }}
+                          >
+                            {closingTradeId === row.id ? 'Closing...' : 'Close...'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             )}
@@ -2554,6 +2729,9 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
+                    <th>Can Enter</th>
+                    <th>Blocked Reason</th>
+                    <th>Logic Flag</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
@@ -2593,6 +2771,15 @@ function App() {
                             </span>
                           ) : '-'}
                         </td>
+                        <td>
+                          {typeof row.can_enter === 'boolean' ? (
+                            <span className={`badge ${row.can_enter ? 'success' : 'warn'}`}>
+                              {row.can_enter ? 'READY' : 'WAIT'}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>{row.blocked_reason ?? '-'}</td>
+                        <td>{row.entry_logic_flag ?? '-'}</td>
                         <td>
                           {typeof row.pnl === 'number' ? (
                             <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -2941,7 +3128,89 @@ function App() {
 
       <section className="card">
         <header className="card-header">
-          <h2>High Win Signals (&gt; 70%)</h2>
+          <h2>Funding Arbitrage Signals</h2>
+          <div className="scan-actions">
+            <span className="badge neutral">Signals: {fundingArbSignals.length}</span>
+          </div>
+        </header>
+        <div className="content table-wrap">
+          {fundingArbSignals.length === 0 ? (
+            <p>No active funding arbitrage signals.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Source</th>
+                  <th>Funding Rate</th>
+                  <th>Min To Funding</th>
+                  <th>Mark Price</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fundingArbSignals.map((item) => {
+                  const fundingRate = (item as any).funding_rate ?? 0
+                  const minToFunding = (item as any).minutes_to_funding ?? 0
+                  const markPrice = (item as any).mark_price ?? item.mark_price
+
+                  return (
+                    <tr key={`funding-${item.symbol}-${item.side}`}>
+                      <td>{renderSymbolJump(item.symbol, markPrice)}</td>
+                      <td>
+                        <span className={item.side === 'LONG' ? 'pill-long' : 'pill-short'}>
+                          {item.side}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="badge neutral">{item.signal_source ?? 'FUNDING_ARB_AUTO'}</span>
+                      </td>
+                      <td>
+                        <span className={fundingRate > 0 ? 'pnl-pos' : 'pnl-neg'}>
+                          {(fundingRate * 100).toFixed(4)}%
+                        </span>
+                      </td>
+                      <td>{minToFunding.toFixed(2)}m</td>
+                      <td>{typeof markPrice === 'number' ? markPrice.toFixed(4) : '-'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-inline"
+                          disabled={openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`) || isOpeningMarketOrder}
+                          onClick={() => {
+                            if (!markPrice) return
+                            const tpDist = markPrice * ((Math.abs(fundingRate) * 0.5) + 0.004)
+                            const tp = item.side === 'LONG' ? markPrice + tpDist : markPrice - tpDist
+                            const sl = item.side === 'LONG' ? markPrice * 0.99 : markPrice * 1.01
+
+                            openPaperMarketOrder({
+                              symbol: item.symbol,
+                              side: item.side,
+                              signal_win_probability: item.win_probability ?? 0.8,
+                              entry_price: markPrice,
+                              take_profit: tp,
+                              stop_loss: sl,
+                            }).catch((err) => {
+                              setError(err instanceof Error ? err.message : 'Unknown error')
+                            })
+                          }}
+                        >
+                          {openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`) ? 'Open' : 'Market Open'}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>High Win Signals (&gt; {Math.round(AUTO_LIQ_MIN_WIN * 100)}%)</h2>
           <div className="scan-actions">
             <span className="badge neutral">Scanned: {scannedCount}</span>
             <span className={`badge ${signalsWsStatus === 'live' ? 'success' : signalsWsStatus === 'connecting' ? 'warn' : 'neutral'}`}>
@@ -2951,7 +3220,7 @@ function App() {
         </header>
         <div className="content table-wrap">
           {sortedHighWinSignals.length === 0 ? (
-            <p>No coin currently above 70% win probability.</p>
+            <p>No coin currently above {Math.round(AUTO_LIQ_MIN_WIN * 100)}% win probability.</p>
           ) : (
             <table>
               <thead>
@@ -2985,119 +3254,120 @@ function App() {
                   const blockedReason = backendBlockedReason || getHighWinBlockedReason(item)
                   const btcFollow = typeof item.btc_following === 'boolean' ? item.btc_following : null
                   return (
-                  <tr key={`${item.symbol}-${item.side}`}>
-                    <td>
-                      {renderSymbolJump(item.symbol, item.predicted_entry_price)}
-                    </td>
-                    <td>{item.side}</td>
-                    <td>
-                      <span className="badge neutral">{formatSignalSource(item.signal_source)}</span>
-                    </td>
-                    <td>{(item.win_probability * 100).toFixed(2)}</td>
-                    <td>
-                      <span className="pnl-neg">
-                        {(calcSignalMarginRatioPct(
-                          paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE,
-                          paperStats?.maint_margin_rate ?? DEFAULT_MAINT_MARGIN_RATE,
-                        ) ?? 0).toFixed(2)}%
-                      </span>
-                    </td>
-                    <td>{item.predicted_entry_price}</td>
-                    <td title={markTs ? `WS: ${formatVnTimestamp(markTs)}` : 'No WS timestamp'}>
-                      {typeof mark === 'number' ? mark : '-'}
-                    </td>
-                    <td>
-                      <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
-                        {canEnter ? 'READY' : 'WAIT'}
-                      </span>
-                    </td>
-                    <td>{blockedReason}</td>
-                    <td>
-                      {btcFollow == null ? '-' : (
-                        <span className={`badge ${btcFollow ? 'success' : 'neutral'}`}>
-                          {btcFollow ? 'YES' : 'NO'}
+                    <tr key={`${item.symbol}-${item.side}`}>
+                      <td>
+                        {renderSymbolJump(item.symbol, item.predicted_entry_price)}
+                      </td>
+                      <td>{item.side}</td>
+                      <td>
+                        <span className="badge neutral">{formatSignalSource(item.signal_source)}</span>
+                      </td>
+                      <td>{(item.win_probability * 100).toFixed(2)}</td>
+                      <td>
+                        <span className="pnl-neg">
+                          {(calcSignalMarginRatioPct(
+                            paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE,
+                            paperStats?.maint_margin_rate ?? DEFAULT_MAINT_MARGIN_RATE,
+                          ) ?? 0).toFixed(2)}%
                         </span>
-                      )}
-                    </td>
-                    <td>{item.take_profit}</td>
-                    <td>
-                      {(() => {
-                        const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
-                        const tpPct = calcTargetPnlPct(item.side, item.predicted_entry_price, item.take_profit, lev)
-                        return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
-                      })()}
-                    </td>
-                    <td>{item.stop_loss}</td>
-                    <td>{typeof item.liq_zone_price === 'number' ? item.liq_zone_price : '-'}</td>
-                    <td>{formatCompactMoney(item.liq_zone_value)}</td>
-                    <td>
-                      <div className="inline-actions">
-                        <button
-                          type="button"
-                          className="btn-inline"
-                          disabled={
-                            isOpeningMarketOrder
-                            || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
-                          }
-                          onClick={() => {
-                            const key = highWinSignalKey(item.symbol, item.side)
-                            openPaperMarketOrder({
-                              symbol: item.symbol,
-                              side: item.side,
-                              signal_win_probability: item.win_probability,
-                              entry_price: item.predicted_entry_price,
-                              take_profit: item.take_profit,
-                              stop_loss: item.stop_loss,
-                            }).then(() => {
-                              setHighWinBlockedReasons((prev) => {
-                                if (!(key in prev)) return prev
-                                const next = { ...prev }
-                                delete next[key]
-                                return next
-                              })
-                            }).catch((err) => {
-                              const message = err instanceof Error ? err.message : 'Unknown error'
-                              setHighWinBlockedReasons((prev) => ({
-                                ...prev,
-                                [key]: classifyBlockedReasonFromError(message),
-                              }))
-                              setError(err instanceof Error ? err.message : 'Unknown error')
-                            })
-                          }}
-                        >
-                          {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-inline btn-secondary"
-                          disabled={
-                            isLoadingOrder
-                            || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
-                            || !(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)
-                          }
-                          onClick={() => {
-                            const key = highWinSignalKey(item.symbol, item.side)
-                            if (!(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)) {
-                              setHighWinBlockedReasons((prev) => ({ ...prev, [key]: 'No liq zone' }))
-                              setError(`No liq zone for ${item.symbol}`)
-                              return
+                      </td>
+                      <td>{item.predicted_entry_price}</td>
+                      <td title={markTs ? `WS: ${formatVnTimestamp(markTs)}` : 'No WS timestamp'}>
+                        {typeof mark === 'number' ? mark : '-'}
+                      </td>
+                      <td>
+                        <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
+                          {canEnter ? 'READY' : 'WAIT'}
+                        </span>
+                      </td>
+                      <td>{blockedReason}</td>
+                      <td>
+                        {btcFollow == null ? '-' : (
+                          <span className={`badge ${btcFollow ? 'success' : 'neutral'}`}>
+                            {btcFollow ? 'YES' : 'NO'}
+                          </span>
+                        )}
+                      </td>
+                      <td>{item.take_profit}</td>
+                      <td>
+                        {(() => {
+                          const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
+                          const tpPct = calcTargetPnlPct(item.side, item.predicted_entry_price, item.take_profit, lev)
+                          return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
+                        })()}
+                      </td>
+                      <td>{item.stop_loss}</td>
+                      <td>{typeof item.liq_zone_price === 'number' ? item.liq_zone_price : '-'}</td>
+                      <td>{formatCompactMoney(item.liq_zone_value)}</td>
+                      <td>
+                        <div className="inline-actions">
+                          <button
+                            type="button"
+                            className="btn-inline"
+                            disabled={
+                              isOpeningMarketOrder
+                              || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
                             }
-                            createPendingFromHighWin(item, true).catch((err) => {
-                              const message = err instanceof Error ? err.message : 'Unknown error'
-                              setHighWinBlockedReasons((prev) => ({
-                                ...prev,
-                                [key]: classifyBlockedReasonFromError(message),
-                              }))
-                              setError(message)
-                            })
-                          }}
-                        >
-                          {isLoadingOrder ? 'Placing...' : 'Limit @Liq'}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )})}
+                            onClick={() => {
+                              const key = highWinSignalKey(item.symbol, item.side)
+                              openPaperMarketOrder({
+                                symbol: item.symbol,
+                                side: item.side,
+                                signal_win_probability: item.win_probability,
+                                entry_price: item.predicted_entry_price,
+                                take_profit: item.take_profit,
+                                stop_loss: item.stop_loss,
+                              }).then(() => {
+                                setHighWinBlockedReasons((prev) => {
+                                  if (!(key in prev)) return prev
+                                  const next = { ...prev }
+                                  delete next[key]
+                                  return next
+                                })
+                              }).catch((err) => {
+                                const message = err instanceof Error ? err.message : 'Unknown error'
+                                setHighWinBlockedReasons((prev) => ({
+                                  ...prev,
+                                  [key]: classifyBlockedReasonFromError(message),
+                                }))
+                                setError(err instanceof Error ? err.message : 'Unknown error')
+                              })
+                            }}
+                          >
+                            {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-inline btn-secondary"
+                            disabled={
+                              isLoadingOrder
+                              || openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
+                              || !(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)
+                            }
+                            onClick={() => {
+                              const key = highWinSignalKey(item.symbol, item.side)
+                              if (!(typeof item.liq_zone_price === 'number' && item.liq_zone_price > 0)) {
+                                setHighWinBlockedReasons((prev) => ({ ...prev, [key]: 'No liq zone' }))
+                                setError(`No liq zone for ${item.symbol}`)
+                                return
+                              }
+                              createPendingFromHighWin(item, true).catch((err) => {
+                                const message = err instanceof Error ? err.message : 'Unknown error'
+                                setHighWinBlockedReasons((prev) => ({
+                                  ...prev,
+                                  [key]: classifyBlockedReasonFromError(message),
+                                }))
+                                setError(message)
+                              })
+                            }}
+                          >
+                            {isLoadingOrder ? 'Placing...' : 'Limit @Liq'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           )}
@@ -3107,17 +3377,22 @@ function App() {
       <section className="card">
         <header className="card-header">
           <h2>Top Volatility Coins</h2>
-          <div className="tab-row">
-            {[1, 3, 5, 7].map((d) => (
-              <button
-                key={d}
-                type="button"
-                className={`tab-btn ${volDays === d ? 'tab-btn-active' : ''}`}
-                onClick={() => setVolDays(d as 1 | 3 | 5 | 7)}
-              >
-                {d}D
-              </button>
-            ))}
+          <div className="scan-actions">
+            <span className={`badge ${topVolWsStatus === 'live' ? 'success' : topVolWsStatus === 'connecting' ? 'warn' : 'neutral'}`}>
+              {topVolWsStatus === 'live' ? 'WS Live' : topVolWsStatus === 'connecting' ? 'WS Connecting' : 'REST Fallback'}
+            </span>
+            <div className="tab-row">
+              {[1, 3, 5, 7].map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  className={`tab-btn ${volDays === d ? 'tab-btn-active' : ''}`}
+                  onClick={() => setVolDays(d as 1 | 3 | 5 | 7)}
+                >
+                  {d}D
+                </button>
+              ))}
+            </div>
           </div>
         </header>
         <div className="content table-wrap">
@@ -3130,6 +3405,15 @@ function App() {
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('symbol')}>Symbol</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('move_pct')}>Move%</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('abs_move_pct')}>Abs Move%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('funding_rate')}>Funding</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('funding_interval_hours')}>Funding TF</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('minutes_to_funding')}>To Funding</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('signal_side')}>Side</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('signal_win_probability')}>Win%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('suggested_entry_price')}>Entry</button></th>
+                  <th>Mark (WS)</th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('entry_dist_pct')}>Entry Dist%</button></th>
+                  <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('entry_strategy')}>Setup</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('from_price')}>From</button></th>
                   <th><button type="button" className="th-sort-btn" onClick={() => toggleVolSort('to_price')}>To</button></th>
                 </tr>
@@ -3137,9 +3421,47 @@ function App() {
               <tbody>
                 {sortedVolatility.map((row) => (
                   <tr key={`${row.symbol}-${row.days}`}>
-                    <td>{renderSymbolJump(row.symbol, row.to_price)}</td>
+                    <td>{renderSymbolJump(row.symbol, row.suggested_entry_price ?? row.to_price)}</td>
                     <td>{row.move_pct.toFixed(2)}</td>
                     <td>{row.abs_move_pct.toFixed(2)}</td>
+                    <td>{typeof row.funding_rate === 'number' ? `${(row.funding_rate * 100).toFixed(4)}%` : '-'}</td>
+                    <td>
+                      {typeof row.funding_interval_hours === 'number'
+                        ? `${row.funding_interval_hours.toFixed(row.funding_interval_hours >= 10 ? 0 : 1)}h`
+                        : '-'}
+                    </td>
+                    <td>
+                      {typeof row.minutes_to_funding === 'number'
+                        ? `${Math.max(0, row.minutes_to_funding).toFixed(0)}m`
+                        : '-'}
+                    </td>
+                    <td>
+                      {row.signal_side ? (
+                        <span className={`badge ${row.signal_side === 'LONG' ? 'success' : 'warn'}`}>
+                          {row.signal_side}
+                        </span>
+                      ) : '-'}
+                    </td>
+                    <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
+                    <td>{typeof row.suggested_entry_price === 'number' ? row.suggested_entry_price : '-'}</td>
+                    <td title={(() => {
+                      const ts = resolveTopVolTime(row.symbol)
+                      return ts ? `WS: ${formatVnTimestamp(ts)}` : 'No WS timestamp'
+                    })()}>
+                      {(() => {
+                        const wsPrice = resolveTopVolPrice(row.symbol)
+                        const mark = typeof wsPrice === 'number' ? wsPrice : row.mark_price
+                        return typeof mark === 'number' ? mark : '-'
+                      })()}
+                    </td>
+                    <td>{typeof row.entry_dist_pct === 'number' ? `${row.entry_dist_pct.toFixed(2)}%` : '-'}</td>
+                    <td>
+                      {row.entry_strategy ? (
+                        <span className="badge neutral">
+                          {row.funding_cycle ? `${row.entry_strategy}/${row.funding_cycle}` : row.entry_strategy}
+                        </span>
+                      ) : '-'}
+                    </td>
                     <td>{row.from_price}</td>
                     <td>{row.to_price}</td>
                   </tr>
@@ -3268,52 +3590,53 @@ function App() {
                   const mlSide = row.signal_side ?? null
                   const rowSide = mlSide ?? trend
                   return (
-                  <tr key={row.symbol} className={rowSide === 'LONG' ? 'row-long' : 'row-short'}>
-                    <td>{renderSymbolJump(row.symbol, row.mark_price)}</td>
-                    <td>{row.mark_price.toFixed(row.mark_price >= 100 ? 2 : 6)}</td>
-                    <td>{row.est_liq_zone_price.toFixed(row.est_liq_zone_price >= 100 ? 2 : 6)}</td>
-                    <td>{Math.round(row.est_liq_zone_value).toLocaleString()}</td>
-                    <td>{row.long_short_ratio.toFixed(3)}</td>
-                    <td>{(row.funding_rate * 100).toFixed(4)}%</td>
-                    <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
-                    <td>
-                      <span className="badge neutral">{formatSignalSource(row.signal_source)}</span>
-                    </td>
-                    <td>
-                      {mlSide ? (
-                        <span className={mlSide === 'LONG' ? 'pill-long' : 'pill-short'}>{mlSide}</span>
-                      ) : '-'}
-                    </td>
-                    <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
-                    <td>{typeof row.signal_entry_price === 'number' ? row.signal_entry_price.toFixed(row.signal_entry_price >= 100 ? 2 : 6) : '-'}</td>
-                    <td>{typeof row.signal_take_profit === 'number' ? row.signal_take_profit.toFixed(row.signal_take_profit >= 100 ? 2 : 6) : '-'}</td>
-                    <td>
-                      {(() => {
-                        const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
-                        if (typeof row.signal_side !== 'string' || typeof row.signal_entry_price !== 'number' || typeof row.signal_take_profit !== 'number') return '-'
-                        const tpPct = calcTargetPnlPct(row.signal_side, row.signal_entry_price, row.signal_take_profit, lev)
-                        return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
-                      })()}
-                    </td>
-                    <td>{typeof row.signal_stop_loss === 'number' ? row.signal_stop_loss.toFixed(row.signal_stop_loss >= 100 ? 2 : 6) : '-'}</td>
-                    <td>{row.signal_order_type ?? '-'}</td>
-                    <td><span className={trend === 'LONG' ? 'pill-long' : 'pill-short'}>{trend}</span></td>
-                    <td>
-                      <button
-                        type="button"
-                        className="btn-inline"
-                        disabled={isOpeningMarketOrder || !canOpenFromLiq(row)}
-                        onClick={() => {
-                          openFromLiqRow(row).catch((err) => {
-                            setError(err instanceof Error ? err.message : 'Unknown error')
-                          })
-                        }}
-                      >
-                        {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
-                      </button>
-                    </td>
-                  </tr>
-                )})}
+                    <tr key={row.symbol} className={rowSide === 'LONG' ? 'row-long' : 'row-short'}>
+                      <td>{renderSymbolJump(row.symbol, row.mark_price)}</td>
+                      <td>{row.mark_price.toFixed(row.mark_price >= 100 ? 2 : 6)}</td>
+                      <td>{row.est_liq_zone_price.toFixed(row.est_liq_zone_price >= 100 ? 2 : 6)}</td>
+                      <td>{Math.round(row.est_liq_zone_value).toLocaleString()}</td>
+                      <td>{row.long_short_ratio.toFixed(3)}</td>
+                      <td>{(row.funding_rate * 100).toFixed(4)}%</td>
+                      <td>{Math.round(row.open_interest_notional).toLocaleString()}</td>
+                      <td>
+                        <span className="badge neutral">{formatSignalSource(row.signal_source)}</span>
+                      </td>
+                      <td>
+                        {mlSide ? (
+                          <span className={mlSide === 'LONG' ? 'pill-long' : 'pill-short'}>{mlSide}</span>
+                        ) : '-'}
+                      </td>
+                      <td>{typeof row.signal_win_probability === 'number' ? `${(row.signal_win_probability * 100).toFixed(2)}%` : '-'}</td>
+                      <td>{typeof row.signal_entry_price === 'number' ? row.signal_entry_price.toFixed(row.signal_entry_price >= 100 ? 2 : 6) : '-'}</td>
+                      <td>{typeof row.signal_take_profit === 'number' ? row.signal_take_profit.toFixed(row.signal_take_profit >= 100 ? 2 : 6) : '-'}</td>
+                      <td>
+                        {(() => {
+                          const lev = paperStats?.leverage ?? SIGNAL_RISK_LEVERAGE
+                          if (typeof row.signal_side !== 'string' || typeof row.signal_entry_price !== 'number' || typeof row.signal_take_profit !== 'number') return '-'
+                          const tpPct = calcTargetPnlPct(row.signal_side, row.signal_entry_price, row.signal_take_profit, lev)
+                          return typeof tpPct === 'number' ? `${tpPct.toFixed(2)}%` : '-'
+                        })()}
+                      </td>
+                      <td>{typeof row.signal_stop_loss === 'number' ? row.signal_stop_loss.toFixed(row.signal_stop_loss >= 100 ? 2 : 6) : '-'}</td>
+                      <td>{row.signal_order_type ?? '-'}</td>
+                      <td><span className={trend === 'LONG' ? 'pill-long' : 'pill-short'}>{trend}</span></td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-inline"
+                          disabled={isOpeningMarketOrder || !canOpenFromLiq(row)}
+                          onClick={() => {
+                            openFromLiqRow(row).catch((err) => {
+                              setError(err instanceof Error ? err.message : 'Unknown error')
+                            })
+                          }}
+                        >
+                          {isOpeningMarketOrder ? 'Opening...' : 'Market Open'}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           )}

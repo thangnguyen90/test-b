@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import re
 from typing import Any
 
 import pymysql
 
 
 _VN_TZ = timezone(timedelta(hours=7))
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _now_vn() -> datetime:
@@ -16,13 +18,45 @@ def _now_vn() -> datetime:
 
 
 class MySQLTradeRepository:
-    def __init__(self, host: str, port: int, user: str, password: str, database: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        database: str,
+        paper_trades_table: str = "paper_trades_liq",
+        ml_feedback_table: str = "ml_feedback_liq",
+    ) -> None:
         self.host = host
         self.port = port
         self.user = user
         self.password = password
         self.database = database
+        self.paper_trades_table = self._normalize_table_name(paper_trades_table, fallback="paper_trades_liq")
+        self.ml_feedback_table = self._normalize_table_name(ml_feedback_table, fallback="ml_feedback_liq")
         self._init_schema()
+
+    @staticmethod
+    def _normalize_table_name(name: str, fallback: str) -> str:
+        text = str(name or "").strip()
+        if not text:
+            text = fallback
+        if not _TABLE_NAME_RE.fullmatch(text):
+            raise ValueError(f"Invalid SQL table name: {text}")
+        return text
+
+    def _rewrite_query_tables(self, query: str) -> str:
+        sql = str(query)
+        sql = re.sub(r"\bpaper_trades\b", self.paper_trades_table, sql)
+        sql = re.sub(r"\bml_feedback\b", self.ml_feedback_table, sql)
+        return sql
+
+    def _execute(self, cur: pymysql.cursors.DictCursor, query: str, params: Any | None = None) -> Any:
+        sql = self._rewrite_query_tables(query)
+        if params is None:
+            return cur.execute(sql)
+        return cur.execute(sql, params)
 
     def _conn(self) -> pymysql.connections.Connection:
         return pymysql.connect(
@@ -39,7 +73,7 @@ class MySQLTradeRepository:
     def _init_schema(self) -> None:
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     CREATE TABLE IF NOT EXISTS paper_trades (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -47,6 +81,9 @@ class MySQLTradeRepository:
                         side VARCHAR(10) NOT NULL,
                         btc_following TINYINT NULL,
                         entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT',
+                        can_enter TINYINT NULL,
+                        blocked_reason VARCHAR(128) NULL,
+                        entry_logic_flag VARCHAR(48) NULL,
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
                         entry_price DOUBLE NOT NULL,
@@ -77,7 +114,7 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -87,8 +124,8 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute("ALTER TABLE paper_trades ADD COLUMN btc_following TINYINT NULL AFTER side")
-                cur.execute(
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN btc_following TINYINT NULL AFTER side")
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -98,8 +135,8 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute("ALTER TABLE paper_trades ADD COLUMN margin_usdt DOUBLE NULL AFTER quantity")
-                cur.execute(
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN margin_usdt DOUBLE NULL AFTER quantity")
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -109,8 +146,8 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute("ALTER TABLE paper_trades ADD COLUMN close_reason VARCHAR(32) NULL AFTER close_price")
-                cur.execute(
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN close_reason VARCHAR(32) NULL AFTER close_price")
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -120,10 +157,43 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT' AFTER side"
                     )
-                cur.execute(
+                self._execute(cur, 
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='can_enter'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN can_enter TINYINT NULL AFTER entry_type")
+                self._execute(cur, 
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='blocked_reason'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN blocked_reason VARCHAR(128) NULL AFTER can_enter")
+                self._execute(cur, 
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='entry_logic_flag'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    self._execute(cur, "ALTER TABLE paper_trades ADD COLUMN entry_logic_flag VARCHAR(48) NULL AFTER blocked_reason")
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -133,10 +203,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN mae_pct DOUBLE NULL AFTER close_reason"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -146,10 +216,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -159,10 +229,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN liq_ema99_15m DOUBLE NULL AFTER stop_loss"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -172,10 +242,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN liq_ema99_1h DOUBLE NULL AFTER liq_ema99_15m"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -185,10 +255,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN liq_zone_price DOUBLE NULL AFTER liq_ema99_1h"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -198,10 +268,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN liq_zone_score DOUBLE NULL AFTER liq_zone_price"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -211,10 +281,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN feature_snapshot_json LONGTEXT NULL AFTER mfe_pct"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -224,16 +294,17 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE paper_trades ADD COLUMN feature_captured_at DATETIME(6) NULL AFTER feature_snapshot_json"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     CREATE TABLE IF NOT EXISTS ml_feedback (
                         id BIGINT PRIMARY KEY AUTO_INCREMENT,
                         paper_trade_id BIGINT NOT NULL,
                         symbol VARCHAR(64) NOT NULL,
                         side VARCHAR(10) NOT NULL,
+                        entry_logic_flag VARCHAR(48) NULL,
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
                         mae_pct DOUBLE NULL,
@@ -249,7 +320,18 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
-                cur.execute(
+                self._execute(cur, 
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='ml_feedback' AND COLUMN_NAME='entry_logic_flag'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    self._execute(cur, "ALTER TABLE ml_feedback ADD COLUMN entry_logic_flag VARCHAR(48) NULL AFTER side")
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -259,10 +341,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE ml_feedback ADD COLUMN mae_pct DOUBLE NULL AFTER effective_win_probability"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -272,10 +354,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE ml_feedback ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -285,10 +367,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE ml_feedback ADD COLUMN feature_snapshot_json LONGTEXT NULL AFTER mfe_pct"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -298,10 +380,10 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE ml_feedback ADD COLUMN feature_captured_at DATETIME(6) NULL AFTER feature_snapshot_json"
                     )
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
@@ -311,7 +393,7 @@ class MySQLTradeRepository:
                 )
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
-                    cur.execute(
+                    self._execute(cur, 
                         "ALTER TABLE ml_feedback ADD COLUMN pnl_pct DOUBLE NULL AFTER pnl"
                     )
 
@@ -332,21 +414,24 @@ class MySQLTradeRepository:
             feature_captured_at = now
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     INSERT INTO paper_trades (
-                        symbol, side, btc_following, entry_type, signal_win_probability, effective_win_probability,
+                        symbol, side, btc_following, entry_type, can_enter, blocked_reason, entry_logic_flag, signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
                         quantity, margin_usdt, leverage, mae_pct, mfe_pct,
                         feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
                         payload["side"],
                         payload.get("btc_following"),
                         payload.get("entry_type", "LIMIT"),
+                        payload.get("can_enter"),
+                        payload.get("blocked_reason"),
+                        payload.get("entry_logic_flag"),
                         payload["signal_win_probability"],
                         payload["effective_win_probability"],
                         payload["entry_price"],
@@ -374,7 +459,7 @@ class MySQLTradeRepository:
         with self._conn() as conn:
             with conn.cursor() as cur:
                 if entry_type:
-                    cur.execute(
+                    self._execute(cur, 
                         """
                         SELECT id
                         FROM paper_trades
@@ -384,7 +469,7 @@ class MySQLTradeRepository:
                         (symbol, side, entry_type),
                     )
                 else:
-                    cur.execute(
+                    self._execute(cur, 
                         "SELECT id FROM paper_trades WHERE symbol=%s AND side=%s AND status='OPEN' LIMIT 1",
                         (symbol, side),
                     )
@@ -394,10 +479,38 @@ class MySQLTradeRepository:
     def list_open_trades(self) -> list[dict[str, Any]]:
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     "SELECT * FROM paper_trades WHERE status='OPEN' ORDER BY opened_at DESC"
                 )
                 return list(cur.fetchall())
+
+    def has_recent_trade(self, symbol: str, side: str, entry_type: str | None = None, minutes: int = 30) -> bool:
+        now = _now_vn()
+        cutoff = now - timedelta(minutes=minutes)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if entry_type:
+                    self._execute(cur, 
+                        """
+                        SELECT id FROM paper_trades 
+                        WHERE symbol=%s AND side=%s AND entry_type=%s 
+                        AND (opened_at >= %s OR closed_at >= %s)
+                        LIMIT 1
+                        """,
+                        (symbol, side, entry_type, cutoff, cutoff),
+                    )
+                else:
+                    self._execute(cur, 
+                        """
+                        SELECT id FROM paper_trades 
+                        WHERE symbol=%s AND side=%s 
+                        AND (opened_at >= %s OR closed_at >= %s)
+                        LIMIT 1
+                        """,
+                        (symbol, side, cutoff, cutoff),
+                    )
+                row = cur.fetchone()
+                return row is not None
 
     def close_trade(
         self,
@@ -410,7 +523,7 @@ class MySQLTradeRepository:
         now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     UPDATE paper_trades
                     SET status='CLOSED', closed_at=%s, close_price=%s, close_reason=%s, pnl=%s, result=%s, updated_at=%s
@@ -418,7 +531,7 @@ class MySQLTradeRepository:
                     """,
                     (now, close_price, close_reason, pnl, result, now, trade_id),
                 )
-                cur.execute(
+                self._execute(cur, 
                     "SELECT * FROM paper_trades WHERE id=%s LIMIT 1",
                     (trade_id,),
                 )
@@ -439,19 +552,20 @@ class MySQLTradeRepository:
                         except Exception:
                             margin_base = 0.0
                     pnl_pct = (pnl_value / margin_base) * 100.0 if margin_base > 0 else None
-                    cur.execute(
+                    self._execute(cur, 
                         """
                         INSERT INTO ml_feedback (
-                            paper_trade_id, symbol, side, signal_win_probability,
+                            paper_trade_id, symbol, side, entry_logic_flag, signal_win_probability,
                             effective_win_probability, mae_pct, mfe_pct,
                             feature_snapshot_json, feature_captured_at,
                             result, pnl, pnl_pct, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             row["id"],
                             row["symbol"],
                             row["side"],
+                            row.get("entry_logic_flag"),
                             row["signal_win_probability"],
                             row["effective_win_probability"],
                             row.get("mae_pct"),
@@ -469,7 +583,7 @@ class MySQLTradeRepository:
         now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     UPDATE paper_trades
                     SET
@@ -485,7 +599,7 @@ class MySQLTradeRepository:
         now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     UPDATE paper_trades
                     SET take_profit=%s, updated_at=%s
@@ -498,7 +612,7 @@ class MySQLTradeRepository:
         now = _now_vn()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     UPDATE paper_trades
                     SET stop_loss=%s, updated_at=%s
@@ -511,7 +625,7 @@ class MySQLTradeRepository:
         safe_limit = max(1, min(limit, 2000))
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     f"SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT {safe_limit}"
                 )
                 return list(cur.fetchall())
@@ -519,7 +633,7 @@ class MySQLTradeRepository:
     def stats(self) -> dict[str, Any]:
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT
                         COUNT(*) AS total_trades,
@@ -671,7 +785,7 @@ class MySQLTradeRepository:
         safe_lookback = max(20, min(lookback, 2000))
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     f"""
                     SELECT result
                     FROM ml_feedback f
@@ -692,11 +806,12 @@ class MySQLTradeRepository:
         safe_limit = max(10, min(limit, 5000))
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     f"""
                     SELECT
                         f.symbol,
                         f.side,
+                        f.entry_logic_flag,
                         f.result,
                         p.close_reason,
                         f.mae_pct,
@@ -720,7 +835,7 @@ class MySQLTradeRepository:
         from_dt = now - timedelta(days=safe_days - 1)
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
+                self._execute(cur, 
                     """
                     SELECT
                         DATE(closed_at) AS trade_date,

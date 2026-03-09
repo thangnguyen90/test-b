@@ -11,6 +11,7 @@ from typing import Any
 from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
 from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+from app.services.analytics_service import AnalyticsService
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
@@ -28,7 +29,7 @@ class PaperTradingEngine:
     def __init__(
         self,
         repo: MySQLTradeRepository,
-        predictor: MLPredictor,
+        predictor: Any,
         predictor_test: MLPredictor | None = None,
         liquid_predictor: LiquidationMLPredictor | None = None,
         price_stream: Any | None = None,
@@ -45,14 +46,24 @@ class PaperTradingEngine:
         major_dynamic_candle_lookback: int = 24,
         major_symbol_leverage: int = 10,
         major_symbol_max_risk_pct: float = 20.0,
+        dynamic_major_leverage_cap: int = 5,
+        dynamic_major_min_turnover_usdt: float = 5_000_000.0,
         poll_interval_sec: float = 6.0,
         stream_max_stale_sec: float = 5.0,
+        entry_touch_buffer_pct: float = 0.0008,
         min_sl_pct: float = 0.004,
         min_sl_loss_pct: float = 5.0,
         sl_extra_buffer_pct: float = 0.0,
         sl_atr_multiplier: float = 0.0,
         sl_atr_timeframe: str = "5m",
         sl_atr_limit: int = 120,
+        small_cap_oi_hard_floor: float = 8_000_000.0,
+        small_cap_oi_soft_floor: float = 25_000_000.0,
+        low_oi_entry_extra_pct: float = 0.01,
+        small_cap_max_leverage: int = 3,
+        max_abs_funding_rate: float = 0.0012,
+        min_long_short_ratio: float = 0.65,
+        max_long_short_ratio: float = 1.85,
         min_rr: float = 1.5,
         maint_margin_rate: float = 0.02,
         max_risk_pct: float = 12.0,
@@ -101,6 +112,7 @@ class PaperTradingEngine:
         self.liquid_predictor = liquid_predictor
         self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
+        self.analytics_service: AnalyticsService | None = None
         self.min_win_probability = min_win_probability
         self.quantity = quantity
         self.order_usdt = max(0.0, order_usdt)
@@ -113,6 +125,8 @@ class PaperTradingEngine:
         self.major_dynamic_candle_lookback = max(12, min(120, int(major_dynamic_candle_lookback)))
         self.major_symbol_leverage = max(1, int(major_symbol_leverage))
         self.major_symbol_max_risk_pct = max(0.0, float(major_symbol_max_risk_pct))
+        self.dynamic_major_leverage_cap = max(1, int(dynamic_major_leverage_cap))
+        self.dynamic_major_min_turnover_usdt = max(0.0, float(dynamic_major_min_turnover_usdt))
         self.major_symbols_static = {
             self._normalize_symbol_key(symbol)
             for symbol in (major_symbols or [])
@@ -122,12 +136,20 @@ class PaperTradingEngine:
         self._major_symbols_runtime_updated_ts: float = 0.0
         self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
+        self.entry_touch_buffer_pct = max(0.0002, min(0.0020, float(entry_touch_buffer_pct)))
         self.min_sl_pct = min_sl_pct
         self.min_sl_loss_pct = max(0.0, min_sl_loss_pct)
         self.sl_extra_buffer_pct = max(0.0, sl_extra_buffer_pct)
         self.sl_atr_multiplier = max(0.0, sl_atr_multiplier)
         self.sl_atr_timeframe = sl_atr_timeframe or "5m"
         self.sl_atr_limit = max(30, min(500, int(sl_atr_limit)))
+        self.small_cap_oi_hard_floor = max(0.0, float(small_cap_oi_hard_floor))
+        self.small_cap_oi_soft_floor = max(self.small_cap_oi_hard_floor, float(small_cap_oi_soft_floor))
+        self.low_oi_entry_extra_pct = max(0.0, min(0.05, float(low_oi_entry_extra_pct)))
+        self.small_cap_max_leverage = max(1, int(small_cap_max_leverage))
+        self.max_abs_funding_rate = max(0.0, float(max_abs_funding_rate))
+        self.min_long_short_ratio = max(0.01, float(min_long_short_ratio))
+        self.max_long_short_ratio = max(self.min_long_short_ratio, float(max_long_short_ratio))
         self.min_rr = min_rr
         self.maint_margin_rate = max(0.0, maint_margin_rate)
         self.max_risk_pct = max(0.0, max_risk_pct)
@@ -141,7 +163,7 @@ class PaperTradingEngine:
         self.liquid_min_win_probability = max(0.0, liquid_min_win_probability)
         self.liquid_top_vol_days = max(1, min(7, int(liquid_top_vol_days)))
         self.liquid_max_symbols = max(5, min(80, int(liquid_max_symbols)))
-        self.liquid_entry_tolerance_pct = max(0.0008, float(liquid_entry_tolerance_pct))
+        self.liquid_entry_tolerance_pct = max(0.0006, min(0.0035, float(liquid_entry_tolerance_pct)))
         self.btc_filter_enabled = btc_filter_enabled
         self.btc_filter_timeframe = (btc_filter_timeframe or "15m").strip()
         self.btc_filter_cache_sec = max(5.0, float(btc_filter_cache_sec))
@@ -173,7 +195,7 @@ class PaperTradingEngine:
         self._running = False
         self._vn_tz = timezone(timedelta(hours=7))
         self._atr_cache: dict[str, tuple[float, float]] = {}
-        self._top_vol_cache: tuple[float, list[str]] | None = None
+        self._top_vol_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
@@ -209,7 +231,12 @@ class PaperTradingEngine:
     async def _run_once(self) -> None:
         signals: list[dict[str, Any]] = []
         try:
-            snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
+            scan_max_symbols = self.liquid_max_symbols if self.liquid_max_symbols > 0 else 60
+            snapshot = await asyncio.to_thread(
+                get_scan_snapshot,
+                min_win=max(0.0, min(self.min_win_probability, 1.0)),
+                max_symbols=scan_max_symbols,
+            )
             signals = snapshot.get("signals", [])
             if self.major_dynamic_enabled:
                 await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)
@@ -227,15 +254,17 @@ class PaperTradingEngine:
                 test_symbols = [str(item.get("symbol")) for item in signals if item.get("symbol")]
             if len(test_symbols) > self.test_ml_max_symbols:
                 test_symbols = test_symbols[: self.test_ml_max_symbols]
-        top_vol_symbols: list[str] = []
-        if self.liquid_enabled and self.liquid_predictor is not None:
-            top_vol_symbols = await asyncio.to_thread(self._load_top_volatility_symbols)
+        top_vol_setups: list[dict[str, Any]] = []
+        if self.liquid_enabled:
+            top_vol_setups = await asyncio.to_thread(self._load_top_volatility_setups)
 
         price_symbols = {str(item.get("symbol")) for item in signals if item.get("symbol")}
         for symbol in test_symbols:
             price_symbols.add(symbol)
-        for symbol in top_vol_symbols:
-            price_symbols.add(symbol)
+        for setup in top_vol_setups:
+            symbol = str(setup.get("symbol") or "")
+            if symbol:
+                price_symbols.add(symbol)
         for trade in open_trades:
             symbol = str(trade.get("symbol") or "")
             if symbol:
@@ -258,12 +287,41 @@ class PaperTradingEngine:
 
                 symbol = str(item.get("symbol"))
                 side = str(item.get("side"))
-                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+                signal_source = str(item.get("signal_source") or "").upper()
+                long_short_ratio = self._safe_metric_float(item.get("long_short_ratio"))
+                funding_rate = self._safe_metric_float(item.get("funding_rate"))
+                open_interest_notional = self._safe_metric_float(item.get("open_interest_notional"))
+                can_enter_hint = item.get("can_enter")
+                if (isinstance(can_enter_hint, bool) and not can_enter_hint) or (
+                    isinstance(can_enter_hint, (int, float)) and float(can_enter_hint) <= 0.0
+                ):
+                    continue
+                safe_to_trade, _ = self._evaluate_symbol_safety_guard(
+                    symbol=symbol,
+                    long_short_ratio=long_short_ratio,
+                    funding_rate=funding_rate,
+                    open_interest_notional=open_interest_notional,
+                )
+                if not safe_to_trade:
+                    continue
+                entry_type = "LIQ_EMA99" if signal_source.startswith("LIQ") else "LIMIT"
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type=entry_type):
+                    continue
+                if getattr(self.repo, "has_recent_trade", None) and self.repo.has_recent_trade(symbol=symbol, side=side, entry_type=entry_type, minutes=60):
                     continue
 
                 entry = float(item.get("predicted_entry_price") or 0.0)
                 tp = float(item.get("take_profit") or 0.0)
                 sl = float(item.get("stop_loss") or 0.0)
+                if not bool(item.get("entry_adjusted")):
+                    entry, tp, sl, _ = self._apply_low_oi_entry_adjustment(
+                        symbol=symbol,
+                        side=side,
+                        entry=entry,
+                        take_profit=tp,
+                        stop_loss=sl,
+                        open_interest_notional=open_interest_notional,
+                    )
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
@@ -285,6 +343,11 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+
+                if side == "LONG" and market_price < entry:
+                    entry = float(market_price)
+                elif side == "SHORT" and market_price > entry:
+                    entry = float(market_price)
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -309,7 +372,12 @@ class PaperTradingEngine:
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
-                leverage = self._resolve_symbol_leverage(symbol)
+                leverage = self._resolve_symbol_leverage(
+                    symbol,
+                    long_short_ratio=long_short_ratio,
+                    funding_rate=funding_rate,
+                    open_interest_notional=open_interest_notional,
+                )
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -333,14 +401,17 @@ class PaperTradingEngine:
                         "symbol": symbol,
                         "side": side,
                         "btc_following": btc_following,
-                        "entry_type": "LIMIT",
+                        "entry_type": entry_type,
+                        "can_enter": True,
+                        "blocked_reason": "-",
+                        "entry_logic_flag": "SCAN_SIGNAL_AUTO",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
                         "entry_price": entry,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "liq_zone_price": float(item["liq_zone_price"]) if item.get("liq_zone_price") is not None else None,
-                        "liq_zone_score": None,
+                        "liq_zone_score": float(item["liq_zone_score"]) if item.get("liq_zone_score") is not None else None,
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
                         "leverage": leverage,
@@ -385,6 +456,8 @@ class PaperTradingEngine:
                 side = str(test_signal.side)
                 if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
+                if getattr(self.repo, "has_recent_trade", None) and self.repo.has_recent_trade(symbol=symbol, side=side, entry_type="ML_TEST", minutes=60):
+                    continue
 
                 entry = float(test_signal.predicted_entry_price)
                 tp = float(test_signal.take_profit)
@@ -395,6 +468,11 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+
+                if side == "LONG" and market_price < entry:
+                    entry = float(market_price)
+                elif side == "SHORT" and market_price > entry:
+                    entry = float(market_price)
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=raw_prob, btc_guard=btc_guard):
                     continue
                 if not self._handle_opposite_signal_on_touch(
@@ -446,6 +524,9 @@ class PaperTradingEngine:
                         "side": side,
                         "btc_following": btc_following,
                         "entry_type": "ML_TEST",
+                        "can_enter": True,
+                        "blocked_reason": "-",
+                        "entry_logic_flag": "ML_TEST_AUTO",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": raw_prob,
                         "entry_price": entry,
@@ -469,54 +550,102 @@ class PaperTradingEngine:
                 )
                 opened_test_orders += 1
 
-        # 1b) Separate liquidation+EMA99 model on top volatility symbols.
-        if (not open_paused) and self.liquid_enabled and self.liquid_predictor is not None:
-            for symbol in top_vol_symbols:
+        # 1b) Auto-entry from Top Volatility + Funding setups.
+        if (not open_paused) and self.liquid_enabled:
+            for setup in top_vol_setups:
+                symbol = str(setup.get("symbol") or "")
+                side = str(setup.get("side") or "").upper()
+                raw_prob = float(setup.get("win_probability") or 0.0)
+                if not symbol or side not in {"LONG", "SHORT"}:
+                    continue
+                if raw_prob < self.liquid_min_win_probability:
+                    continue
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                    continue
+                if getattr(self.repo, "has_recent_trade", None) and self.repo.has_recent_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99", minutes=60):
+                    continue
+
+                funding_cycle = str(setup.get("funding_cycle") or "UNKNOWN").upper()
+                funding_interval_hours = self._safe_metric_float(setup.get("funding_interval_hours"))
+                if funding_cycle in {"UNKNOWN", "FAR"} and (
+                    funding_interval_hours is None or funding_interval_hours > 1.25
+                ):
+                    continue
+
                 market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
                 if market_price is None:
                     continue
 
-                try:
-                    liq_signal = await asyncio.to_thread(
-                        self.liquid_predictor.predict,
-                        symbol,
-                        float(market_price),
-                    )
-                except Exception:
+                liq_signal = None
+                if self.liquid_predictor is not None:
+                    try:
+                        liq_signal = await asyncio.to_thread(
+                            self.liquid_predictor.predict,
+                            symbol,
+                            float(market_price),
+                        )
+                    except Exception:
+                        liq_signal = None
+
+                if liq_signal is not None:
+                    liq_side = str(getattr(liq_signal, "side", "")).upper()
+                    if side not in {"LONG", "SHORT"} and liq_side in {"LONG", "SHORT"}:
+                        side = liq_side
+                    raw_prob = max(raw_prob, float(getattr(liq_signal, "win_probability", 0.0) or 0.0))
+                if side not in {"LONG", "SHORT"} or raw_prob < self.liquid_min_win_probability:
                     continue
 
-                raw_prob = float(liq_signal.win_probability)
-                if raw_prob < self.liquid_min_win_probability:
-                    continue
-                side = str(liq_signal.side)
-                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                long_short_ratio = self._safe_metric_float(
+                    getattr(liq_signal, "long_short_ratio", None) if liq_signal is not None else None
+                )
+                setup_funding_rate = self._safe_metric_float(setup.get("funding_rate"))
+                funding_rate = self._safe_metric_float(
+                    getattr(liq_signal, "funding_rate", None) if liq_signal is not None else setup_funding_rate
+                )
+                open_interest_notional = self._safe_metric_float(
+                    getattr(liq_signal, "open_interest_notional", None) if liq_signal is not None else None
+                )
+                safe_to_trade, _ = self._evaluate_symbol_safety_guard(
+                    symbol=symbol,
+                    long_short_ratio=long_short_ratio,
+                    funding_rate=funding_rate,
+                    open_interest_notional=open_interest_notional,
+                )
+                if not safe_to_trade:
                     continue
 
-                entry = float(liq_signal.predicted_entry_price)
-                tp = float(liq_signal.take_profit)
-                sl = float(liq_signal.stop_loss)
+                entry = self._safe_metric_float(setup.get("entry_price"))
+                tp = self._safe_metric_float(setup.get("take_profit"))
+                sl = self._safe_metric_float(setup.get("stop_loss"))
+                if (entry is None or entry <= 0) and liq_signal is not None:
+                    entry = self._safe_metric_float(getattr(liq_signal, "predicted_entry_price", None))
+                if (tp is None or tp <= 0) and liq_signal is not None:
+                    tp = self._safe_metric_float(getattr(liq_signal, "take_profit", None))
+                if (sl is None or sl <= 0) and liq_signal is not None:
+                    sl = self._safe_metric_float(getattr(liq_signal, "stop_loss", None))
+                if entry is None or tp is None or sl is None or entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
+
+                entry, tp, sl, low_oi_reason = self._apply_low_oi_entry_adjustment(
+                    symbol=symbol,
+                    side=side,
+                    entry=float(entry),
+                    take_profit=float(tp),
+                    stop_loss=float(sl),
+                    open_interest_notional=open_interest_notional,
+                )
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
-                near_entry = abs(float(market_price) - entry) / entry <= self.liquid_entry_tolerance_pct
-                if side == "SHORT":
-                    short_zone_confirmed = bool(liq_signal.near_liq_zone) and (
-                        float(liq_signal.liq_zone_score) >= float(self.liquid_predictor.short_zone_min_score)
-                    )
-                    if not (near_entry or short_zone_confirmed):
-                        continue
-                else:
-                    if not (near_entry or bool(liq_signal.near_ema)):
-                        continue
+                if not self._entry_touched(side=side, market_price=float(market_price), entry=float(entry)):
+                    continue
 
-                hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
-                effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
-                if effective_prob < self.min_win_probability:
-                    continue
-                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
-                    continue
+                if side == "LONG" and market_price < entry:
+                    entry = float(market_price)
+                elif side == "SHORT" and market_price > entry:
+                    entry = float(market_price)
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -524,6 +653,13 @@ class PaperTradingEngine:
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                 ):
+                    continue
+
+                hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
+                effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
+                if effective_prob < self.min_win_probability:
+                    continue
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
 
                 normalized_tp, normalized_sl = normalize_tp_sl(
@@ -541,7 +677,12 @@ class PaperTradingEngine:
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                 )
-                leverage = self._resolve_symbol_leverage(symbol)
+                leverage = self._resolve_symbol_leverage(
+                    symbol,
+                    long_short_ratio=long_short_ratio,
+                    funding_rate=funding_rate,
+                    open_interest_notional=open_interest_notional,
+                )
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -559,6 +700,12 @@ class PaperTradingEngine:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
+                liq_zone_price = self._safe_metric_float(
+                    getattr(liq_signal, "liq_zone_price", None) if liq_signal is not None else None
+                )
+                liq_zone_score = self._safe_metric_float(
+                    getattr(liq_signal, "liq_zone_score", None) if liq_signal is not None else None
+                )
 
                 trade_id = self.repo.create_open_trade(
                     {
@@ -566,17 +713,99 @@ class PaperTradingEngine:
                         "side": side,
                         "btc_following": btc_following,
                         "entry_type": "LIQ_EMA99",
+                        "can_enter": True,
+                        "blocked_reason": low_oi_reason or "-",
+                        "entry_logic_flag": "TOP_VOL_FUNDING_AUTO",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
                         "entry_price": entry,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
+                        "liq_zone_price": liq_zone_price,
+                        "liq_zone_score": liq_zone_score,
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
                         "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
                         "feature_snapshot": feature_snapshot,
+                    }
+                )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
+                )
+
+        # 1c) Auto-entry from Funding Arbitrage setups.
+        if (not open_paused) and settings.funding_arb_enabled and self.analytics_service is not None:
+            funding_arb_setups = await asyncio.to_thread(
+                self.analytics_service.funding_arbitrage_setups,
+                min_rate=settings.funding_arb_min_rate,
+                max_minutes=settings.funding_arb_max_minutes,
+            )
+            for setup in funding_arb_setups:
+                symbol = str(setup.get("symbol") or "")
+                side = str(setup.get("side") or "").upper()
+                funding_rate = float(setup.get("funding_rate") or 0.0)
+                if not symbol or side not in {"LONG", "SHORT"}:
+                    continue
+
+                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="FUNDING_ARB"):
+                    continue
+
+                market_price = market_prices.get(symbol)
+                if market_price is None:
+                    market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                if market_price is None:
+                    continue
+
+                entry = float(market_price)
+                
+                # Base TP off the funding rate magnitude as the target gap to capture
+                tp_dist_pct = abs(funding_rate) * 0.5 + settings.funding_arb_tp_pct
+                sl_dist_pct = settings.funding_arb_sl_pct
+
+                if side == "LONG":
+                    tp = entry * (1 + tp_dist_pct)
+                    sl = entry * (1 - sl_dist_pct)
+                else:
+                    tp = entry * (1 - tp_dist_pct)
+                    sl = entry * (1 + sl_dist_pct)
+
+                leverage = self.leverage
+                quantity = calc_quantity_from_order_usdt(
+                    entry_price=entry,
+                    order_usdt=self.order_usdt,
+                    fallback_quantity=self.quantity,
+                )
+                margin_usdt = self.margin_usdt
+                if margin_usdt <= 0:
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                
+                trade_id = self.repo.create_open_trade(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "btc_following": False,
+                        "entry_type": "FUNDING_ARB",
+                        "can_enter": True,
+                        "blocked_reason": "-",
+                        "entry_logic_flag": "FUNDING_ARB_AUTO",
+                        "signal_win_probability": 0.85,
+                        "effective_win_probability": 0.85,
+                        "entry_price": entry,
+                        "take_profit": tp,
+                        "stop_loss": sl,
+                        "quantity": quantity,
+                        "margin_usdt": margin_usdt,
+                        "leverage": leverage,
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
+                        "feature_snapshot": None,
                     }
                 )
                 self._cache_open_trade_row(
@@ -697,7 +926,7 @@ class PaperTradingEngine:
                     continue
 
                 # Timeout policy.
-                if not self._is_expired(trade.get("opened_at")):
+                if not self._is_expired(trade.get("opened_at"), str(trade.get("entry_type") or "")):
                     continue
 
                 if pnl > 0:
@@ -876,41 +1105,45 @@ class PaperTradingEngine:
                 out[symbol] = float(price)
         return out
 
-    def _load_top_volatility_symbols(self) -> list[str]:
+    def _load_top_volatility_setups(self) -> list[dict[str, Any]]:
         now = time.time()
-        if self._top_vol_cache is not None and (now - self._top_vol_cache[0]) <= 300:
+        if self._top_vol_cache is not None and (now - self._top_vol_cache[0]) <= 120:
             return list(self._top_vol_cache[1])
         try:
-            markets = self.market_client.load_markets()
-            all_symbols: list[str] = []
-            for market in markets.values():
-                if not market.get("active", True):
-                    continue
-                if market.get("swap") is not True:
-                    continue
-                if market.get("settle") != "USDT":
-                    continue
-                sym = market.get("symbol")
-                if sym:
-                    all_symbols.append(str(sym))
-            all_symbols = sorted(set(all_symbols))
-            tickers = self.market_client.fetch_tickers(all_symbols[:220])
-            ranked: list[tuple[str, float]] = []
-            for symbol in all_symbols:
-                ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
-                if not isinstance(ticker, dict):
-                    continue
-                pct = ticker.get("percentage")
-                if pct is None:
-                    pct = ticker.get("change")
-                try:
-                    ranked.append((symbol, abs(float(pct))))
-                except Exception:
-                    continue
-            ranked.sort(key=lambda x: x[1], reverse=True)
-            symbols = [sym for sym, _ in ranked[: self.liquid_max_symbols]]
-            self._top_vol_cache = (now, symbols)
-            return symbols
+            if self.analytics_service is None:
+                self.analytics_service = AnalyticsService(
+                    client=self.market_client,
+                    liquid_predictor=self.liquid_predictor,
+                )
+            rows = self.analytics_service.top_volatility(
+                days=self.liquid_top_vol_days,
+                limit=self.liquid_max_symbols,
+            )
+            setups: list[dict[str, Any]] = []
+            for item in rows:
+                symbol = str(item.get("symbol") or "")
+                side = str(item.get("signal_side") or "").upper()
+                win_probability = self._safe_metric_float(item.get("signal_win_probability"))
+                entry_price = self._safe_metric_float(item.get("suggested_entry_price"))
+                take_profit = self._safe_metric_float(item.get("suggested_take_profit"))
+                stop_loss = self._safe_metric_float(item.get("suggested_stop_loss"))
+                if symbol and side in {"LONG", "SHORT"} and win_probability is not None:
+                    setups.append(
+                        {
+                            "symbol": symbol,
+                            "side": side,
+                            "win_probability": float(win_probability),
+                            "entry_price": entry_price,
+                            "take_profit": take_profit,
+                            "stop_loss": stop_loss,
+                            "entry_strategy": str(item.get("entry_strategy") or "MODEL_BASE"),
+                            "funding_rate": self._safe_metric_float(item.get("funding_rate")),
+                            "funding_interval_hours": self._safe_metric_float(item.get("funding_interval_hours")),
+                            "funding_cycle": str(item.get("funding_cycle") or "UNKNOWN"),
+                        }
+                    )
+            self._top_vol_cache = (now, setups)
+            return list(setups)
         except Exception:
             if self._top_vol_cache is not None:
                 return list(self._top_vol_cache[1])
@@ -1354,15 +1587,14 @@ class PaperTradingEngine:
             return float((bid + ask) / 2)
         return None
 
-    @staticmethod
-    def _entry_touched(side: str, market_price: float, entry: float) -> bool:
+    def _entry_touched(self, side: str, market_price: float, entry: float) -> bool:
         # Allow directional touch with a small slippage buffer so fast moves do not miss fills.
-        # LONG: fill when mark <= entry (or up to +0.15% above entry)
-        # SHORT: fill when mark >= entry (or up to -0.15% below entry)
+        # LONG: fill when mark <= entry (or up to +buffer above entry)
+        # SHORT: fill when mark >= entry (or up to -buffer below entry)
         side_key = str(side or "").upper()
         if entry <= 0:
             return False
-        buffer_pct = 0.0015
+        buffer_pct = self.entry_touch_buffer_pct
         if side_key == "LONG":
             return market_price <= (entry * (1.0 + buffer_pct))
         if side_key == "SHORT":
@@ -1402,7 +1634,14 @@ class PaperTradingEngine:
 
     def _capture_feature_snapshot(self, symbol: str, side: str) -> dict[str, float] | None:
         try:
-            row = self.predictor.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
+            row = None
+            if hasattr(self.predictor, "build_latest_feature_row"):
+                try:
+                    row = self.predictor.build_latest_feature_row(symbol=symbol, side=side, limit=400)
+                except TypeError:
+                    row = self.predictor.build_latest_feature_row(symbol=symbol, limit=400)
+            elif hasattr(self.predictor, "pipeline") and hasattr(self.predictor.pipeline, "build_latest_feature_row"):
+                row = self.predictor.pipeline.build_latest_feature_row(symbol=symbol, limit=400)
             if row is None:
                 return None
             payload = {k: float(v) for k, v in row.to_dict().items()}
@@ -1482,13 +1721,124 @@ class PaperTradingEngine:
             return True
         return key in self.major_symbols_static
 
-    def _resolve_symbol_leverage(self, symbol: str) -> int:
-        if self._is_major_symbol(symbol):
-            return self.major_symbol_leverage
-        return self.leverage
+    def _is_static_major_symbol(self, symbol: str) -> bool:
+        key = self._normalize_symbol_key(symbol)
+        return key in self.major_symbols_static
+
+    @staticmethod
+    def _safe_metric_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _evaluate_symbol_safety_guard(
+        self,
+        *,
+        symbol: str,
+        long_short_ratio: float | None = None,
+        funding_rate: float | None = None,
+        open_interest_notional: float | None = None,
+    ) -> tuple[bool, str]:
+        # Keep static majors tradable; they already have dedicated risk caps.
+        if self._is_static_major_symbol(symbol):
+            return True, "-"
+
+        funding_value = self._safe_metric_float(funding_rate)
+        if funding_value is not None and abs(funding_value) > self.max_abs_funding_rate:
+            return False, f"Funding>|{self.max_abs_funding_rate:.4f}|"
+
+        ls_value = self._safe_metric_float(long_short_ratio)
+        if ls_value is not None and (ls_value < self.min_long_short_ratio or ls_value > self.max_long_short_ratio):
+            return False, f"LS out[{self.min_long_short_ratio:.2f},{self.max_long_short_ratio:.2f}]"
+
+        return True, "-"
+
+    def _apply_low_oi_entry_adjustment(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        open_interest_notional: float | None = None,
+    ) -> tuple[float, float, float, str | None]:
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
+            return entry, take_profit, stop_loss, None
+        if self._is_static_major_symbol(symbol):
+            return entry, take_profit, stop_loss, None
+
+        oi_value = self._safe_metric_float(open_interest_notional)
+        if oi_value is None or oi_value <= 0 or oi_value >= self.small_cap_oi_hard_floor:
+            return entry, take_profit, stop_loss, None
+        if self.low_oi_entry_extra_pct <= 0:
+            return entry, take_profit, stop_loss, None
+
+        severity = self._clamp((self.small_cap_oi_hard_floor - oi_value) / max(1.0, self.small_cap_oi_hard_floor), 0.0, 1.0)
+        shift_pct = self.low_oi_entry_extra_pct * (1.0 + (severity * 0.6))
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return entry, take_profit, stop_loss, None
+
+        tp_dist = max(abs(take_profit - entry), entry * 0.0005)
+        sl_dist = max(abs(entry - stop_loss), entry * 0.0005)
+
+        if side_key == "LONG":
+            shifted_entry = entry * (1.0 - shift_pct)
+            shifted_tp = shifted_entry + tp_dist
+            shifted_sl = max(1e-9, shifted_entry - sl_dist)
+        else:
+            shifted_entry = entry * (1.0 + shift_pct)
+            shifted_tp = max(1e-9, shifted_entry - tp_dist)
+            shifted_sl = shifted_entry + sl_dist
+
+        return (
+            float(shifted_entry),
+            float(shifted_tp),
+            float(shifted_sl),
+            f"Low OI<{self.small_cap_oi_hard_floor:,.0f}: entry shifted",
+        )
+
+    def _resolve_symbol_leverage(
+        self,
+        symbol: str,
+        *,
+        long_short_ratio: float | None = None,
+        funding_rate: float | None = None,
+        open_interest_notional: float | None = None,
+    ) -> int:
+        key = self._normalize_symbol_key(symbol)
+        if key in self.major_symbols_static:
+            base_leverage = self.major_symbol_leverage
+        elif key in self.major_symbols_runtime:
+            base_leverage = min(self.dynamic_major_leverage_cap, self.major_symbol_leverage)
+        else:
+            base_leverage = self.leverage
+
+        leverage = max(1, int(base_leverage))
+        if self._is_static_major_symbol(symbol):
+            return leverage
+
+        oi_value = self._safe_metric_float(open_interest_notional)
+        if oi_value is not None and oi_value > 0 and oi_value < self.small_cap_oi_soft_floor:
+            leverage = min(leverage, self.small_cap_max_leverage)
+
+        funding_value = self._safe_metric_float(funding_rate)
+        if funding_value is not None and abs(funding_value) > (self.max_abs_funding_rate * 0.7):
+            leverage = min(leverage, self.small_cap_max_leverage)
+
+        ls_value = self._safe_metric_float(long_short_ratio)
+        ls_band = max(abs(self.max_long_short_ratio - 1.0), abs(1.0 - self.min_long_short_ratio))
+        if ls_value is not None and abs(ls_value - 1.0) > (ls_band * 0.75):
+            leverage = min(leverage, self.small_cap_max_leverage)
+
+        return max(1, int(leverage))
 
     def _resolve_symbol_max_risk_pct(self, symbol: str) -> float:
-        if self._is_major_symbol(symbol):
+        if self._is_static_major_symbol(symbol):
             return max(self.max_risk_pct, self.major_symbol_max_risk_pct)
         return self.max_risk_pct
 
@@ -1558,6 +1908,8 @@ class PaperTradingEngine:
         momentum_max = max(momentum_values) if momentum_values else 1.0
 
         for key in win_prob_map.keys():
+            if turnovers.get(key, 0.0) < self.dynamic_major_min_turnover_usdt:
+                continue
             turnover_raw = math.log10(max(turnovers.get(key, 0.0), 1.0))
             turnover_norm = (
                 0.5 if turnover_max <= turnover_min else (turnover_raw - turnover_min) / (turnover_max - turnover_min)
@@ -1576,11 +1928,10 @@ class PaperTradingEngine:
 
         scores.sort(key=lambda x: x[1], reverse=True)
         runtime = {symbol_key for symbol_key, _ in scores[: self.major_dynamic_limit]}
-        if runtime:
-            self.major_symbols_runtime = runtime
-            self._major_symbols_runtime_updated_ts = now
+        self.major_symbols_runtime = runtime
+        self._major_symbols_runtime_updated_ts = now
 
-    def _is_expired(self, opened_at: Any) -> bool:
+    def _is_expired(self, opened_at: Any, entry_type: str = "") -> bool:
         if opened_at is None:
             return False
         if isinstance(opened_at, datetime):
@@ -1595,4 +1946,6 @@ class PaperTradingEngine:
             dt = dt.replace(tzinfo=self._vn_tz)
 
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
-        return held_seconds >= (self.max_hold_minutes * 60)
+        limit_minutes = settings.funding_arb_hold_minutes if entry_type == "FUNDING_ARB" else self.max_hold_minutes
+        
+        return held_seconds >= (limit_minutes * 60)

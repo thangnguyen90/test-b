@@ -7,7 +7,6 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
-from app.services.ml_predictor import MLPredictor
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.binance_client import BinanceFuturesClient
 
@@ -33,10 +32,13 @@ class CacheItem:
 
 
 class AnalyticsService:
-    def __init__(self) -> None:
-        self.client = BinanceFuturesClient()
-        self.predictor = MLPredictor(model_path=settings.ml_model_path)
-        self.liquid_predictor = LiquidationMLPredictor(
+    def __init__(
+        self,
+        client: BinanceFuturesClient | None = None,
+        liquid_predictor: LiquidationMLPredictor | None = None,
+    ) -> None:
+        self.client = client or BinanceFuturesClient()
+        self.liquid_predictor = liquid_predictor or LiquidationMLPredictor(
             model_path=settings.liquid_ml_model_path,
             touch_tolerance_pct=settings.liquid_ml_touch_tolerance_pct,
             short_zone_min_score=settings.liquid_ml_short_zone_min_score,
@@ -97,7 +99,7 @@ class AnalyticsService:
         payload = {
             "symbol": symbol,
             "side": signal.side,
-            "source": "LIQ_EMA99",
+            "source": "LIQ_LS_FUND",
             "win_probability": signal.win_probability,
             "entry_price": signal.predicted_entry_price,
             "take_profit": signal.take_profit,
@@ -127,6 +129,84 @@ class AnalyticsService:
 
         symbols = sorted(set(symbols))
         return self._set_cache("symbols", symbols, ttl_sec=600)
+
+    @staticmethod
+    def _funding_cycle_label(minutes_to_funding: float | None) -> str:
+        if minutes_to_funding is None or minutes_to_funding < 0:
+            return "UNKNOWN"
+        if minutes_to_funding <= 60:
+            return "PRE_1H"
+        if minutes_to_funding <= 180:
+            return "PRE_3H"
+        if minutes_to_funding <= 480:
+            return "MID_CYCLE"
+        return "FAR"
+
+    @staticmethod
+    def _estimate_funding_interval_hours(rows: list[dict[str, Any]]) -> float | None:
+        if not rows:
+            return None
+        points: list[int] = []
+        for item in rows:
+            try:
+                ts = int(item.get("fundingTime") or item.get("time") or 0)
+            except Exception:
+                ts = 0
+            if ts > 0:
+                points.append(ts)
+        if len(points) < 2:
+            return None
+        points = sorted(set(points))
+        if len(points) < 2:
+            return None
+        diff_ms = points[-1] - points[-2]
+        if diff_ms <= 0:
+            return None
+        hours = diff_ms / 3_600_000
+        if hours <= 0:
+            return None
+        return float(round(hours, 2))
+
+    def _funding_retrace_entry(
+        self,
+        *,
+        side: str,
+        base_entry: float,
+        mark_price: float,
+        abs_move_pct: float,
+        funding_rate: float,
+        minutes_to_funding: float | None,
+    ) -> tuple[float, float, str]:
+        if base_entry <= 0 or mark_price <= 0:
+            return base_entry, 0.0, "MODEL_BASE"
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return base_entry, 0.0, "MODEL_BASE"
+
+        near_funding = minutes_to_funding is not None and minutes_to_funding <= 180
+        funding_hot = abs(float(funding_rate)) >= 0.00035
+        volatile = abs_move_pct >= 6.0
+        if not (near_funding or funding_hot or volatile):
+            dist_pct = abs(base_entry - mark_price) / mark_price * 100.0
+            return base_entry, dist_pct, "MODEL_BASE"
+
+        move_component = self._clamp((abs_move_pct / 100.0) * 0.14, 0.003, 0.026)
+        funding_component = self._clamp(abs(float(funding_rate)) / 0.0012, 0.0, 1.8) * 0.0022
+        timing_component = 0.0
+        if minutes_to_funding is not None:
+            if minutes_to_funding <= 60:
+                timing_component = 0.004
+            elif minutes_to_funding <= 180:
+                timing_component = 0.002
+        retrace_pct = self._clamp(0.003 + move_component + funding_component + timing_component, 0.004, 0.04)
+
+        if side_key == "LONG":
+            suggested_entry = min(float(base_entry), float(mark_price) * (1.0 - retrace_pct))
+        else:
+            suggested_entry = max(float(base_entry), float(mark_price) * (1.0 + retrace_pct))
+
+        dist_pct = abs(suggested_entry - mark_price) / mark_price * 100.0
+        return float(suggested_entry), float(dist_pct), "FUNDING_RETRACE"
 
     def top_volatility(self, days: int, limit: int = 30) -> list[dict[str, Any]]:
         key = f"top_volatility:{days}:{limit}"
@@ -178,7 +258,117 @@ class AnalyticsService:
                     continue
 
             items.sort(key=lambda row: row["abs_move_pct"], reverse=True)
-            return self._set_cache(key, items[:limit], ttl_sec=120)
+            top_rows = items[:limit]
+
+            now_ms = int(time.time() * 1000)
+            for row in top_rows:
+                symbol = str(row.get("symbol") or "")
+                if not symbol:
+                    continue
+                symbol_id = _to_binance_symbol(symbol)
+                ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+                ticker_mark = _safe_float(ticker.get("last")) if isinstance(ticker, dict) else None
+                if ticker_mark is None and isinstance(ticker, dict):
+                    ticker_mark = _safe_float(ticker.get("close"))
+
+                mark_price = float(ticker_mark or row.get("to_price") or 0.0)
+                funding_rate = 0.0
+                next_funding_time_ms: int | None = None
+                minutes_to_funding: float | None = None
+                funding_interval_hours: float | None = None
+                try:
+                    premium = self.http.get(
+                        "https://fapi.binance.com/fapi/v1/premiumIndex",
+                        params={"symbol": symbol_id},
+                    ).json()
+                    premium_mark = _safe_float(premium.get("markPrice"))
+                    if premium_mark is not None and premium_mark > 0:
+                        mark_price = float(premium_mark)
+                    funding_rate = float(_safe_float(premium.get("lastFundingRate")) or 0.0)
+                    raw_next_funding = premium.get("nextFundingTime")
+                    if raw_next_funding is not None:
+                        next_funding_time_ms = int(raw_next_funding)
+                        if next_funding_time_ms > 0:
+                            minutes_to_funding = (next_funding_time_ms - now_ms) / 60000.0
+                except Exception:
+                    pass
+
+                try:
+                    funding_series = self.client.fetch_funding_rate_series(symbol=symbol, limit=4)
+                    funding_interval_hours = self._estimate_funding_interval_hours(funding_series)
+                except Exception:
+                    funding_interval_hours = None
+
+                funding_cycle = self._funding_cycle_label(minutes_to_funding)
+
+                signal_side: str | None = None
+                signal_win_probability: float | None = None
+                signal_entry_price: float | None = None
+                signal_take_profit: float | None = None
+                signal_stop_loss: float | None = None
+                suggested_entry_price: float | None = None
+                suggested_take_profit: float | None = None
+                suggested_stop_loss: float | None = None
+                entry_dist_pct: float | None = None
+                entry_strategy = "MODEL_BASE"
+                signal_order_type: str | None = None
+                if mark_price > 0:
+                    try:
+                        signal = self._resolve_liq_signal(symbol=symbol, mark_price=mark_price)
+                        if signal is not None:
+                            signal_side = str(signal.get("side") or "").upper() or None
+                            signal_win_probability = _safe_float(signal.get("win_probability"))
+                            signal_entry_price = _safe_float(signal.get("entry_price"))
+                            signal_take_profit = _safe_float(signal.get("take_profit"))
+                            signal_stop_loss = _safe_float(signal.get("stop_loss"))
+                            if signal_side in {"LONG", "SHORT"} and signal_entry_price and signal_entry_price > 0:
+                                suggested_entry_price, entry_dist_pct, entry_strategy = self._funding_retrace_entry(
+                                    side=signal_side,
+                                    base_entry=float(signal_entry_price),
+                                    mark_price=float(mark_price),
+                                    abs_move_pct=float(row.get("abs_move_pct") or 0.0),
+                                    funding_rate=float(funding_rate),
+                                    minutes_to_funding=minutes_to_funding,
+                                )
+                                tp_dist = abs(float((signal_take_profit or signal_entry_price)) - float(signal_entry_price))
+                                sl_dist = abs(float(signal_entry_price) - float((signal_stop_loss or signal_entry_price)))
+                                if signal_side == "LONG":
+                                    suggested_take_profit = suggested_entry_price + tp_dist
+                                    suggested_stop_loss = max(1e-9, suggested_entry_price - sl_dist)
+                                else:
+                                    suggested_take_profit = max(1e-9, suggested_entry_price - tp_dist)
+                                    suggested_stop_loss = suggested_entry_price + sl_dist
+                                signal_order_type = self._signal_order_type(
+                                    side=signal_side,
+                                    mark_price=float(mark_price),
+                                    entry_price=float(suggested_entry_price),
+                                )
+                    except Exception:
+                        pass
+
+                row.update(
+                    {
+                        "mark_price": mark_price,
+                        "funding_rate": float(funding_rate),
+                        "funding_interval_hours": funding_interval_hours,
+                        "next_funding_time_ms": next_funding_time_ms,
+                        "minutes_to_funding": minutes_to_funding,
+                        "funding_cycle": funding_cycle,
+                        "signal_side": signal_side,
+                        "signal_win_probability": signal_win_probability,
+                        "signal_entry_price": signal_entry_price,
+                        "signal_take_profit": signal_take_profit,
+                        "signal_stop_loss": signal_stop_loss,
+                        "suggested_entry_price": suggested_entry_price,
+                        "suggested_take_profit": suggested_take_profit,
+                        "suggested_stop_loss": suggested_stop_loss,
+                        "entry_dist_pct": entry_dist_pct,
+                        "entry_strategy": entry_strategy,
+                        "signal_order_type": signal_order_type,
+                    }
+                )
+
+            return self._set_cache(key, top_rows, ttl_sec=120)
         except Exception:
             stale = self._get_cached(key, allow_stale=True)
             if stale is not None:
@@ -301,12 +491,12 @@ class AnalyticsService:
                         row["signal_take_profit"] = liq_signal["take_profit"]
                         row["signal_stop_loss"] = liq_signal["stop_loss"]
                     else:
-                        signal = self.predictor.predict(
+                        signal = self.liquid_predictor.predict(
                             symbol=symbol,
                             mark_price=mark,
                         )
                         row["signal_side"] = signal.side
-                        row["signal_source"] = "ML"
+                        row["signal_source"] = "LIQ_LS_FUND"
                         row["signal_win_probability"] = signal.win_probability
                         row["signal_entry_price"] = signal.predicted_entry_price
                         row["signal_take_profit"] = signal.take_profit
@@ -344,6 +534,81 @@ class AnalyticsService:
                 "count": 0,
                 "items": [],
             }
+
+    def funding_arbitrage_setups(
+        self,
+        min_rate: float,
+        max_minutes: int,
+    ) -> list[dict[str, Any]]:
+        key = f"funding_arbitrage:{min_rate}:{max_minutes}"
+        cached = self._get_cached(key)
+        if cached is not None:
+            return cached
+
+        try:
+            symbols = self._load_usdt_swap_symbols()
+            now_ms = int(time.time() * 1000)
+            
+            try:
+                tickers = self.client.fetch_tickers()
+            except Exception:
+                tickers = self._fetch_tickers_chunked(symbols, chunk_size=120)
+
+            # Get premium index data for funding rates and times
+            premium_data = self.http.get("https://fapi.binance.com/fapi/v1/premiumIndex").json()
+            if not isinstance(premium_data, list):
+                return []
+
+            premium_map = {item.get("symbol"): item for item in premium_data}
+            
+            setups: list[dict[str, Any]] = []
+            for symbol in symbols:
+                symbol_id = _to_binance_symbol(symbol)
+                premium = premium_map.get(symbol_id)
+                if not premium:
+                    continue
+
+                funding_rate = _safe_float(premium.get("lastFundingRate")) or 0.0
+                if abs(funding_rate) < min_rate:
+                    continue
+
+                raw_next_funding = premium.get("nextFundingTime")
+                if not raw_next_funding:
+                    continue
+                
+                next_funding_time_ms = int(raw_next_funding)
+                if next_funding_time_ms <= 0:
+                    continue
+
+                minutes_to_funding = (next_funding_time_ms - now_ms) / 60000.0
+                if minutes_to_funding < 0 or minutes_to_funding > max_minutes:
+                    continue
+
+                mark_price = _safe_float(premium.get("markPrice"))
+                if not mark_price or mark_price <= 0:
+                    ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+                    mark_price = _safe_float(ticker.get("last")) if isinstance(ticker, dict) else None
+                    if not mark_price:
+                        continue
+                
+                side = "SHORT" if funding_rate > 0 else "LONG"
+
+                setups.append(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "funding_rate": funding_rate,
+                        "minutes_to_funding": float(minutes_to_funding),
+                        "mark_price": float(mark_price),
+                    }
+                )
+
+            # Sort by highest absolute funding rate
+            setups.sort(key=lambda x: abs(float(x["funding_rate"])), reverse=True)
+            return self._set_cache(key, setups, ttl_sec=30)
+            
+        except Exception:
+            return []
 
     @staticmethod
     def _ema(values: list[float], period: int) -> float:
@@ -424,7 +689,7 @@ class AnalyticsService:
             ticker = self.client.fetch_ticker(symbol=symbol)
             mark_price = _safe_float(ticker.get("last")) or _safe_float(ticker.get("close")) or 0.0
 
-            ml_signal = self.predictor.predict(symbol=symbol, mark_price=float(mark_price))
+            ml_signal = self.liquid_predictor.predict(symbol=symbol, mark_price=float(mark_price))
             ml_direction = 1.0 if ml_signal.side == "LONG" else -1.0
             ml_bias = ml_direction * ((ml_signal.win_probability * 2.0) - 1.0)
 

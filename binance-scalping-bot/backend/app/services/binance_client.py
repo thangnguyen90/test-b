@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import ccxt
+import httpx
 
 
 class BinanceRateLimitBanError(Exception):
@@ -203,6 +204,81 @@ class BinanceFuturesClient:
             if stale is not None:
                 return stale
             raise
+
+    @staticmethod
+    def _to_binance_symbol(symbol: str) -> str:
+        return str(symbol or "").replace(":USDT", "").replace("/", "").upper()
+
+    def _fetch_public_json(
+        self,
+        *,
+        path: str,
+        params: dict[str, Any],
+        cache_key: str,
+        ttl_sec: float,
+    ) -> Any:
+        cached = self._cache_get(cache_key, ttl_sec=ttl_sec)
+        if cached is not None:
+            return cached
+
+        url = f"https://fapi.binance.com{path}"
+        try:
+            response = httpx.get(url, params=params, timeout=httpx.Timeout(2.5, connect=2.0))
+            response.raise_for_status()
+            payload = response.json()
+            self._cache_set(cache_key, payload)
+            return payload
+        except Exception:
+            stale = self._cache_get(cache_key, ttl_sec=ttl_sec, allow_stale=True)
+            if stale is not None:
+                return stale
+            return [] if path.endswith(("Ratio", "Hist", "fundingRate")) else {}
+
+    def fetch_funding_rate_series(self, symbol: str, limit: int = 120) -> list[dict[str, Any]]:
+        symbol_id = self._to_binance_symbol(symbol)
+        safe_limit = max(1, min(1000, int(limit)))
+        key = f"funding_rate:{symbol_id}:{safe_limit}"
+        payload = self._fetch_public_json(
+            path="/fapi/v1/fundingRate",
+            params={"symbol": symbol_id, "limit": safe_limit},
+            cache_key=key,
+            ttl_sec=35.0,
+        )
+        return payload if isinstance(payload, list) else []
+
+    def fetch_global_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: int = 180,
+    ) -> list[dict[str, Any]]:
+        symbol_id = self._to_binance_symbol(symbol)
+        safe_limit = max(1, min(500, int(limit)))
+        key = f"long_short_ratio:{symbol_id}:{period}:{safe_limit}"
+        payload = self._fetch_public_json(
+            path="/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol_id, "period": period, "limit": safe_limit},
+            cache_key=key,
+            ttl_sec=20.0,
+        )
+        return payload if isinstance(payload, list) else []
+
+    def fetch_open_interest_hist(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: int = 180,
+    ) -> list[dict[str, Any]]:
+        symbol_id = self._to_binance_symbol(symbol)
+        safe_limit = max(1, min(500, int(limit)))
+        key = f"open_interest_hist:{symbol_id}:{period}:{safe_limit}"
+        payload = self._fetch_public_json(
+            path="/futures/data/openInterestHist",
+            params={"symbol": symbol_id, "period": period, "limit": safe_limit},
+            cache_key=key,
+            ttl_sec=20.0,
+        )
+        return payload if isinstance(payload, list) else []
 
     @classmethod
     def rest_status(cls) -> dict[str, Any]:

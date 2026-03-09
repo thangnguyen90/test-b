@@ -10,10 +10,14 @@ class PaperTrade(BaseModel):
     side: str
     btc_following: Optional[bool] = None
     entry_type: str = "LIMIT"
+    can_enter: Optional[bool] = None
+    blocked_reason: Optional[str] = None
+    entry_logic_flag: Optional[str] = None
     signal_win_probability: float
     effective_win_probability: float
     entry_price: float
     take_profit: float
+    tp: Optional[float] = None
     stop_loss: float
     liq_ema99_15m: Optional[float] = None
     liq_ema99_1h: Optional[float] = None
