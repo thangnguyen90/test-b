@@ -453,11 +453,15 @@ class MLPredictor:
         max_tp_distance = entry * (max(0.0, settings.paper_trade_max_tp_pct) / 100.0)
         base_tp_distance = atr * rr
         tp_distance = min(base_tp_distance, max_tp_distance) if max_tp_distance > 0 else base_tp_distance
+        
+        sl_multiplier = 2.0 - win_prob
+        sl_distance = atr * sl_multiplier
+
         if side == "LONG":
-            stop_loss = entry - atr
+            stop_loss = entry - sl_distance
             take_profit = entry + tp_distance
         else:
-            stop_loss = entry + atr
+            stop_loss = entry + sl_distance
             take_profit = entry - tp_distance
 
         return SignalResult(
@@ -496,6 +500,8 @@ class MLPredictor:
         good_boosted_count = 0
         early_loss_penalized_count = 0
         long_hold_bad_penalized_count = 0
+        missed_profit_count = 0
+        instant_loss_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
 
         for row in feedback_rows:
@@ -519,6 +525,8 @@ class MLPredictor:
             good_signal = False
             early_loss = False
             long_hold_bad = False
+            missed_profit = False
+            instant_loss = False
             hold_minutes = self._calc_hold_minutes(row.get("opened_at"), row.get("closed_at"))
             try:
                 pnl_pct_value = float(row.get("pnl_pct") or 0.0)
@@ -533,6 +541,23 @@ class MLPredictor:
                 if mae_value <= -abs(settings.ml_feedback_mae_penalty_pct):
                     label = 0
                     penalized_count += 1
+            
+            try:
+                mfe_pct_value = float(row.get("mfe_pct") or 0.0)
+            except Exception:
+                mfe_pct_value = 0.0
+                
+            if settings.ml_feedback_mfe_missed_profit_enabled and label == 0:
+                if mfe_pct_value >= float(settings.ml_feedback_mfe_missed_profit_min_pct):
+                    label = 1
+                    missed_profit = True
+                    missed_profit_count += 1
+            
+            if settings.ml_feedback_mfe_instant_loss_enabled and label == 0:
+                if mfe_pct_value <= float(settings.ml_feedback_mfe_instant_loss_max_pct):
+                    instant_loss = True
+                    instant_loss_count += 1
+
             if settings.ml_feedback_recovery_penalty_enabled and label == 1:
                 try:
                     mae_value = float(row.get("mae_pct") or 0.0)
@@ -605,10 +630,11 @@ class MLPredictor:
                     good_signal=good_signal,
                     early_loss=early_loss,
                     long_hold_bad=long_hold_bad,
+                    missed_profit=missed_profit,
+                    instant_loss=instant_loss,
                 )
             )
 
-        if not feature_rows:
             return (
                 PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)),
                 penalized_count,
@@ -616,6 +642,8 @@ class MLPredictor:
                 good_boosted_count,
                 early_loss_penalized_count,
                 long_hold_bad_penalized_count,
+                missed_profit_count,
+                instant_loss_count,
                 [],
             )
 
@@ -628,6 +656,8 @@ class MLPredictor:
             good_boosted_count,
             early_loss_penalized_count,
             long_hold_bad_penalized_count,
+            missed_profit_count,
+            instant_loss_count,
             weights,
         )
 
@@ -639,6 +669,8 @@ class MLPredictor:
         good_signal: bool = False,
         early_loss: bool = False,
         long_hold_bad: bool = False,
+        missed_profit: bool = False,
+        instant_loss: bool = False,
     ) -> float:
         weight = 1.0
         if settings.ml_feedback_use_pnl_weight:
@@ -666,6 +698,12 @@ class MLPredictor:
         if long_hold_bad:
             long_hold_penalty = max(1.0, float(settings.ml_feedback_long_hold_bad_weight_multiplier))
             weight *= long_hold_penalty
+        if missed_profit:
+            missed_profit_penalty = max(0.05, float(settings.ml_feedback_mfe_missed_profit_weight_factor))
+            weight *= missed_profit_penalty
+        if instant_loss:
+            instant_loss_penalty = max(1.0, float(settings.ml_feedback_mfe_instant_loss_weight_multiplier))
+            weight *= instant_loss_penalty
         return max(0.05, weight)
 
     @staticmethod

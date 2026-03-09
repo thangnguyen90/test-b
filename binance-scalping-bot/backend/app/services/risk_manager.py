@@ -12,6 +12,8 @@ def normalize_tp_sl(
     atr_value: float | None = None,
     sl_atr_multiplier: float = 0.0,
     max_tp_pct: float | None = None,
+    leverage: int = 1,
+    max_margin_loss_pct: float | None = 15.0,
 ) -> tuple[float, float]:
     """
     Normalize TP/SL to avoid unrealistically tight SL after market entry slippage.
@@ -27,7 +29,14 @@ def normalize_tp_sl(
         floor_sl_distance = max(floor_sl_distance, float(atr_value) * float(sl_atr_multiplier))
     buffer_sl_distance = max(0.0, entry * float(sl_extra_buffer_pct))
     floor_sl_distance += buffer_sl_distance
+
     sl_distance = max(signal_sl_distance, floor_sl_distance)
+    
+    # Cap max SL distance to max margin loss %
+    if max_margin_loss_pct is not None and max_margin_loss_pct > 0:
+        max_sl_distance = entry * (float(max_margin_loss_pct) / 100.0) / float(max(1, leverage))
+        sl_distance = min(sl_distance, max_sl_distance)
+
     tp_distance = max(signal_tp_distance, sl_distance * float(min_rr))
     if max_tp_pct is not None and max_tp_pct > 0:
         tp_distance = min(tp_distance, entry * float(max_tp_pct))
@@ -40,6 +49,42 @@ def normalize_tp_sl(
         normalized_tp = entry - tp_distance
 
     return normalized_tp, normalized_sl
+
+
+def calc_dynamic_take_profit(
+    side: str,
+    entry_price: float,
+    atr_value: float,
+    leverage: int,
+    atr_multiplier: float = 2.0,
+    min_margin_pct: float = 5.0,
+    max_margin_pct: float = 10.0,
+) -> float:
+    """
+    Tính Toán Take Profit Động Dựa Trên ATR Và Margin% Mong Muốn.
+    atr_value: Biến động của nến.
+    leverage: Đòn bẩy.
+    min_margin_pct: Lợi nhuận kỳ vọng tối thiểu (VD: 5% theo margin).
+    max_margin_pct: Lợi nhuận kỳ vọng tối đa (VD: 10% theo margin).
+    """
+    entry = float(entry_price)
+    lev = max(1, int(leverage))
+
+    # Margin% mong muốn quy ra khoảng cách giá (Price Distance)
+    # Lãi margin 5%: PriceDistance = Entry * (5 / 100 / Leverage)
+    min_distance = entry * (float(min_margin_pct) / 100.0 / lev)
+    max_distance = entry * (float(max_margin_pct) / 100.0 / lev)
+
+    # TP tự động sinh ra do biên độ nến kỳ vọng
+    volatile_distance = float(atr_value) * float(atr_multiplier)
+
+    # Khống chế (Clip) khoảng cách vào ngưỡng Min/Max Margin mong muốn
+    tp_distance = max(min_distance, min(volatile_distance, max_distance))
+
+    if side == "LONG":
+        return entry + tp_distance
+    else:
+        return entry - tp_distance
 
 
 def calc_margin_risk_pct(side: str, entry_price: float, stop_loss: float, leverage: int) -> float:

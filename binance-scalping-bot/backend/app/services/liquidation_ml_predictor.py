@@ -12,7 +12,9 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
+from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+from app.services.risk_manager import calc_dynamic_take_profit
 
 
 LIQUID_FEATURE_COLUMNS = [
@@ -449,11 +451,14 @@ class LiquidationMLPredictor:
             entry = liq_zone_price
 
         tp_dist = atr * self.rr_ratio
+        sl_multiplier = 2.0 - win_prob
+        sl_dist = atr * sl_multiplier
+
         if side == "LONG":
-            sl = entry - atr
+            sl = entry - sl_dist
             tp = entry + tp_dist
         else:
-            sl = entry + atr
+            sl = entry + sl_dist
             tp = entry - tp_dist
         return LiquidSignalResult(
             symbol=symbol,

@@ -43,7 +43,7 @@ class PaperTradingEngine:
         major_dynamic_limit: int = 8,
         major_dynamic_candidates: int = 30,
         major_dynamic_candle_lookback: int = 24,
-        major_symbol_leverage: int = 10,
+        major_symbol_leverage: int = 5,
         major_symbol_max_risk_pct: float = 20.0,
         poll_interval_sec: float = 6.0,
         stream_max_stale_sec: float = 5.0,
@@ -180,6 +180,8 @@ class PaperTradingEngine:
         self._open_pause_reason: str | None = None
         self._btc_up_shock_long_block_until_ts: float = 0.0
         self._btc_down_shock_short_block_until_ts: float = 0.0
+        self.high_volatility_threshold_pct = 2.0
+        self.high_volatility_leverage = 3
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -294,6 +296,9 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                atr_value = await self._resolve_symbol_atr(symbol)
+                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -308,8 +313,10 @@ class PaperTradingEngine:
                     sl_atr_multiplier=self.sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    leverage=leverage,
+                    max_margin_loss_pct=10.5,
                 )
-                leverage = self._resolve_symbol_leverage(symbol)
+                
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -406,6 +413,9 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                atr_value = await self._resolve_symbol_atr(symbol)
+                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -416,12 +426,14 @@ class PaperTradingEngine:
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
                     ),
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
+                    atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    leverage=leverage,
+                    max_margin_loss_pct=10.5,
                 )
-                leverage = self._resolve_symbol_leverage(symbol)
+                
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -526,6 +538,9 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                atr_value = await self._resolve_symbol_atr(symbol)
+                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -536,12 +551,14 @@ class PaperTradingEngine:
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
                     ),
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
+                    atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    leverage=leverage,
+                    max_margin_loss_pct=10.5,
                 )
-                leverage = self._resolve_symbol_leverage(symbol)
+                
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -1526,10 +1543,11 @@ class PaperTradingEngine:
             return True
         return key in self.major_symbols_static
 
-    def _resolve_symbol_leverage(self, symbol: str) -> int:
-        if self._is_major_symbol(symbol):
-            return self.major_symbol_leverage
-        return self.leverage
+    def _resolve_symbol_leverage(self, symbol: str, atr_pct: float | None = None) -> int:
+        base_lev = self.major_symbol_leverage if self._is_major_symbol(symbol) else self.leverage
+        if atr_pct is not None and atr_pct >= self.high_volatility_threshold_pct:
+            return min(base_lev, self.high_volatility_leverage)
+        return min(base_lev, 5)
 
     def _resolve_symbol_max_risk_pct(self, symbol: str) -> float:
         if self._is_major_symbol(symbol):

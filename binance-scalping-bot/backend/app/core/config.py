@@ -100,7 +100,7 @@ class Settings(BaseModel):
     paper_trade_major_dynamic_limit: int = int(os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_LIMIT", "8"))
     paper_trade_major_dynamic_candidates: int = int(os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_CANDIDATES", "30"))
     paper_trade_major_dynamic_candle_lookback: int = int(os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_CANDLE_LOOKBACK", "24"))
-    paper_trade_major_leverage: int = int(os.getenv("PAPER_TRADE_MAJOR_LEVERAGE", "10"))
+    paper_trade_major_leverage: int = int(os.getenv("PAPER_TRADE_MAJOR_LEVERAGE", "5"))
     paper_trade_major_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAJOR_MAX_RISK_PCT", "20"))
     paper_trade_poll_interval_sec: float = float(os.getenv("PAPER_TRADE_POLL_INTERVAL_SEC", "6"))
     paper_trade_stream_max_stale_sec: float = float(os.getenv("PAPER_TRADE_STREAM_MAX_STALE_SEC", "5"))
@@ -147,5 +147,12 @@ class Settings(BaseModel):
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
 
+    ml_feedback_mfe_missed_profit_enabled: bool = os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_ENABLED", "true").lower() == "true"
+    ml_feedback_mfe_missed_profit_min_pct: float = float(os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_MIN_PCT", "5.0"))
+    ml_feedback_mfe_missed_profit_weight_factor: float = float(os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_WEIGHT_FACTOR", "0.6"))
+    
+    ml_feedback_mfe_instant_loss_enabled: bool = os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_ENABLED", "true").lower() == "true"
+    ml_feedback_mfe_instant_loss_max_pct: float = float(os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_MAX_PCT", "0.5"))
+    ml_feedback_mfe_instant_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_WEIGHT_MULTIPLIER", "4.0"))
 
 settings = Settings()
