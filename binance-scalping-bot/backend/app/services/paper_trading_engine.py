@@ -157,6 +157,7 @@ class PaperTradingEngine:
         self.disable_sl = disable_sl
         self.move_sl_to_entry_pnl_pct = max(0.0, move_sl_to_entry_pnl_pct)
         self.move_sl_lock_pnl_pct = max(0.0, float(move_sl_lock_pnl_pct))
+        self.trailing_sl_distance_pct = max(0.0, float(settings.paper_trade_trailing_sl_distance_pct))
         self.move_sl_scale_by_leverage = bool(move_sl_scale_by_leverage)
         self.move_sl_reference_leverage = max(0.1, float(move_sl_reference_leverage))
         self.liquid_enabled = liquid_enabled
@@ -832,6 +833,9 @@ class PaperTradingEngine:
 
                 entry = float(market_price)
                 
+                # Check if it's a high-vol shitcoin based on funding rate
+                is_shitcoin = abs(funding_rate) >= settings.shitcoin_funding_threshold
+
                 # Base TP off the funding rate magnitude as the target gap to capture
                 tp_dist_pct = abs(funding_rate) * 0.5 + settings.funding_arb_tp_pct
                 sl_dist_pct = settings.funding_arb_sl_pct
@@ -843,6 +847,10 @@ class PaperTradingEngine:
                     tp = entry * (1 - tp_dist_pct)
                     sl = entry * (1 + sl_dist_pct)
 
+                # Widen SL based on ATR if it's a volatile shitcoin
+                active_sl_atr = settings.shitcoin_atr_multiplier if is_shitcoin else self.sl_atr_multiplier
+                tp, sl = await self.normalize_tp_sl(symbol, side, entry, tp, sl, atr_multiplier=active_sl_atr)
+
                 leverage = self.leverage
                 quantity = calc_quantity_from_order_usdt(
                     entry_price=entry,
@@ -852,6 +860,19 @@ class PaperTradingEngine:
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                
+                # Volatility-Based Position Sizing: Reduce margin if SL distance is huge
+                sl_dist_pct_actual = abs(entry - sl) / entry
+                default_sl_pct = active_sl_atr * 0.01  # Approximation if ATR is very wide
+                if sl_dist_pct_actual > default_sl_pct and default_sl_pct > 0:
+                    scale_factor = default_sl_pct / sl_dist_pct_actual
+                    if scale_factor < 1.0:
+                        margin_usdt = margin_usdt * scale_factor
+                        quantity = calc_quantity_from_order_usdt(
+                            entry_price=entry,
+                            order_usdt=margin_usdt * leverage,
+                            fallback_quantity=self.quantity
+                        )
                 
                 trade_id = self.repo.create_open_trade(
                     {
@@ -918,21 +939,25 @@ class PaperTradingEngine:
                         mfe_pct=next_mfe,
                     )
                 move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
-                if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
-                    lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
+                if not self.disable_sl and next_mfe >= move_sl_trigger_pct:
+                    # Trailing logic: base lock on the highest MFE achieved, not just current PNL
+                    trailing_target_pct = next_mfe - self.trailing_sl_distance_pct
+                    # Final lock is the max of the static minimum lock (e.g. 1%) and the trailing target 
+                    lock_pnl_pct = max(self.move_sl_lock_pnl_pct, trailing_target_pct)
+                    
                     locked_sl = self._calc_locked_profit_sl(
                         side=side,
                         entry=entry,
-                        mark_price=price,
+                        mark_price=price, # used merely as safety bound inside calc
                         leverage=int(trade["leverage"]),
                         lock_pnl_pct=lock_pnl_pct,
                     )
                     if locked_sl is not None:
+                        # Only move SL favorably (up for LONG, down for SHORT)
                         if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
                             self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
                             sl = locked_sl
-
-                # If BTC reverses down sharply, close profitable LONGs on BTC-following symbols.
+                            trade["stop_loss"] = locked_sl  # Persist in memory for next iterations
                 if self._should_force_close_profit_on_btc_reversal(
                     symbol=symbol,
                     side=side,

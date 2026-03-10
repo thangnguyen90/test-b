@@ -129,6 +129,7 @@ class Settings(BaseModel):
     paper_trade_disable_sl: bool = os.getenv("PAPER_TRADE_DISABLE_SL", "false").lower() == "true"
     paper_trade_move_sl_to_entry_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT", "15"))
     paper_trade_move_sl_lock_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT", "10"))
+    paper_trade_trailing_sl_distance_pct: float = float(os.getenv("PAPER_TRADE_TRAILING_SL_DISTANCE_PCT", "3"))
     paper_trade_move_sl_scale_by_leverage: bool = os.getenv("PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE", "true").lower() == "true"
     paper_trade_move_sl_reference_leverage: float = float(os.getenv("PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE", "5"))
     paper_trade_btc_filter_enabled: bool = os.getenv("PAPER_TRADE_BTC_FILTER_ENABLED", "true").lower() == "true"

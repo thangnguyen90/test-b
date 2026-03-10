@@ -3180,9 +3180,13 @@ function App() {
                           disabled={openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`) || isOpeningMarketOrder}
                           onClick={() => {
                             if (!markPrice) return
-                            const tpDist = markPrice * ((Math.abs(fundingRate) * 0.5) + 0.004)
+                            const absFunding = Math.abs(fundingRate)
+                            const tpDist = markPrice * ((absFunding * 0.5) + 0.004)
+                            // Pad SL dynamically based on funding rate, minimum 1.5% to avoid quick liquidation on volatile coins
+                            const slDist = markPrice * Math.max(0.015, absFunding * 1.5)
+
                             const tp = item.side === 'LONG' ? markPrice + tpDist : markPrice - tpDist
-                            const sl = item.side === 'LONG' ? markPrice * 0.99 : markPrice * 1.01
+                            const sl = item.side === 'LONG' ? markPrice - slDist : markPrice + slDist
 
                             openPaperMarketOrder({
                               symbol: item.symbol,
