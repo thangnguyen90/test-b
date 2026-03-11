@@ -53,6 +53,14 @@ class PaperTradingEngine:
         sl_atr_multiplier: float = 0.0,
         sl_atr_timeframe: str = "5m",
         sl_atr_limit: int = 120,
+        day_start_hour: int = 10,
+        day_end_hour: int = 18,
+        day_tp_margin_min_pct: float = 2.0,
+        day_tp_margin_max_pct: float = 2.5,
+        day_sl_margin_pct: float = 7.0,
+        night_tp_margin_min_pct: float = 3.0,
+        night_tp_margin_max_pct: float = 3.0,
+        night_sl_margin_pct: float = 10.0,
         min_rr: float = 1.5,
         maint_margin_rate: float = 0.02,
         max_risk_pct: float = 12.0,
@@ -128,6 +136,14 @@ class PaperTradingEngine:
         self.sl_atr_multiplier = max(0.0, sl_atr_multiplier)
         self.sl_atr_timeframe = sl_atr_timeframe or "5m"
         self.sl_atr_limit = max(30, min(500, int(sl_atr_limit)))
+        self.day_start_hour = int(day_start_hour) % 24
+        self.day_end_hour = int(day_end_hour) % 24
+        self.day_tp_margin_min_pct = max(0.0, float(day_tp_margin_min_pct))
+        self.day_tp_margin_max_pct = max(0.0, float(day_tp_margin_max_pct))
+        self.day_sl_margin_pct = max(0.0, float(day_sl_margin_pct))
+        self.night_tp_margin_min_pct = max(0.0, float(night_tp_margin_min_pct))
+        self.night_tp_margin_max_pct = max(0.0, float(night_tp_margin_max_pct))
+        self.night_sl_margin_pct = max(0.0, float(night_sl_margin_pct))
         self.min_rr = min_rr
         self.maint_margin_rate = max(0.0, maint_margin_rate)
         self.max_risk_pct = max(0.0, max_risk_pct)
@@ -299,22 +315,13 @@ class PaperTradingEngine:
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
-                normalized_tp, normalized_sl = normalize_tp_sl(
+                normalized_tp, normalized_sl = self._resolve_session_tp_sl(
                     side=side,
-                    entry_price=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
-                    min_sl_pct=max(
-                        self.min_sl_pct,
-                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
-                    ),
-                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
-                    sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    entry=entry,
+                    signal_tp=tp,
+                    signal_sl=sl,
                     leverage=leverage,
-                    max_margin_loss_pct=10.5,
+                    atr_value=atr_value,
                 )
                 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -416,22 +423,13 @@ class PaperTradingEngine:
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
-                normalized_tp, normalized_sl = normalize_tp_sl(
+                normalized_tp, normalized_sl = self._resolve_session_tp_sl(
                     side=side,
-                    entry_price=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
-                    min_sl_pct=max(
-                        self.min_sl_pct,
-                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
-                    ),
-                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=atr_value,
-                    sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    entry=entry,
+                    signal_tp=tp,
+                    signal_sl=sl,
                     leverage=leverage,
-                    max_margin_loss_pct=10.5,
+                    atr_value=atr_value,
                 )
                 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -541,22 +539,13 @@ class PaperTradingEngine:
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
-                normalized_tp, normalized_sl = normalize_tp_sl(
+                normalized_tp, normalized_sl = self._resolve_session_tp_sl(
                     side=side,
-                    entry_price=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
-                    min_sl_pct=max(
-                        self.min_sl_pct,
-                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
-                    ),
-                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=atr_value,
-                    sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    entry=entry,
+                    signal_tp=tp,
+                    signal_sl=sl,
                     leverage=leverage,
-                    max_margin_loss_pct=10.5,
+                    atr_value=atr_value,
                 )
                 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -1553,6 +1542,93 @@ class PaperTradingEngine:
         if self._is_major_symbol(symbol):
             return max(self.max_risk_pct, self.major_symbol_max_risk_pct)
         return self.max_risk_pct
+
+    def _resolve_session_tp_sl(
+        self,
+        *,
+        side: str,
+        entry: float,
+        signal_tp: float,
+        signal_sl: float,
+        leverage: int,
+        atr_value: float | None,
+    ) -> tuple[float, float]:
+        base_tp, base_sl = normalize_tp_sl(
+            side=side,
+            entry_price=entry,
+            take_profit=signal_tp,
+            stop_loss=signal_sl,
+            min_sl_pct=max(
+                self.min_sl_pct,
+                calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+            ),
+            sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+            atr_value=atr_value,
+            sl_atr_multiplier=self.sl_atr_multiplier,
+            min_rr=self.min_rr,
+            max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+            leverage=leverage,
+            max_margin_loss_pct=10.5,
+        )
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"} or entry <= 0:
+            return base_tp, base_sl
+
+        tp_min_margin_pct, tp_max_margin_pct, sl_margin_pct = self._resolve_session_margin_targets()
+        base_tp_margin_pct = self._calc_margin_move_pct(
+            side=side_key,
+            entry=entry,
+            target=base_tp,
+            leverage=leverage,
+        )
+        target_tp_margin_pct = self._clamp(base_tp_margin_pct, tp_min_margin_pct, tp_max_margin_pct)
+        lev = float(max(1, int(leverage)))
+        tp_move_pct = (target_tp_margin_pct / 100.0) / lev
+        sl_move_pct = (sl_margin_pct / 100.0) / lev
+
+        if side_key == "LONG":
+            return entry * (1.0 + tp_move_pct), entry * (1.0 - sl_move_pct)
+        return entry * (1.0 - tp_move_pct), entry * (1.0 + sl_move_pct)
+
+    def _resolve_session_margin_targets(self) -> tuple[float, float, float]:
+        now_vn = datetime.now(self._vn_tz)
+        is_day_session = self._is_hour_in_range(
+            hour=now_vn.hour,
+            start_hour=self.day_start_hour,
+            end_hour=self.day_end_hour,
+        )
+        if is_day_session:
+            tp_min = self.day_tp_margin_min_pct
+            tp_max = self.day_tp_margin_max_pct
+            sl_pct = self.day_sl_margin_pct
+        else:
+            tp_min = self.night_tp_margin_min_pct
+            tp_max = self.night_tp_margin_max_pct
+            sl_pct = self.night_sl_margin_pct
+        if tp_max < tp_min:
+            tp_min, tp_max = tp_max, tp_min
+        return tp_min, tp_max, sl_pct
+
+    @staticmethod
+    def _is_hour_in_range(hour: int, start_hour: int, end_hour: int) -> bool:
+        h = int(hour) % 24
+        start = int(start_hour) % 24
+        end = int(end_hour) % 24
+        if start <= end:
+            return start <= h <= end
+        return h >= start or h <= end
+
+    @staticmethod
+    def _calc_margin_move_pct(side: str, entry: float, target: float, leverage: int) -> float:
+        if entry <= 0:
+            return 0.0
+        lev = float(max(1, int(leverage)))
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            move_pct = max(0.0, (target - entry) / entry)
+        else:
+            move_pct = max(0.0, (entry - target) / entry)
+        return move_pct * lev * 100.0
 
     def _refresh_major_symbols_runtime(self, signals: list[dict[str, Any]]) -> None:
         now = time.time()
