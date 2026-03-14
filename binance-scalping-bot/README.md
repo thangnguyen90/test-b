@@ -260,6 +260,38 @@ PAPER_TRADE_BTC_FOLLOW_LOOKBACK=120
 PAPER_TRADE_BTC_FOLLOW_CACHE_SEC=300
 ```
 
+### Dùng 2 file env riêng cho macOS và Windows/Linux
+
+- File đã tách sẵn:
+  - `backend/.mac.env`
+  - `backend/.window.env`
+- Script đồng bộ từ `backend/.env`:
+  - `scripts/sync_env_variants.sh`
+
+Sau mỗi lần sửa `backend/.env`, chạy:
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/sync_env_variants.sh
+```
+
+Đổi nhanh môi trường đang chạy:
+
+```bash
+# Dùng cấu hình macOS
+cp /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.mac.env /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.env
+
+# Dùng cấu hình Windows/Linux
+cp /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.window.env /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.env
+```
+
+Sau khi copy env, restart backend:
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/backend_service.sh restart-force
+```
+
 - `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
 - Nếu không truyền `quantity` khi mở lệnh, backend sẽ tự tính `quantity = PAPER_TRADE_ORDER_USDT / entry_price`.
 - `PAPER_TRADE_MARGIN_USDT` là margin dùng để tính PnL% (ROI margin).  

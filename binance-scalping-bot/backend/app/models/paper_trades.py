@@ -95,6 +95,35 @@ class PaperTradeDailySummaryResponse(BaseModel):
     items: list[PaperTradeDailySummary]
 
 
+class PaperTradeHourlySideStats(BaseModel):
+    total_orders: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate_pct: float = 0.0
+    loss_rate_pct: float = 0.0
+    net_pnl: float = 0.0
+    avg_pnl: float = 0.0
+    action: str = "LOW_DATA"
+    note: Optional[str] = None
+
+
+class PaperTradeHourlyWindow(BaseModel):
+    hour_vn: int
+    all: PaperTradeHourlySideStats
+    long: PaperTradeHourlySideStats
+    short: PaperTradeHourlySideStats
+    is_bad_window: bool = False
+
+
+class PaperTradeHourlyWindowResponse(BaseModel):
+    lookback_days: int
+    min_samples: int
+    block_win_rate_pct: float
+    strict_win_rate_pct: float
+    current_hour_vn: int
+    items: list[PaperTradeHourlyWindow]
+
+
 class PaperMarketOpenRequest(BaseModel):
     symbol: str
     side: str = Field(pattern="^(LONG|SHORT)$")

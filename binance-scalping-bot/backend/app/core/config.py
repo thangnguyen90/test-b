@@ -154,6 +154,12 @@ class Settings(BaseModel):
     paper_trade_hourly_profile_prob_alpha: float = float(os.getenv("PAPER_TRADE_HOURLY_PROFILE_PROB_ALPHA", "0.25"))
     paper_trade_hourly_profile_refresh_sec: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_REFRESH_SEC", "300"))
     paper_trade_hourly_profile_lookback_days: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_LOOKBACK_DAYS", "60"))
+    paper_trade_hourly_bad_window_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_ENABLED", "true").lower() == "true"
+    paper_trade_hourly_bad_window_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_MIN_SAMPLES", "60"))
+    paper_trade_hourly_bad_window_block_win_rate_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_BLOCK_WIN_RATE_PCT", "48"))
+    paper_trade_hourly_bad_window_strict_win_rate_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_WIN_RATE_PCT", "53"))
+    paper_trade_hourly_bad_window_strict_min_win_bonus: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_MIN_WIN_BONUS", "0.04"))
+    paper_trade_hourly_bad_window_countertrend_hard_block: bool = os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_COUNTERTREND_HARD_BLOCK", "true").lower() == "true"
 
     ml_feedback_hourly_weight_enabled: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_ENABLED", "true").lower() == "true"
     ml_feedback_hourly_weight_min_samples: int = int(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_MIN_SAMPLES", "60"))

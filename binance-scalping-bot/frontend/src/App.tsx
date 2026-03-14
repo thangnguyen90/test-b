@@ -218,6 +218,37 @@ type DailyTradeSummary = {
   avg_pnl: number
 }
 
+type HourlyWindowAction = 'ALLOW' | 'STRICT' | 'BLOCK' | 'LOW_DATA'
+
+type HourlyWindowSideStats = {
+  total_orders: number
+  wins: number
+  losses: number
+  win_rate_pct: number
+  loss_rate_pct: number
+  net_pnl: number
+  avg_pnl: number
+  action: HourlyWindowAction
+  note?: string | null
+}
+
+type HourlyWindowRow = {
+  hour_vn: number
+  all: HourlyWindowSideStats
+  long: HourlyWindowSideStats
+  short: HourlyWindowSideStats
+  is_bad_window: boolean
+}
+
+type HourlyWindowResponse = {
+  lookback_days: number
+  min_samples: number
+  block_win_rate_pct: number
+  strict_win_rate_pct: number
+  current_hour_vn: number
+  items: HourlyWindowRow[]
+}
+
 type VolatilityItem = {
   symbol: string
   move_pct: number
@@ -925,6 +956,8 @@ function App() {
   const [historyTotalItems, setHistoryTotalItems] = useState(0)
   const [tradeToasts, setTradeToasts] = useState<TradeToast[]>([])
   const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
+  const [hourlyWindows, setHourlyWindows] = useState<HourlyWindowRow[]>([])
+  const [hourlyWindowMeta, setHourlyWindowMeta] = useState<Omit<HourlyWindowResponse, 'items'> | null>(null)
   const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
   const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
@@ -1618,6 +1651,20 @@ function App() {
     setDailySummary(payload.items ?? [])
   }
 
+  async function fetchHourlyWindows() {
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/hourly-windows?scope=ENTRY:LIMIT`)
+    if (!response.ok) throw new Error('Hourly windows API unavailable')
+    const payload = await response.json() as HourlyWindowResponse
+    setHourlyWindows(payload.items ?? [])
+    setHourlyWindowMeta({
+      lookback_days: payload.lookback_days,
+      min_samples: payload.min_samples,
+      block_win_rate_pct: payload.block_win_rate_pct,
+      strict_win_rate_pct: payload.strict_win_rate_pct,
+      current_hour_vn: payload.current_hour_vn,
+    })
+  }
+
   async function fetchTopVolatility(days: 1 | 3 | 5 | 7 = volDays) {
     const response = await fetch(`${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`)
     if (!response.ok) throw new Error('Cannot fetch top volatility')
@@ -1908,10 +1955,16 @@ function App() {
     fetchDailySummary().catch((err) => {
       setError(err instanceof Error ? err.message : 'Unknown error')
     })
+    fetchHourlyWindows().catch(() => {
+      // Daily summary should still render even if hourly-window API fails.
+    })
 
     const timer = window.setInterval(() => {
       fetchDailySummary().catch(() => {
         // Keep previous daily summary on transient failures.
+      })
+      fetchHourlyWindows().catch(() => {
+        // Keep previous hourly windows on transient failures.
       })
     }, 12000)
 
@@ -2757,6 +2810,63 @@ function App() {
                       <td>{row.avg_pnl.toFixed(6)}</td>
                     </tr>
                   ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <h3 className="section-title">Auto Bad-Hour Windows (Entry Time, VN)</h3>
+          <div className="stats-grid">
+            <div className="stats-item"><strong>Lookback:</strong> {hourlyWindowMeta?.lookback_days ?? '-'} days</div>
+            <div className="stats-item"><strong>Min Samples:</strong> {hourlyWindowMeta?.min_samples ?? '-'}</div>
+            <div className="stats-item"><strong>Block Win Rate:</strong> {typeof hourlyWindowMeta?.block_win_rate_pct === 'number' ? `${hourlyWindowMeta.block_win_rate_pct.toFixed(1)}%` : '-'}</div>
+            <div className="stats-item"><strong>Strict Win Rate:</strong> {typeof hourlyWindowMeta?.strict_win_rate_pct === 'number' ? `${hourlyWindowMeta.strict_win_rate_pct.toFixed(1)}%` : '-'}</div>
+            <div className="stats-item"><strong>Current Hour:</strong> {typeof hourlyWindowMeta?.current_hour_vn === 'number' ? `${hourlyWindowMeta.current_hour_vn}:00` : '-'}</div>
+            <div className="stats-item"><strong>BTC Trend:</strong> {btcTrend?.items?.[0]?.trend ?? '-'}</div>
+          </div>
+          <div className="content table-wrap">
+            {hourlyWindows.length === 0 ? (
+              <p>No hourly profile data yet.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Hour (VN)</th>
+                    <th>All Win Rate</th>
+                    <th>All Net PnL</th>
+                    <th>LONG Win Rate</th>
+                    <th>LONG Action</th>
+                    <th>SHORT Win Rate</th>
+                    <th>SHORT Action</th>
+                    <th>Samples (L/S)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hourlyWindows.map((row) => {
+                    const longBadge = row.long.action === 'BLOCK'
+                      ? 'warn'
+                      : row.long.action === 'ALLOW'
+                        ? 'success'
+                        : 'neutral'
+                    const shortBadge = row.short.action === 'BLOCK'
+                      ? 'warn'
+                      : row.short.action === 'ALLOW'
+                        ? 'success'
+                        : 'neutral'
+                    return (
+                      <tr key={`hour-${row.hour_vn}`}>
+                        <td>{`${String(row.hour_vn).padStart(2, '0')}:00`}</td>
+                        <td>{`${row.all.win_rate_pct.toFixed(2)}%`}</td>
+                        <td className={row.all.net_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                          {row.all.net_pnl.toFixed(4)}
+                        </td>
+                        <td>{`${row.long.win_rate_pct.toFixed(2)}%`}</td>
+                        <td><span className={`badge ${longBadge}`}>{row.long.action}</span></td>
+                        <td>{`${row.short.win_rate_pct.toFixed(2)}%`}</td>
+                        <td><span className={`badge ${shortBadge}`}>{row.short.action}</span></td>
+                        <td>{`${row.long.total_orders}/${row.short.total_orders}`}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             )}

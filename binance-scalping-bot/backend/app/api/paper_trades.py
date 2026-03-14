@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import math
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +11,9 @@ from app.models.paper_trades import (
     PaperManualCloseRequest,
     PaperTradeDailySummary,
     PaperTradeDailySummaryResponse,
+    PaperTradeHourlySideStats,
+    PaperTradeHourlyWindow,
+    PaperTradeHourlyWindowResponse,
     PaperMarketOpenRequest,
     PaperTrade,
     PaperTradeListResponse,
@@ -56,6 +59,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
+        self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
         self.router.add_api_route("/market-open", self.market_open, methods=["POST"], response_model=PaperTrade)
         self.router.add_api_route("/close/{trade_id}", self.manual_close, methods=["POST"], response_model=PaperTrade)
 
@@ -136,6 +140,50 @@ class PaperTradeAPI:
         if text in {"0", "false", "no", "n"}:
             return False
         return None
+
+    @staticmethod
+    def _hourly_stats_from_row(row: dict | None) -> dict[str, float | int]:
+        if not row:
+            return {
+                "total_orders": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 0.0,
+                "loss_rate_pct": 0.0,
+                "net_pnl": 0.0,
+                "avg_pnl": 0.0,
+            }
+        return {
+            "total_orders": int(row.get("total_orders") or 0),
+            "wins": int(row.get("wins") or 0),
+            "losses": int(row.get("losses") or 0),
+            "win_rate_pct": float(row.get("win_rate_pct") or 0.0),
+            "loss_rate_pct": float(row.get("loss_rate_pct") or 0.0),
+            "net_pnl": float(row.get("net_pnl") or 0.0),
+            "avg_pnl": float(row.get("avg_pnl") or 0.0),
+        }
+
+    @staticmethod
+    def _classify_hourly_action(
+        *,
+        stats: dict[str, float | int],
+        min_samples: int,
+        block_win_rate_pct: float,
+        strict_win_rate_pct: float,
+    ) -> tuple[str, str]:
+        total_orders = int(stats.get("total_orders") or 0)
+        wins = int(stats.get("wins") or 0)
+        losses = int(stats.get("losses") or 0)
+        win_rate_pct = float(stats.get("win_rate_pct") or 0.0)
+        net_pnl = float(stats.get("net_pnl") or 0.0)
+
+        if total_orders < min_samples:
+            return "LOW_DATA", f"<{min_samples} samples"
+        if win_rate_pct <= block_win_rate_pct or (losses > wins and net_pnl < 0.0):
+            return "BLOCK", "bad hour"
+        if win_rate_pct <= strict_win_rate_pct or net_pnl < 0.0:
+            return "STRICT", "raise min win"
+        return "ALLOW", "normal"
 
     @classmethod
     def _map_trade(cls, row: dict, btc_following: bool | None = None) -> PaperTrade:
@@ -239,6 +287,77 @@ class PaperTradeAPI:
         repo = self._require_repo()
         rows = repo.daily_summary(days=days)
         return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
+
+    def get_hourly_windows(
+        self,
+        days: int = Query(default=settings.paper_trade_hourly_profile_lookback_days, ge=1, le=3650),
+        scope: str = Query(default="ENTRY:LIMIT"),
+        min_samples: int = Query(default=settings.paper_trade_hourly_bad_window_min_samples, ge=1, le=10000),
+        block_win_rate_pct: float = Query(default=settings.paper_trade_hourly_bad_window_block_win_rate_pct, ge=0.0, le=100.0),
+        strict_win_rate_pct: float = Query(default=settings.paper_trade_hourly_bad_window_strict_win_rate_pct, ge=0.0, le=100.0),
+    ) -> PaperTradeHourlyWindowResponse:
+        repo = self._require_repo()
+        safe_scope = str(scope or "ENTRY:LIMIT").upper()
+        safe_min_samples = max(1, int(min_samples))
+        safe_block = float(block_win_rate_pct)
+        safe_strict = max(safe_block, float(strict_win_rate_pct))
+
+        repo.refresh_hourly_profiles(lookback_days=days)
+        rows = repo.list_hourly_profiles(scope=safe_scope)
+        by_side_hour: dict[str, dict[int, dict]] = {"ALL": {}, "LONG": {}, "SHORT": {}}
+        for row in rows:
+            side_key = str(row.get("side_key") or "ALL").upper()
+            if side_key not in by_side_hour:
+                continue
+            hour_vn = int(row.get("hour_vn") or 0)
+            if hour_vn < 0 or hour_vn > 23:
+                continue
+            by_side_hour[side_key][hour_vn] = row
+
+        items: list[PaperTradeHourlyWindow] = []
+        for hour_vn in range(24):
+            all_stats = self._hourly_stats_from_row(by_side_hour["ALL"].get(hour_vn))
+            long_stats = self._hourly_stats_from_row(by_side_hour["LONG"].get(hour_vn))
+            short_stats = self._hourly_stats_from_row(by_side_hour["SHORT"].get(hour_vn))
+
+            all_action, all_note = self._classify_hourly_action(
+                stats=all_stats,
+                min_samples=safe_min_samples,
+                block_win_rate_pct=safe_block,
+                strict_win_rate_pct=safe_strict,
+            )
+            long_action, long_note = self._classify_hourly_action(
+                stats=long_stats,
+                min_samples=safe_min_samples,
+                block_win_rate_pct=safe_block,
+                strict_win_rate_pct=safe_strict,
+            )
+            short_action, short_note = self._classify_hourly_action(
+                stats=short_stats,
+                min_samples=safe_min_samples,
+                block_win_rate_pct=safe_block,
+                strict_win_rate_pct=safe_strict,
+            )
+
+            items.append(
+                PaperTradeHourlyWindow(
+                    hour_vn=hour_vn,
+                    all=PaperTradeHourlySideStats(**all_stats, action=all_action, note=all_note),
+                    long=PaperTradeHourlySideStats(**long_stats, action=long_action, note=long_note),
+                    short=PaperTradeHourlySideStats(**short_stats, action=short_action, note=short_note),
+                    is_bad_window=(long_action in {"BLOCK", "STRICT"} or short_action in {"BLOCK", "STRICT"}),
+                )
+            )
+
+        current_hour_vn = int(datetime.now(timezone(timedelta(hours=7))).hour)
+        return PaperTradeHourlyWindowResponse(
+            lookback_days=int(days),
+            min_samples=safe_min_samples,
+            block_win_rate_pct=safe_block,
+            strict_win_rate_pct=safe_strict,
+            current_hour_vn=current_hour_vn,
+            items=items,
+        )
 
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._require_repo()

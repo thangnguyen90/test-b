@@ -145,6 +145,12 @@ async def on_startup() -> None:
                 hourly_profile_prob_alpha=settings.paper_trade_hourly_profile_prob_alpha,
                 hourly_profile_refresh_sec=settings.paper_trade_hourly_profile_refresh_sec,
                 hourly_profile_lookback_days=settings.paper_trade_hourly_profile_lookback_days,
+                hourly_bad_window_enabled=settings.paper_trade_hourly_bad_window_enabled,
+                hourly_bad_window_min_samples=settings.paper_trade_hourly_bad_window_min_samples,
+                hourly_bad_window_block_win_rate_pct=settings.paper_trade_hourly_bad_window_block_win_rate_pct,
+                hourly_bad_window_strict_win_rate_pct=settings.paper_trade_hourly_bad_window_strict_win_rate_pct,
+                hourly_bad_window_strict_min_win_bonus=settings.paper_trade_hourly_bad_window_strict_min_win_bonus,
+                hourly_bad_window_countertrend_hard_block=settings.paper_trade_hourly_bad_window_countertrend_hard_block,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
             paper_trade_api.bind_btc_follow_resolver(paper_trade_engine.is_symbol_following_btc)

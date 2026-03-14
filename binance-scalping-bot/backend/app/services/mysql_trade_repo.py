@@ -832,9 +832,18 @@ class MySQLTradeRepository:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT updated_at, side, entry_type, pnl
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='opened_at'
+                    """,
+                    (self.database,),
+                )
+                trade_time_col = "opened_at" if int((cur.fetchone() or {}).get("cnt") or 0) > 0 else "updated_at"
+                cur.execute(
+                    f"""
+                    SELECT {trade_time_col} AS profile_time_at, side, entry_type, pnl
                     FROM paper_trades
-                    WHERE status='CLOSED' AND pnl IS NOT NULL AND updated_at >= %s
+                    WHERE status='CLOSED' AND pnl IS NOT NULL AND {trade_time_col} >= %s
                     """,
                     (from_dt,),
                 )
@@ -852,16 +861,25 @@ class MySQLTradeRepository:
                 if liq_exists:
                     cur.execute(
                         """
-                        SELECT updated_at, side, pnl
+                        SELECT COUNT(*) AS cnt
+                        FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades_liq' AND COLUMN_NAME='opened_at'
+                        """,
+                        (self.database,),
+                    )
+                    liq_time_col = "opened_at" if int((cur.fetchone() or {}).get("cnt") or 0) > 0 else "updated_at"
+                    cur.execute(
+                        f"""
+                        SELECT {liq_time_col} AS profile_time_at, side, pnl
                         FROM paper_trades_liq
-                        WHERE status='CLOSED' AND pnl IS NOT NULL AND updated_at >= %s
+                        WHERE status='CLOSED' AND pnl IS NOT NULL AND {liq_time_col} >= %s
                         """,
                         (from_dt,),
                     )
                     liq_rows = cur.fetchall() or []
 
                 for row in trade_rows:
-                    hour_vn = self._coerce_hour_vn(row.get("updated_at"))
+                    hour_vn = self._coerce_hour_vn(row.get("profile_time_at"))
                     if hour_vn is None:
                         continue
                     pnl = float(row.get("pnl") or 0.0)
@@ -874,7 +892,7 @@ class MySQLTradeRepository:
                     touch(entry_scope, side_key, hour_vn, pnl)
 
                 for row in liq_rows:
-                    hour_vn = self._coerce_hour_vn(row.get("updated_at"))
+                    hour_vn = self._coerce_hour_vn(row.get("profile_time_at"))
                     if hour_vn is None:
                         continue
                     pnl = float(row.get("pnl") or 0.0)

@@ -697,7 +697,9 @@ class MLPredictor:
         if not hourly_profile_map:
             return 1.0
 
-        dt = self._parse_datetime(row.get("created_at"))
+        dt = self._parse_datetime(row.get("opened_at"))
+        if dt is None:
+            dt = self._parse_datetime(row.get("created_at"))
         if dt is None:
             dt = self._parse_datetime(row.get("closed_at"))
         if dt is None:

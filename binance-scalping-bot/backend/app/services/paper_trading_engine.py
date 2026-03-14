@@ -102,6 +102,12 @@ class PaperTradingEngine:
         hourly_profile_prob_alpha: float = 0.25,
         hourly_profile_refresh_sec: int = 300,
         hourly_profile_lookback_days: int = 60,
+        hourly_bad_window_enabled: bool = True,
+        hourly_bad_window_min_samples: int = 60,
+        hourly_bad_window_block_win_rate_pct: float = 48.0,
+        hourly_bad_window_strict_win_rate_pct: float = 53.0,
+        hourly_bad_window_strict_min_win_bonus: float = 0.04,
+        hourly_bad_window_countertrend_hard_block: bool = True,
         fee_taker_pct: float = 0.0005,
         fee_maker_pct: float = 0.0002,
     ) -> None:
@@ -187,6 +193,14 @@ class PaperTradingEngine:
         self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
         self.hourly_profile_refresh_sec = max(30, int(hourly_profile_refresh_sec))
         self.hourly_profile_lookback_days = max(1, min(3650, int(hourly_profile_lookback_days)))
+        self.hourly_bad_window_enabled = bool(hourly_bad_window_enabled)
+        self.hourly_bad_window_min_samples = max(10, int(hourly_bad_window_min_samples))
+        self.hourly_bad_window_block_win_rate_pct = max(0.0, min(float(hourly_bad_window_block_win_rate_pct), 100.0))
+        self.hourly_bad_window_strict_win_rate_pct = max(0.0, min(float(hourly_bad_window_strict_win_rate_pct), 100.0))
+        if self.hourly_bad_window_strict_win_rate_pct < self.hourly_bad_window_block_win_rate_pct:
+            self.hourly_bad_window_strict_win_rate_pct = self.hourly_bad_window_block_win_rate_pct
+        self.hourly_bad_window_strict_min_win_bonus = max(0.0, min(float(hourly_bad_window_strict_min_win_bonus), 0.25))
+        self.hourly_bad_window_countertrend_hard_block = bool(hourly_bad_window_countertrend_hard_block)
         # Binance Futures fee rates (per-side). Default: taker=0.05%, maker=0.02%.
         self.fee_taker_pct = max(0.0, float(fee_taker_pct))
         self.fee_maker_pct = max(0.0, float(fee_maker_pct))
@@ -309,7 +323,15 @@ class PaperTradingEngine:
                     side=side,
                     entry_type="LIMIT",
                 )
-                if effective_prob < self.min_win_probability:
+                can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
+                    side=side,
+                    entry_type="LIMIT",
+                    base_min_win=self.min_win_probability,
+                    btc_guard=btc_guard,
+                )
+                if not can_open_now:
+                    continue
+                if effective_prob < required_min_win:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -328,7 +350,7 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = ((float(atr_value) / float(entry)) * 100) if (entry > 0 and atr_value is not None) else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -426,7 +448,15 @@ class PaperTradingEngine:
                     side=side,
                     entry_type="ML_TEST",
                 )
-                if effective_prob < self.test_ml_min_win_probability:
+                can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
+                    side=side,
+                    entry_type="ML_TEST",
+                    base_min_win=self.test_ml_min_win_probability,
+                    btc_guard=btc_guard,
+                )
+                if not can_open_now:
+                    continue
+                if effective_prob < required_min_win:
                     continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
@@ -454,7 +484,7 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = ((float(atr_value) / float(entry)) * 100) if (entry > 0 and atr_value is not None) else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -572,7 +602,15 @@ class PaperTradingEngine:
                     side=side,
                     entry_type="LIQ_EMA99",
                 )
-                if effective_prob < self.min_win_probability:
+                can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
+                    side=side,
+                    entry_type="LIQ_EMA99",
+                    base_min_win=self.min_win_probability,
+                    btc_guard=btc_guard,
+                )
+                if not can_open_now:
+                    continue
+                if effective_prob < required_min_win:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -586,7 +624,7 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = ((float(atr_value) / float(entry)) * 100) if (entry > 0 and atr_value is not None) else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -918,7 +956,7 @@ class PaperTradingEngine:
         return elapsed < float(cooldown_minutes * 60)
 
     def _refresh_hourly_profiles_if_needed(self) -> None:
-        if not self.hourly_profile_enabled:
+        if not (self.hourly_profile_enabled or self.hourly_bad_window_enabled):
             return
         now_ts = time.time()
         if (now_ts - self._hourly_profiles_refreshed_ts) < float(self.hourly_profile_refresh_sec):
@@ -944,25 +982,7 @@ class PaperTradingEngine:
         if not self._hourly_profiles_cache:
             return max(0.0, min(1.0, float(effective_prob)))
 
-        hour_vn = int(datetime.now(self._vn_tz).hour)
-        side_key = str(side or "ALL").upper()
-        entry_scope = f"ENTRY:{str(entry_type or 'UNKNOWN').upper()}"
-        candidates: list[tuple[str, str]] = [
-            (entry_scope, side_key),
-            (entry_scope, "ALL"),
-            ("ALL", side_key),
-            ("ALL", "ALL"),
-        ]
-
-        chosen: dict[str, Any] | None = None
-        for scope, key in candidates:
-            chosen = (
-                self._hourly_profiles_cache.get(scope, {})
-                .get(key, {})
-                .get(hour_vn)
-            )
-            if chosen is not None:
-                break
+        chosen = self._find_hourly_profile_for_now(side=side, entry_type=entry_type)
         if not chosen:
             return max(0.0, min(1.0, float(effective_prob)))
 
@@ -974,6 +994,77 @@ class PaperTradingEngine:
         edge = (win_rate_pct / 100.0) - 0.5
         adjusted = float(effective_prob) + edge * self.hourly_profile_prob_alpha
         return max(0.0, min(1.0, adjusted))
+
+    def _find_hourly_profile_for_now(self, *, side: str, entry_type: str) -> dict[str, Any] | None:
+        if not self._hourly_profiles_cache:
+            return None
+        hour_vn = int(datetime.now(self._vn_tz).hour)
+        side_key = str(side or "ALL").upper()
+        entry_scope = f"ENTRY:{str(entry_type or 'UNKNOWN').upper()}"
+        candidates: list[tuple[str, str]] = [
+            (entry_scope, side_key),
+            (entry_scope, "ALL"),
+            ("ALL", side_key),
+            ("ALL", "ALL"),
+        ]
+        for scope, key in candidates:
+            chosen = self._hourly_profiles_cache.get(scope, {}).get(key, {}).get(hour_vn)
+            if chosen is not None:
+                return chosen
+        return None
+
+    def _evaluate_hourly_bad_window_guard(
+        self,
+        *,
+        side: str,
+        entry_type: str,
+        base_min_win: float,
+        btc_guard: dict[str, Any],
+    ) -> tuple[bool, float]:
+        required_min_win = max(0.0, min(1.0, float(base_min_win)))
+        if not self.hourly_bad_window_enabled:
+            return True, required_min_win
+
+        profile = self._find_hourly_profile_for_now(side=side, entry_type=entry_type)
+        if not profile:
+            return True, required_min_win
+
+        total_orders = int(profile.get("total_orders") or 0)
+        if total_orders < self.hourly_bad_window_min_samples:
+            return True, required_min_win
+
+        wins = int(profile.get("wins") or 0)
+        losses = int(profile.get("losses") or 0)
+        win_rate_pct = float(profile.get("win_rate_pct") or 0.0)
+        net_pnl = float(profile.get("net_pnl") or 0.0)
+
+        block_bad_window = (
+            win_rate_pct <= self.hourly_bad_window_block_win_rate_pct
+            or (losses > wins and net_pnl < 0.0)
+        )
+        strict_bad_window = (
+            (not block_bad_window)
+            and (win_rate_pct <= self.hourly_bad_window_strict_win_rate_pct or net_pnl < 0.0)
+        )
+
+        trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+        trend_confidence = float((btc_guard or {}).get("confidence") or 0.0)
+        side_key = str(side or "").upper()
+        countertrend = (
+            trend_side in {"LONG", "SHORT"}
+            and side_key in {"LONG", "SHORT"}
+            and side_key != trend_side
+            and trend_confidence >= self.btc_filter_min_confidence
+        )
+        if self.hourly_bad_window_countertrend_hard_block and countertrend and strict_bad_window:
+            block_bad_window = True
+            strict_bad_window = False
+
+        if strict_bad_window:
+            required_min_win = min(0.99, required_min_win + self.hourly_bad_window_strict_min_win_bonus)
+        if block_bad_window:
+            return False, required_min_win
+        return True, required_min_win
 
     def _handle_opposite_signal_on_touch(
         self,
