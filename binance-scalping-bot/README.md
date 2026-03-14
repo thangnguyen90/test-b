@@ -292,6 +292,16 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/backend_service.sh restart-force
 ```
 
+Quy ước tránh conflict khi đổi máy:
+- Không xóa dòng `MYSQL_USER` của máy còn lại.
+- Luôn giữ 2 dòng và chỉ comment/uncomment:
+  - macOS:
+    - `MYSQL_USER=root`
+    - `# MYSQL_USER=navicat`
+  - Windows/Linux:
+    - `MYSQL_USER=navicat`
+    - `# MYSQL_USER=root`
+
 - `PAPER_TRADE_ORDER_USDT` là giá trị lệnh theo USDT (notional, chưa tính margin).
 - Nếu không truyền `quantity` khi mở lệnh, backend sẽ tự tính `quantity = PAPER_TRADE_ORDER_USDT / entry_price`.
 - `PAPER_TRADE_MARGIN_USDT` là margin dùng để tính PnL% (ROI margin).  
