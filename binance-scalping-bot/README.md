@@ -275,6 +275,13 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/sync_env_variants.sh
 ```
 
+Linux/WSL (source ở `/home/thangnguyen/...`):
+
+```bash
+cd /home/thangnguyen/project/test-b/binance-scalping-bot
+./scripts/sync_env_variants.sh
+```
+
 Đổi nhanh môi trường đang chạy:
 
 ```bash
@@ -285,10 +292,27 @@ cp /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.mac.env /Users/thang/
 cp /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.window.env /Users/thang/Desktop/TEST/binance-scalping-bot/backend/.env
 ```
 
+Linux/WSL:
+
+```bash
+# Dùng cấu hình macOS
+cp /home/thangnguyen/project/test-b/binance-scalping-bot/backend/.mac.env /home/thangnguyen/project/test-b/binance-scalping-bot/backend/.env
+
+# Dùng cấu hình Windows/Linux
+cp /home/thangnguyen/project/test-b/binance-scalping-bot/backend/.window.env /home/thangnguyen/project/test-b/binance-scalping-bot/backend/.env
+```
+
 Sau khi copy env, restart backend:
 
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot
+./scripts/backend_service.sh restart-force
+```
+
+Linux/WSL:
+
+```bash
+cd /home/thangnguyen/project/test-b/binance-scalping-bot
 ./scripts/backend_service.sh restart-force
 ```
 
