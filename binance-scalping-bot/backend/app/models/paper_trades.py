@@ -28,6 +28,7 @@ class PaperTrade(BaseModel):
     close_reason: Optional[str] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
+    commission_usdt: Optional[float] = None
     mae_pct: Optional[float] = None
     mfe_pct: Optional[float] = None
     margin_usdt: Optional[float] = None

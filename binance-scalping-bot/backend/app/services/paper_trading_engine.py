@@ -94,6 +94,8 @@ class PaperTradingEngine:
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
         test_ml_max_orders_per_cycle: int = 2,
+        fee_taker_pct: float = 0.0005,
+        fee_maker_pct: float = 0.0002,
     ) -> None:
         self.repo = repo
         self.predictor = predictor
@@ -169,6 +171,9 @@ class PaperTradingEngine:
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
         self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
+        # Binance Futures fee rates (per-side). Default: taker=0.05%, maker=0.02%.
+        self.fee_taker_pct = max(0.0, float(fee_taker_pct))
+        self.fee_maker_pct = max(0.0, float(fee_maker_pct))
         self._task: asyncio.Task | None = None
         self._running = False
         self._vn_tz = timezone(timedelta(hours=7))
@@ -660,12 +665,15 @@ class PaperTradingEngine:
                     pnl=pnl,
                     btc_guard=btc_guard,
                 ):
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=1,
                         close_reason="BTC_REVERSAL_PROFIT_EXIT",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -676,12 +684,15 @@ class PaperTradingEngine:
                     pnl=pnl,
                     btc_guard=btc_guard,
                 ):
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=1,
                         close_reason="BTC_TREND_PROFIT_LOCK",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -692,12 +703,15 @@ class PaperTradingEngine:
                     pnl=pnl,
                     btc_guard=btc_guard,
                 ):
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=1,
                         close_reason="BTC_TREND_COUNTER_EXIT",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -707,12 +721,15 @@ class PaperTradingEngine:
                     sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
                 if sl_hit:
                     close_reason = 1 if pnl >= 0 else 0
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=close_reason,
                         close_reason="SL",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -720,12 +737,15 @@ class PaperTradingEngine:
                 tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
                 if tp_hit:
                     close_reason = 1 if pnl >= 0 else 0
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=close_reason,
                         close_reason="TP",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -735,12 +755,15 @@ class PaperTradingEngine:
 
                 if pnl > 0:
                     close_reason = 1
+                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                    net_pnl = pnl - commission
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
-                        pnl=pnl,
+                        pnl=net_pnl,
                         result=close_reason,
                         close_reason="TIMEOUT_PROFIT",
+                        commission_usdt=commission,
                     )
                     continue
 
@@ -754,12 +777,15 @@ class PaperTradingEngine:
 
                 close_reason = 1 if pnl >= 0 else 0
 
+                commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                net_pnl = pnl - commission
                 self.repo.close_trade(
                     trade_id=int(trade["id"]),
                     close_price=price,
-                    pnl=pnl,
+                    pnl=net_pnl,
                     result=close_reason,
                     close_reason="TIMEOUT_BREAKEVEN",
+                    commission_usdt=commission,
                 )
             except Exception as exc:
                 trade_id = trade.get("id")
@@ -846,16 +872,20 @@ class PaperTradingEngine:
             pnl = self._calc_pnl(side=side, entry=entry, close_price=float(market_price), quantity=qty)
             if pnl <= 0:
                 return False
-            close_items.append((trade_id, float(pnl)))
+            entry_type = str(row.get("entry_type") or "LIMIT")
+            commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+            close_items.append((trade_id, float(pnl), commission))
 
-        for trade_id, pnl in close_items:
+        for trade_id, pnl, commission in close_items:
             try:
+                net_pnl = pnl - commission
                 self.repo.close_trade(
                     trade_id=trade_id,
                     close_price=float(market_price),
-                    pnl=float(pnl),
+                    pnl=net_pnl,
                     result=1,
                     close_reason="OPPOSITE_SIGNAL_FLIP",
+                    commission_usdt=commission,
                 )
                 closed_trade_ids.add(trade_id)
             except Exception:
@@ -1482,6 +1512,21 @@ class PaperTradingEngine:
         if side == "LONG":
             return (close_price - entry) * quantity
         return (entry - close_price) * quantity
+
+    @staticmethod
+    def _calc_fee(
+        entry: float,
+        quantity: float,
+        entry_type: str,
+        fee_taker: float,
+        fee_maker: float,
+    ) -> float:
+        """Return total commission for both legs (entry + exit) in USDT.
+        MARKET order → taker rate, LIMIT order → maker rate.
+        """
+        notional = entry * quantity
+        rate = fee_taker if str(entry_type).upper() == "MARKET" else fee_maker
+        return notional * rate * 2  # entry leg + exit leg
 
     @staticmethod
     def _calc_pnl_pct(side: str, entry: float, mark_price: float, leverage: int) -> float:

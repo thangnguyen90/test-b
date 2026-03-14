@@ -159,6 +159,7 @@ type PaperTrade = {
   close_reason?: string | null
   pnl?: number | null
   pnl_pct?: number | null
+  commission_usdt?: number | null
   mae_pct?: number | null
   mfe_pct?: number | null
   margin_usdt?: number | null
@@ -2634,6 +2635,7 @@ function App() {
                     <th>Zone Score</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_price')}>Close</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_reason')}>Close Reason</button></th>
+                    <th>Fee (USDT)</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('result')}>Result</button></th>
                   </tr>
                 </thead>
@@ -2705,6 +2707,11 @@ function App() {
                         <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
                         <td>{row.close_price ?? '-'}</td>
                         <td>{row.close_reason ?? '-'}</td>
+                        <td>
+                          {typeof row.commission_usdt === 'number' ? (
+                            <span className="pnl-neg">{`-${row.commission_usdt.toFixed(4)}`}</span>
+                          ) : '-'}
+                        </td>
                         <td>{row.result == null ? '-' : row.result === 1 ? 'WIN' : 'LOSS'}</td>
                       </tr>
                     )

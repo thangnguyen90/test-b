@@ -69,6 +69,7 @@ class MySQLTradeRepository:
                         feature_snapshot_json LONGTEXT NULL,
                         feature_captured_at DATETIME(6) NULL,
                         pnl DOUBLE NULL,
+                        commission_usdt DOUBLE NULL,
                         result TINYINT NULL,
                         created_at DATETIME(6) NOT NULL,
                         updated_at DATETIME(6) NOT NULL,
@@ -314,6 +315,19 @@ class MySQLTradeRepository:
                     cur.execute(
                         "ALTER TABLE ml_feedback ADD COLUMN pnl_pct DOUBLE NULL AFTER pnl"
                     )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='commission_usdt'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN commission_usdt DOUBLE NULL AFTER pnl"
+                    )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
@@ -406,6 +420,7 @@ class MySQLTradeRepository:
         pnl: float,
         result: int,
         close_reason: str | None = None,
+        commission_usdt: float | None = None,
     ) -> None:
         now = _now_vn()
         with self._conn() as conn:
@@ -413,10 +428,11 @@ class MySQLTradeRepository:
                 cur.execute(
                     """
                     UPDATE paper_trades
-                    SET status='CLOSED', closed_at=%s, close_price=%s, close_reason=%s, pnl=%s, result=%s, updated_at=%s
+                    SET status='CLOSED', closed_at=%s, close_price=%s, close_reason=%s,
+                        pnl=%s, commission_usdt=%s, result=%s, updated_at=%s
                     WHERE id=%s AND status='OPEN'
                     """,
-                    (now, close_price, close_reason, pnl, result, now, trade_id),
+                    (now, close_price, close_reason, pnl, commission_usdt, result, now, trade_id),
                 )
                 cur.execute(
                     "SELECT * FROM paper_trades WHERE id=%s LIMIT 1",

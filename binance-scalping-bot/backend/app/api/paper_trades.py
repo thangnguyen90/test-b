@@ -180,6 +180,7 @@ class PaperTradeAPI:
             close_reason=str(row["close_reason"]) if row.get("close_reason") is not None else None,
             pnl=pnl,
             pnl_pct=pnl_pct,
+            commission_usdt=float(row["commission_usdt"]) if row.get("commission_usdt") is not None else None,
             mae_pct=float(row["mae_pct"]) if row.get("mae_pct") is not None else None,
             mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
             margin_usdt=margin_usdt,
@@ -395,12 +396,21 @@ class PaperTradeAPI:
         )
         result = req.force_result if req.force_result is not None else (1 if pnl >= 0 else 0)
         manual_reason = "MANUAL_FORCE_LOSS" if req.force_result == 0 else "MANUAL_FORCE_WIN" if req.force_result == 1 else "MANUAL"
+        # Compute exchange fee, entry_type for manual closes is always 'MARKET' (instant close)
+        entry_type = str(row.get("entry_type") or "LIMIT")
+        fee_taker = float(settings.binance_fee_taker_pct) if hasattr(settings, "binance_fee_taker_pct") else 0.0005
+        fee_maker = float(settings.binance_fee_maker_pct) if hasattr(settings, "binance_fee_maker_pct") else 0.0002
+        notional = entry * qty
+        rate = fee_taker if entry_type.upper() == "MARKET" else fee_maker
+        commission = notional * rate * 2
+        net_pnl = pnl - commission
         repo.close_trade(
             trade_id=trade_id,
             close_price=close_price,
-            pnl=pnl,
+            pnl=net_pnl,
             result=int(result),
             close_reason=manual_reason,
+            commission_usdt=commission,
         )
 
         recent = repo.list_recent_trades(limit=200)
