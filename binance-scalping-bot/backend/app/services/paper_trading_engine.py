@@ -328,7 +328,8 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_for_pct = float(atr_value) if atr_value is not None else 0.0
+                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -340,7 +341,7 @@ class PaperTradingEngine:
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
                     ),
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=await self._resolve_symbol_atr(symbol),
+                    atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
                     min_rr=self.min_rr,
                     max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
@@ -454,7 +455,8 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_for_pct = float(atr_value) if atr_value is not None else 0.0
+                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
@@ -586,7 +588,8 @@ class PaperTradingEngine:
                     continue
 
                 atr_value = await self._resolve_symbol_atr(symbol)
-                atr_pct = (atr_value / float(entry)) * 100 if entry > 0 else 0.0
+                atr_for_pct = float(atr_value) if atr_value is not None else 0.0
+                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
