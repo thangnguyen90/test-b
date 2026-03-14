@@ -331,7 +331,7 @@ class MySQLTradeRepository:
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS trade_hourly_profiles (
-                        scope VARCHAR(32) NOT NULL,
+                        scope VARCHAR(96) NOT NULL,
                         side_key VARCHAR(10) NOT NULL,
                         hour_vn TINYINT UNSIGNED NOT NULL,
                         total_orders INT NOT NULL,
@@ -348,6 +348,17 @@ class MySQLTradeRepository:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
                     """
                 )
+                cur.execute(
+                    """
+                    SELECT CHARACTER_MAXIMUM_LENGTH AS max_len
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='trade_hourly_profiles' AND COLUMN_NAME='scope'
+                    """,
+                    (self.database,),
+                )
+                scope_len = int((cur.fetchone() or {}).get("max_len") or 0)
+                if 0 < scope_len < 96:
+                    cur.execute("ALTER TABLE trade_hourly_profiles MODIFY COLUMN scope VARCHAR(96) NOT NULL")
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
@@ -778,6 +789,7 @@ class MySQLTradeRepository:
                         f.side,
                         f.result,
                         p.entry_type,
+                        p.btc_following,
                         p.close_reason,
                         p.opened_at,
                         p.closed_at,
@@ -797,15 +809,109 @@ class MySQLTradeRepository:
                 return list(cur.fetchall())
 
     @staticmethod
-    def _coerce_hour_vn(value: object) -> int | None:
+    def _coerce_profile_datetime(value: object) -> datetime | None:
         if value is None:
             return None
         if isinstance(value, datetime):
-            return int(value.hour)
-        try:
-            return int(str(value)[11:13])
-        except Exception:
+            dt = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            normalized = text.replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(normalized)
+            except Exception:
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        dt = datetime.strptime(text, fmt)
+                        break
+                    except Exception:
+                        continue
+                else:
+                    return None
+        else:
             return None
+        if dt.tzinfo is not None:
+            return dt.astimezone(_VN_TZ).replace(tzinfo=None)
+        return dt
+
+    @classmethod
+    def _coerce_hour_vn(cls, value: object) -> int | None:
+        dt = cls._coerce_profile_datetime(value)
+        if dt is None:
+            return None
+        return int(dt.hour)
+
+    @classmethod
+    def _coerce_weekday_vn(cls, value: object) -> int | None:
+        dt = cls._coerce_profile_datetime(value)
+        if dt is None:
+            return None
+        # Monday=0 ... Sunday=6
+        return int(dt.weekday())
+
+    @staticmethod
+    def _coerce_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                return int(value) != 0
+            except Exception:
+                return None
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        return None
+
+    @staticmethod
+    def _expand_profile_scopes(base_scope: str, weekday_vn: int | None, trend_key: str) -> list[str]:
+        scopes: list[str] = [str(base_scope).upper()]
+        if weekday_vn is not None:
+            scopes.append(f"{base_scope}|DOW:{int(weekday_vn)}".upper())
+        trend = str(trend_key or "ALL").upper()
+        if trend in {"LONG", "SHORT", "NEUTRAL"}:
+            scopes.append(f"{base_scope}|TREND:{trend}".upper())
+            if weekday_vn is not None:
+                scopes.append(f"{base_scope}|DOW:{int(weekday_vn)}|TREND:{trend}".upper())
+        # Keep order stable but remove duplicates.
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in scopes:
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append(item)
+        return out
+
+    @classmethod
+    def _infer_trade_trend_key(
+        cls,
+        *,
+        symbol: str,
+        side: str,
+        pnl: float,
+        btc_following: object,
+    ) -> str:
+        follows = cls._coerce_bool(btc_following)
+        symbol_key = str(symbol or "").upper().replace(":USDT", "")
+        if follows is None and symbol_key.startswith("BTC/USDT"):
+            follows = True
+        if not follows:
+            return "NEUTRAL"
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return "NEUTRAL"
+        if abs(float(pnl)) <= 1e-12:
+            return "NEUTRAL"
+        if side_key == "LONG":
+            return "LONG" if pnl > 0 else "SHORT"
+        return "SHORT" if pnl > 0 else "LONG"
 
     def refresh_hourly_profiles(self, lookback_days: int = 60) -> int:
         safe_days = max(1, min(int(lookback_days), 3650))
@@ -841,7 +947,7 @@ class MySQLTradeRepository:
                 trade_time_col = "opened_at" if int((cur.fetchone() or {}).get("cnt") or 0) > 0 else "updated_at"
                 cur.execute(
                     f"""
-                    SELECT {trade_time_col} AS profile_time_at, side, entry_type, pnl
+                    SELECT {trade_time_col} AS profile_time_at, symbol, side, btc_following, entry_type, pnl
                     FROM paper_trades
                     WHERE status='CLOSED' AND pnl IS NOT NULL AND {trade_time_col} >= %s
                     """,
@@ -880,28 +986,44 @@ class MySQLTradeRepository:
 
                 for row in trade_rows:
                     hour_vn = self._coerce_hour_vn(row.get("profile_time_at"))
+                    weekday_vn = self._coerce_weekday_vn(row.get("profile_time_at"))
                     if hour_vn is None:
                         continue
                     pnl = float(row.get("pnl") or 0.0)
                     side_key = str(row.get("side") or "UNKNOWN").upper()
                     entry_scope = f"ENTRY:{str(row.get('entry_type') or 'UNKNOWN').upper()}"
+                    trend_key = self._infer_trade_trend_key(
+                        symbol=str(row.get("symbol") or ""),
+                        side=side_key,
+                        pnl=pnl,
+                        btc_following=row.get("btc_following"),
+                    )
 
-                    touch("ALL", "ALL", hour_vn, pnl)
-                    touch("ALL", side_key, hour_vn, pnl)
-                    touch(entry_scope, "ALL", hour_vn, pnl)
-                    touch(entry_scope, side_key, hour_vn, pnl)
+                    all_scopes = self._expand_profile_scopes("ALL", weekday_vn, trend_key)
+                    entry_scopes = self._expand_profile_scopes(entry_scope, weekday_vn, trend_key)
+                    for scope in all_scopes:
+                        touch(scope, "ALL", hour_vn, pnl)
+                        touch(scope, side_key, hour_vn, pnl)
+                    for scope in entry_scopes:
+                        touch(scope, "ALL", hour_vn, pnl)
+                        touch(scope, side_key, hour_vn, pnl)
 
                 for row in liq_rows:
                     hour_vn = self._coerce_hour_vn(row.get("profile_time_at"))
+                    weekday_vn = self._coerce_weekday_vn(row.get("profile_time_at"))
                     if hour_vn is None:
                         continue
                     pnl = float(row.get("pnl") or 0.0)
                     side_key = str(row.get("side") or "UNKNOWN").upper()
 
-                    touch("ALL", "ALL", hour_vn, pnl)
-                    touch("ALL", side_key, hour_vn, pnl)
-                    touch("LIQ_TABLE", "ALL", hour_vn, pnl)
-                    touch("LIQ_TABLE", side_key, hour_vn, pnl)
+                    all_scopes = self._expand_profile_scopes("ALL", weekday_vn, "ALL")
+                    liq_scopes = self._expand_profile_scopes("LIQ_TABLE", weekday_vn, "ALL")
+                    for scope in all_scopes:
+                        touch(scope, "ALL", hour_vn, pnl)
+                        touch(scope, side_key, hour_vn, pnl)
+                    for scope in liq_scopes:
+                        touch(scope, "ALL", hour_vn, pnl)
+                        touch(scope, side_key, hour_vn, pnl)
 
                 rows_to_upsert: list[tuple[Any, ...]] = []
                 for (scope, side_key, hour_vn), state in aggregates.items():

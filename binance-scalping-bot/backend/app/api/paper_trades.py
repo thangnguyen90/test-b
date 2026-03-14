@@ -292,18 +292,29 @@ class PaperTradeAPI:
         self,
         days: int = Query(default=settings.paper_trade_hourly_profile_lookback_days, ge=1, le=3650),
         scope: str = Query(default="ENTRY:LIMIT"),
+        weekday_vn: int | None = Query(default=None, ge=0, le=6),
+        trend_key: str = Query(default="ALL"),
         min_samples: int = Query(default=settings.paper_trade_hourly_bad_window_min_samples, ge=1, le=10000),
         block_win_rate_pct: float = Query(default=settings.paper_trade_hourly_bad_window_block_win_rate_pct, ge=0.0, le=100.0),
         strict_win_rate_pct: float = Query(default=settings.paper_trade_hourly_bad_window_strict_win_rate_pct, ge=0.0, le=100.0),
     ) -> PaperTradeHourlyWindowResponse:
         repo = self._require_repo()
         safe_scope = str(scope or "ENTRY:LIMIT").upper()
+        safe_trend = str(trend_key or "ALL").upper()
+        if safe_trend not in {"ALL", "LONG", "SHORT", "NEUTRAL"}:
+            safe_trend = "ALL"
+        scope_tokens: list[str] = [safe_scope]
+        if weekday_vn is not None:
+            scope_tokens.append(f"DOW:{int(weekday_vn)}")
+        if safe_trend != "ALL":
+            scope_tokens.append(f"TREND:{safe_trend}")
+        query_scope = "|".join(scope_tokens)
         safe_min_samples = max(1, int(min_samples))
         safe_block = float(block_win_rate_pct)
         safe_strict = max(safe_block, float(strict_win_rate_pct))
 
         repo.refresh_hourly_profiles(lookback_days=days)
-        rows = repo.list_hourly_profiles(scope=safe_scope)
+        rows = repo.list_hourly_profiles(scope=query_scope)
         by_side_hour: dict[str, dict[int, dict]] = {"ALL": {}, "LONG": {}, "SHORT": {}}
         for row in rows:
             side_key = str(row.get("side_key") or "ALL").upper()
@@ -356,6 +367,8 @@ class PaperTradeAPI:
             block_win_rate_pct=safe_block,
             strict_win_rate_pct=safe_strict,
             current_hour_vn=current_hour_vn,
+            weekday_vn=(int(weekday_vn) if weekday_vn is not None else None),
+            trend_key=safe_trend,
             items=items,
         )
 

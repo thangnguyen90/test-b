@@ -121,6 +121,8 @@ class PaperTradeHourlyWindowResponse(BaseModel):
     block_win_rate_pct: float
     strict_win_rate_pct: float
     current_hour_vn: int
+    weekday_vn: Optional[int] = None
+    trend_key: str = "ALL"
     items: list[PaperTradeHourlyWindow]
 
 

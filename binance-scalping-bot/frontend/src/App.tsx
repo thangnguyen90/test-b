@@ -246,6 +246,8 @@ type HourlyWindowResponse = {
   block_win_rate_pct: number
   strict_win_rate_pct: number
   current_hour_vn: number
+  weekday_vn?: number | null
+  trend_key?: 'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'
   items: HourlyWindowRow[]
 }
 
@@ -422,6 +424,24 @@ const VN_DATETIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
   second: '2-digit',
   hour12: false,
 })
+
+const WEEKDAY_FILTER_OPTIONS: Array<{ value: 'ALL' | number; label: string }> = [
+  { value: 'ALL', label: 'All Days' },
+  { value: 0, label: 'Mon (Thu 2)' },
+  { value: 1, label: 'Tue (Thu 3)' },
+  { value: 2, label: 'Wed (Thu 4)' },
+  { value: 3, label: 'Thu (Thu 5)' },
+  { value: 4, label: 'Fri (Thu 6)' },
+  { value: 5, label: 'Sat (Thu 7)' },
+  { value: 6, label: 'Sun (CN)' },
+]
+
+const TREND_FILTER_OPTIONS: Array<{ value: 'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'; label: string }> = [
+  { value: 'ALL', label: 'All Trends' },
+  { value: 'LONG', label: 'BTC LONG' },
+  { value: 'SHORT', label: 'BTC SHORT' },
+  { value: 'NEUTRAL', label: 'BTC NEUTRAL' },
+]
 
 const PALETTES: Palette[] = [
   {
@@ -610,6 +630,12 @@ function formatVnTimestamp(value?: string | null): string {
     parts.find((item) => item.type === type)?.value ?? ''
 
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
+}
+
+function formatWeekdayFilterLabel(value?: number | null): string {
+  if (typeof value !== 'number' || value < 0 || value > 6) return 'All Days'
+  const found = WEEKDAY_FILTER_OPTIONS.find((item) => item.value === value)
+  return found?.label ?? `DOW:${value}`
 }
 
 function formatCompactMoney(value?: number | null): string {
@@ -958,6 +984,8 @@ function App() {
   const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
   const [hourlyWindows, setHourlyWindows] = useState<HourlyWindowRow[]>([])
   const [hourlyWindowMeta, setHourlyWindowMeta] = useState<Omit<HourlyWindowResponse, 'items'> | null>(null)
+  const [hourlyWeekdayFilter, setHourlyWeekdayFilter] = useState<'ALL' | number>('ALL')
+  const [hourlyTrendFilter, setHourlyTrendFilter] = useState<'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'>('ALL')
   const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
   const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
@@ -1651,8 +1679,18 @@ function App() {
     setDailySummary(payload.items ?? [])
   }
 
-  async function fetchHourlyWindows() {
-    const response = await fetch(`${API_BASE}/api/v1/paper-trades/hourly-windows?scope=ENTRY:LIMIT`)
+  async function fetchHourlyWindows(
+    filters: {
+      weekday?: 'ALL' | number
+      trend?: 'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'
+    } = {},
+  ) {
+    const weekday = filters.weekday ?? hourlyWeekdayFilter
+    const trend = filters.trend ?? hourlyTrendFilter
+    const params = new URLSearchParams({ scope: 'ENTRY:LIMIT' })
+    if (weekday !== 'ALL') params.set('weekday_vn', String(weekday))
+    if (trend !== 'ALL') params.set('trend_key', trend)
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/hourly-windows?${params.toString()}`)
     if (!response.ok) throw new Error('Hourly windows API unavailable')
     const payload = await response.json() as HourlyWindowResponse
     setHourlyWindows(payload.items ?? [])
@@ -1662,6 +1700,8 @@ function App() {
       block_win_rate_pct: payload.block_win_rate_pct,
       strict_win_rate_pct: payload.strict_win_rate_pct,
       current_hour_vn: payload.current_hour_vn,
+      weekday_vn: payload.weekday_vn ?? null,
+      trend_key: payload.trend_key ?? 'ALL',
     })
   }
 
@@ -1971,7 +2011,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [showDailyScreen])
+  }, [showDailyScreen, hourlyWeekdayFilter, hourlyTrendFilter])
 
   useEffect(() => {
     setHistoryPage(1)
@@ -2815,12 +2855,68 @@ function App() {
             )}
           </div>
           <h3 className="section-title">Auto Bad-Hour Windows (Entry Time, VN)</h3>
+          <div className="daily-filter-row">
+            <select
+              value={String(hourlyWeekdayFilter)}
+              onChange={(e) => {
+                const raw = e.target.value
+                if (raw === 'ALL') {
+                  setHourlyWeekdayFilter('ALL')
+                  return
+                }
+                const parsed = Number.parseInt(raw, 10)
+                setHourlyWeekdayFilter(Number.isFinite(parsed) ? parsed : 'ALL')
+              }}
+              className="select-control"
+            >
+              {WEEKDAY_FILTER_OPTIONS.map((opt) => (
+                <option key={`weekday-${opt.value}`} value={String(opt.value)}>{opt.label}</option>
+              ))}
+            </select>
+            <select
+              value={hourlyTrendFilter}
+              onChange={(e) => {
+                const value = e.target.value as 'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'
+                setHourlyTrendFilter(value)
+              }}
+              className="select-control"
+            >
+              {TREND_FILTER_OPTIONS.map((opt) => (
+                <option key={`trend-${opt.value}`} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <div className="daily-filter-actions">
+              <button
+                type="button"
+                className="btn-secondary btn-inline"
+                onClick={() => {
+                  fetchHourlyWindows().catch(() => {
+                    // Keep previous hourly windows on manual refresh failure.
+                  })
+                }}
+              >
+                Search
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                onClick={() => {
+                  setHourlyWeekdayFilter('ALL')
+                  setHourlyTrendFilter('ALL')
+                }}
+              >
+                Reset
+              </button>
+            </div>
+          </div>
           <div className="stats-grid">
             <div className="stats-item"><strong>Lookback:</strong> {hourlyWindowMeta?.lookback_days ?? '-'} days</div>
             <div className="stats-item"><strong>Min Samples:</strong> {hourlyWindowMeta?.min_samples ?? '-'}</div>
             <div className="stats-item"><strong>Block Win Rate:</strong> {typeof hourlyWindowMeta?.block_win_rate_pct === 'number' ? `${hourlyWindowMeta.block_win_rate_pct.toFixed(1)}%` : '-'}</div>
             <div className="stats-item"><strong>Strict Win Rate:</strong> {typeof hourlyWindowMeta?.strict_win_rate_pct === 'number' ? `${hourlyWindowMeta.strict_win_rate_pct.toFixed(1)}%` : '-'}</div>
             <div className="stats-item"><strong>Current Hour:</strong> {typeof hourlyWindowMeta?.current_hour_vn === 'number' ? `${hourlyWindowMeta.current_hour_vn}:00` : '-'}</div>
+            <div className="stats-item"><strong>Day Filter:</strong> {formatWeekdayFilterLabel(hourlyWindowMeta?.weekday_vn ?? null)}</div>
+            <div className="stats-item"><strong>Trend Filter:</strong> {hourlyWindowMeta?.trend_key ?? 'ALL'}</div>
             <div className="stats-item"><strong>BTC Trend:</strong> {btcTrend?.items?.[0]?.trend ?? '-'}</div>
           </div>
           <div className="content table-wrap">

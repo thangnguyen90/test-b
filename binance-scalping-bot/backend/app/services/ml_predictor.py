@@ -705,21 +705,26 @@ class MLPredictor:
         if dt is None:
             return 1.0
         if dt.tzinfo is not None:
-            hour_vn = int(dt.astimezone(_VN_TZ).hour)
+            dt_vn = dt.astimezone(_VN_TZ)
         else:
-            hour_vn = int(dt.hour)
+            dt_vn = dt
+        hour_vn = int(dt_vn.hour)
+        weekday_vn = int(dt_vn.weekday())
 
         side_key = str(row.get("side") or "ALL").upper()
         entry_scope = f"ENTRY:{str(row.get('entry_type') or 'LIMIT').upper()}"
-        candidates: list[tuple[str, str]] = [
-            (entry_scope, side_key),
-            (entry_scope, "ALL"),
-            ("ALL", side_key),
-            ("ALL", "ALL"),
-        ]
+        trend_key = self._infer_feedback_trend_key(row=row)
+        scope_candidates = self._build_feedback_hourly_scope_candidates(
+            entry_scope=entry_scope,
+            weekday_vn=weekday_vn,
+            trend_key=trend_key,
+        )
         profile: dict[str, Any] | None = None
-        for scope, side in candidates:
-            profile = hourly_profile_map.get(scope, {}).get(side, {}).get(hour_vn)
+        for scope in scope_candidates:
+            for side in (side_key, "ALL"):
+                profile = hourly_profile_map.get(scope, {}).get(side, {}).get(hour_vn)
+                if profile:
+                    break
             if profile:
                 break
         if not profile:
@@ -737,6 +742,93 @@ class MLPredictor:
         else:
             multiplier = 1.0 - (edge * factor)
         return max(0.5, min(2.0, float(multiplier)))
+
+    @staticmethod
+    def _coerce_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                return int(value) != 0
+            except Exception:
+                return None
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        return None
+
+    @classmethod
+    def _infer_feedback_trend_key(cls, *, row: dict[str, Any]) -> str:
+        if not settings.ml_feedback_hourly_weight_use_btc_trend:
+            return "ALL"
+
+        symbol_key = str(row.get("symbol") or "").upper().replace(":USDT", "")
+        follows = cls._coerce_bool(row.get("btc_following"))
+        if follows is None and symbol_key.startswith("BTC/USDT"):
+            follows = True
+        if not follows:
+            return "NEUTRAL"
+
+        side_key = str(row.get("side") or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return "NEUTRAL"
+
+        pnl_value: float | None = None
+        try:
+            raw_pnl = row.get("pnl")
+            if raw_pnl is not None:
+                pnl_value = float(raw_pnl)
+        except Exception:
+            pnl_value = None
+        if pnl_value is None:
+            try:
+                result = int(row.get("result"))
+                pnl_value = 1.0 if result == 1 else -1.0
+            except Exception:
+                pnl_value = None
+        if pnl_value is None or abs(float(pnl_value)) <= 1e-12:
+            return "NEUTRAL"
+
+        if side_key == "LONG":
+            return "LONG" if pnl_value > 0 else "SHORT"
+        return "SHORT" if pnl_value > 0 else "LONG"
+
+    @staticmethod
+    def _build_feedback_hourly_scope_candidates(
+        *,
+        entry_scope: str,
+        weekday_vn: int,
+        trend_key: str,
+    ) -> list[str]:
+        day_enabled = bool(settings.ml_feedback_hourly_weight_use_weekday)
+        trend_enabled = bool(settings.ml_feedback_hourly_weight_use_btc_trend)
+        trend = str(trend_key or "ALL").upper()
+        if trend not in {"LONG", "SHORT", "NEUTRAL"}:
+            trend = "ALL"
+
+        candidates: list[str] = []
+        for base_scope in [entry_scope, "ALL"]:
+            if day_enabled and trend_enabled and trend in {"LONG", "SHORT", "NEUTRAL"}:
+                candidates.append(f"{base_scope}|DOW:{weekday_vn}|TREND:{trend}")
+            if day_enabled:
+                candidates.append(f"{base_scope}|DOW:{weekday_vn}")
+            if trend_enabled and trend in {"LONG", "SHORT", "NEUTRAL"}:
+                candidates.append(f"{base_scope}|TREND:{trend}")
+            candidates.append(base_scope)
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            scope = str(item or "").upper()
+            if not scope or scope in seen:
+                continue
+            seen.add(scope)
+            out.append(scope)
+        return out
 
     def _feedback_sample_weight(
         self,

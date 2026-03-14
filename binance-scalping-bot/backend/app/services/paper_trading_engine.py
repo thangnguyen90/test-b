@@ -102,6 +102,9 @@ class PaperTradingEngine:
         hourly_profile_prob_alpha: float = 0.25,
         hourly_profile_refresh_sec: int = 300,
         hourly_profile_lookback_days: int = 60,
+        hourly_profile_use_weekday: bool = True,
+        hourly_profile_use_btc_trend: bool = True,
+        hourly_profile_btc_trend_min_confidence: float = 0.55,
         hourly_bad_window_enabled: bool = True,
         hourly_bad_window_min_samples: int = 60,
         hourly_bad_window_block_win_rate_pct: float = 48.0,
@@ -193,6 +196,9 @@ class PaperTradingEngine:
         self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
         self.hourly_profile_refresh_sec = max(30, int(hourly_profile_refresh_sec))
         self.hourly_profile_lookback_days = max(1, min(3650, int(hourly_profile_lookback_days)))
+        self.hourly_profile_use_weekday = bool(hourly_profile_use_weekday)
+        self.hourly_profile_use_btc_trend = bool(hourly_profile_use_btc_trend)
+        self.hourly_profile_btc_trend_min_confidence = max(0.0, min(float(hourly_profile_btc_trend_min_confidence), 0.99))
         self.hourly_bad_window_enabled = bool(hourly_bad_window_enabled)
         self.hourly_bad_window_min_samples = max(10, int(hourly_bad_window_min_samples))
         self.hourly_bad_window_block_win_rate_pct = max(0.0, min(float(hourly_bad_window_block_win_rate_pct), 100.0))
@@ -322,6 +328,7 @@ class PaperTradingEngine:
                     effective_prob=effective_prob,
                     side=side,
                     entry_type="LIMIT",
+                    btc_guard=btc_guard,
                 )
                 can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
                     side=side,
@@ -448,6 +455,7 @@ class PaperTradingEngine:
                     effective_prob=raw_prob,
                     side=side,
                     entry_type="ML_TEST",
+                    btc_guard=btc_guard,
                 )
                 can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
                     side=side,
@@ -603,6 +611,7 @@ class PaperTradingEngine:
                     effective_prob=effective_prob,
                     side=side,
                     entry_type="LIQ_EMA99",
+                    btc_guard=btc_guard,
                 )
                 can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
                     side=side,
@@ -977,6 +986,7 @@ class PaperTradingEngine:
         effective_prob: float,
         side: str,
         entry_type: str,
+        btc_guard: dict[str, Any] | None = None,
     ) -> float:
         if not self.hourly_profile_enabled:
             return max(0.0, min(1.0, float(effective_prob)))
@@ -985,7 +995,7 @@ class PaperTradingEngine:
         if not self._hourly_profiles_cache:
             return max(0.0, min(1.0, float(effective_prob)))
 
-        chosen = self._find_hourly_profile_for_now(side=side, entry_type=entry_type)
+        chosen = self._find_hourly_profile_for_now(side=side, entry_type=entry_type, btc_guard=btc_guard)
         if not chosen:
             return max(0.0, min(1.0, float(effective_prob)))
 
@@ -998,22 +1008,79 @@ class PaperTradingEngine:
         adjusted = float(effective_prob) + edge * self.hourly_profile_prob_alpha
         return max(0.0, min(1.0, adjusted))
 
-    def _find_hourly_profile_for_now(self, *, side: str, entry_type: str) -> dict[str, Any] | None:
+    def _current_vn_hour_weekday(self) -> tuple[int, int]:
+        now = datetime.now(self._vn_tz)
+        return int(now.hour), int(now.weekday())
+
+    def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
+        if not self.hourly_profile_use_btc_trend:
+            return "ALL"
+        guard = btc_guard or {}
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        try:
+            confidence = float(guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if trend_side in {"LONG", "SHORT"} and confidence >= self.hourly_profile_btc_trend_min_confidence:
+            return trend_side
+        return "NEUTRAL"
+
+    def _build_hourly_profile_scope_candidates(
+        self,
+        *,
+        entry_type: str,
+        weekday_vn: int,
+        trend_key: str,
+    ) -> list[str]:
+        entry_scope = f"ENTRY:{str(entry_type or 'UNKNOWN').upper()}"
+        day_enabled = bool(self.hourly_profile_use_weekday)
+        trend_enabled = bool(self.hourly_profile_use_btc_trend)
+        trend = str(trend_key or "ALL").upper()
+        if trend not in {"LONG", "SHORT", "NEUTRAL"}:
+            trend = "ALL"
+
+        candidates: list[str] = []
+        for base_scope in [entry_scope, "ALL"]:
+            if day_enabled and trend_enabled and trend in {"LONG", "SHORT", "NEUTRAL"}:
+                candidates.append(f"{base_scope}|DOW:{weekday_vn}|TREND:{trend}")
+            if day_enabled:
+                candidates.append(f"{base_scope}|DOW:{weekday_vn}")
+            if trend_enabled and trend in {"LONG", "SHORT", "NEUTRAL"}:
+                candidates.append(f"{base_scope}|TREND:{trend}")
+            candidates.append(base_scope)
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            scope = str(item or "").upper()
+            if not scope or scope in seen:
+                continue
+            seen.add(scope)
+            out.append(scope)
+        return out
+
+    def _find_hourly_profile_for_now(
+        self,
+        *,
+        side: str,
+        entry_type: str,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         if not self._hourly_profiles_cache:
             return None
-        hour_vn = int(datetime.now(self._vn_tz).hour)
+        hour_vn, weekday_vn = self._current_vn_hour_weekday()
         side_key = str(side or "ALL").upper()
-        entry_scope = f"ENTRY:{str(entry_type or 'UNKNOWN').upper()}"
-        candidates: list[tuple[str, str]] = [
-            (entry_scope, side_key),
-            (entry_scope, "ALL"),
-            ("ALL", side_key),
-            ("ALL", "ALL"),
-        ]
-        for scope, key in candidates:
-            chosen = self._hourly_profiles_cache.get(scope, {}).get(key, {}).get(hour_vn)
-            if chosen is not None:
-                return chosen
+        trend_key = self._resolve_profile_trend_key(btc_guard)
+        scope_candidates = self._build_hourly_profile_scope_candidates(
+            entry_type=entry_type,
+            weekday_vn=weekday_vn,
+            trend_key=trend_key,
+        )
+        for scope in scope_candidates:
+            for key in (side_key, "ALL"):
+                chosen = self._hourly_profiles_cache.get(scope, {}).get(key, {}).get(hour_vn)
+                if chosen is not None:
+                    return chosen
         return None
 
     def _evaluate_hourly_bad_window_guard(
@@ -1028,7 +1095,7 @@ class PaperTradingEngine:
         if not self.hourly_bad_window_enabled:
             return True, required_min_win
 
-        profile = self._find_hourly_profile_for_now(side=side, entry_type=entry_type)
+        profile = self._find_hourly_profile_for_now(side=side, entry_type=entry_type, btc_guard=btc_guard)
         if not profile:
             return True, required_min_win
 

@@ -154,6 +154,11 @@ class Settings(BaseModel):
     paper_trade_hourly_profile_prob_alpha: float = float(os.getenv("PAPER_TRADE_HOURLY_PROFILE_PROB_ALPHA", "0.25"))
     paper_trade_hourly_profile_refresh_sec: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_REFRESH_SEC", "300"))
     paper_trade_hourly_profile_lookback_days: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_LOOKBACK_DAYS", "60"))
+    paper_trade_hourly_profile_use_weekday: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_USE_WEEKDAY", "true").lower() == "true"
+    paper_trade_hourly_profile_use_btc_trend: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_USE_BTC_TREND", "true").lower() == "true"
+    paper_trade_hourly_profile_btc_trend_min_confidence: float = float(
+        os.getenv("PAPER_TRADE_HOURLY_PROFILE_BTC_TREND_MIN_CONFIDENCE", "0.55")
+    )
     paper_trade_hourly_bad_window_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_ENABLED", "true").lower() == "true"
     paper_trade_hourly_bad_window_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_MIN_SAMPLES", "60"))
     paper_trade_hourly_bad_window_block_win_rate_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_BLOCK_WIN_RATE_PCT", "48"))
@@ -164,6 +169,8 @@ class Settings(BaseModel):
     ml_feedback_hourly_weight_enabled: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_ENABLED", "true").lower() == "true"
     ml_feedback_hourly_weight_min_samples: int = int(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_MIN_SAMPLES", "60"))
     ml_feedback_hourly_weight_factor: float = float(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_FACTOR", "1.0"))
+    ml_feedback_hourly_weight_use_weekday: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_USE_WEEKDAY", "true").lower() == "true"
+    ml_feedback_hourly_weight_use_btc_trend: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_USE_BTC_TREND", "true").lower() == "true"
 
     ml_feedback_mfe_missed_profit_enabled: bool = os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_ENABLED", "true").lower() == "true"
     ml_feedback_mfe_missed_profit_min_pct: float = float(os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_MIN_PCT", "5.0"))
