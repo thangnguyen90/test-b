@@ -179,5 +179,10 @@ class Settings(BaseModel):
     ml_feedback_mfe_instant_loss_enabled: bool = os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_ENABLED", "true").lower() == "true"
     ml_feedback_mfe_instant_loss_max_pct: float = float(os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_MAX_PCT", "0.5"))
     ml_feedback_mfe_instant_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_MFE_INSTANT_LOSS_WEIGHT_MULTIPLIER", "4.0"))
+    ml_feedback_severe_loss_penalty_enabled: bool = os.getenv("ML_FEEDBACK_SEVERE_LOSS_PENALTY_ENABLED", "true").lower() == "true"
+    ml_feedback_severe_loss_min_abs_pnl_pct: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_MIN_ABS_PNL_PCT", "18.0"))
+    ml_feedback_severe_loss_min_abs_mae_pct: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_MIN_ABS_MAE_PCT", "12.0"))
+    ml_feedback_severe_loss_max_mfe_pct: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_MAX_MFE_PCT", "1.0"))
+    ml_feedback_severe_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_WEIGHT_MULTIPLIER", "8.0"))
 
 settings = Settings()

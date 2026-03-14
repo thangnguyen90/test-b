@@ -74,6 +74,7 @@ class MLPredictor:
         self.last_feedback_good_boosted_samples: int = 0
         self.last_feedback_early_loss_penalized_samples: int = 0
         self.last_feedback_long_hold_bad_penalized_samples: int = 0
+        self.last_feedback_severe_loss_penalized_samples: int = 0
         self.train_log_path = BASE_DIR / ".runtime" / "ml_train.log"
         self.train_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._load_model_if_exists()
@@ -155,6 +156,7 @@ class MLPredictor:
                 feedback_good_boosted,
                 feedback_early_loss_penalized,
                 feedback_long_hold_bad_penalized,
+                feedback_severe_loss_penalized,
                 feedback_weights,
             ) = self._build_feedback_dataset(feedback_rows, hourly_profile_map=hourly_profile_map)
             self.last_feedback_penalized_samples = int(feedback_penalized)
@@ -162,6 +164,7 @@ class MLPredictor:
             self.last_feedback_good_boosted_samples = int(feedback_good_boosted)
             self.last_feedback_early_loss_penalized_samples = int(feedback_early_loss_penalized)
             self.last_feedback_long_hold_bad_penalized_samples = int(feedback_long_hold_bad_penalized)
+            self.last_feedback_severe_loss_penalized_samples = int(feedback_severe_loss_penalized)
             if not feedback_prepared.features.empty:
                 prepared = PreparedData(
                     features=pd.concat([prepared.features, feedback_prepared.features], ignore_index=True),
@@ -182,6 +185,7 @@ class MLPredictor:
                     "feedback_good_boosted_samples": int(feedback_good_boosted),
                     "feedback_early_loss_penalized_samples": int(feedback_early_loss_penalized),
                     "feedback_long_hold_bad_penalized_samples": int(feedback_long_hold_bad_penalized),
+                    "feedback_severe_loss_penalized_samples": int(feedback_severe_loss_penalized),
                 }
                 self._finish_train(
                     result="SKIPPED",
@@ -276,6 +280,7 @@ class MLPredictor:
                 "feedback_good_boosted_samples": int(feedback_good_boosted),
                 "feedback_early_loss_penalized_samples": int(feedback_early_loss_penalized),
                 "feedback_long_hold_bad_penalized_samples": int(feedback_long_hold_bad_penalized),
+                "feedback_severe_loss_penalized_samples": int(feedback_severe_loss_penalized),
                 "side_long_samples_raw": int(side_long_raw),
                 "side_short_samples_raw": int(side_short_raw),
                 "side_long_samples_used": int(side_long_used),
@@ -328,6 +333,7 @@ class MLPredictor:
             "last_feedback_good_boosted_samples": self.last_feedback_good_boosted_samples,
             "last_feedback_early_loss_penalized_samples": self.last_feedback_early_loss_penalized_samples,
             "last_feedback_long_hold_bad_penalized_samples": self.last_feedback_long_hold_bad_penalized_samples,
+            "last_feedback_severe_loss_penalized_samples": self.last_feedback_severe_loss_penalized_samples,
             "liquidation_features_enabled": self.use_liquidation_features,
             "preferred_feature_count": len(self.preferred_feature_columns),
             "train_log_path": str(self.train_log_path),
@@ -512,9 +518,9 @@ class MLPredictor:
         self,
         feedback_rows: list[dict],
         hourly_profile_map: dict[str, dict[str, dict[int, dict[str, Any]]]] | None = None,
-    ) -> tuple[PreparedData, int, int, int, int, int, list[float]]:
+    ) -> tuple[PreparedData, int, int, int, int, int, int, list[float]]:
         if not feedback_rows:
-            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, 0, 0, []
+            return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, 0, 0, 0, []
 
         feature_rows: list[pd.Series] = []
         labels: list[int] = []
@@ -524,6 +530,7 @@ class MLPredictor:
         good_boosted_count = 0
         early_loss_penalized_count = 0
         long_hold_bad_penalized_count = 0
+        severe_loss_penalized_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
         profiles = hourly_profile_map or {}
 
@@ -550,17 +557,17 @@ class MLPredictor:
             long_hold_bad = False
             missed_profit = False
             instant_loss = False
+            severe_loss = False
             hold_minutes = self._calc_hold_minutes(row.get("opened_at"), row.get("closed_at"))
             try:
                 pnl_pct_value = float(row.get("pnl_pct") or 0.0)
             except Exception:
                 pnl_pct_value = 0.0
+            try:
+                mae_value = float(row.get("mae_pct") or 0.0)
+            except Exception:
+                mae_value = 0.0
             if settings.ml_feedback_flip_win_on_deep_mae and label == 1:
-                mae_pct = row.get("mae_pct")
-                try:
-                    mae_value = float(mae_pct) if mae_pct is not None else 0.0
-                except Exception:
-                    mae_value = 0.0
                 if mae_value <= -abs(settings.ml_feedback_mae_penalty_pct):
                     label = 0
                     penalized_count += 1
@@ -580,10 +587,6 @@ class MLPredictor:
                     instant_loss = True
 
             if settings.ml_feedback_recovery_penalty_enabled and label == 1:
-                try:
-                    mae_value = float(row.get("mae_pct") or 0.0)
-                except Exception:
-                    mae_value = 0.0
                 if (
                     mae_value <= -abs(settings.ml_feedback_recovery_penalty_mae_pct)
                     and pnl_pct_value <= float(settings.ml_feedback_recovery_penalty_max_pnl_pct)
@@ -592,10 +595,6 @@ class MLPredictor:
                     recovery_penalized_count += 1
 
             if settings.ml_feedback_good_signal_boost_enabled and label == 1 and not deep_drawdown_recovery:
-                try:
-                    mae_value = float(row.get("mae_pct") or 0.0)
-                except Exception:
-                    mae_value = 0.0
                 if (
                     pnl_pct_value >= float(settings.ml_feedback_good_signal_min_pnl_pct)
                     and mae_value >= -abs(float(settings.ml_feedback_good_signal_max_mae_pct))
@@ -617,6 +616,17 @@ class MLPredictor:
                         label = 0
                     long_hold_bad = True
                     long_hold_bad_penalized_count += 1
+            if settings.ml_feedback_severe_loss_penalty_enabled and label == 0:
+                severe_loss_min_abs_pnl_pct = abs(float(settings.ml_feedback_severe_loss_min_abs_pnl_pct))
+                severe_loss_min_abs_mae_pct = abs(float(settings.ml_feedback_severe_loss_min_abs_mae_pct))
+                severe_loss_max_mfe_pct = float(settings.ml_feedback_severe_loss_max_mfe_pct)
+                if (
+                    pnl_pct_value <= -severe_loss_min_abs_pnl_pct
+                    and mae_value <= -severe_loss_min_abs_mae_pct
+                    and mfe_pct_value <= severe_loss_max_mfe_pct
+                ):
+                    severe_loss = True
+                    severe_loss_penalized_count += 1
 
             feature_snapshot = self._parse_feature_snapshot(row.get("feature_snapshot_json"))
             if feature_snapshot is None:
@@ -658,6 +668,7 @@ class MLPredictor:
                     long_hold_bad=long_hold_bad,
                     missed_profit=missed_profit,
                     instant_loss=instant_loss,
+                    severe_loss=severe_loss,
                     hourly_multiplier=hourly_multiplier,
                 )
             )
@@ -670,6 +681,7 @@ class MLPredictor:
                 good_boosted_count,
                 early_loss_penalized_count,
                 long_hold_bad_penalized_count,
+                severe_loss_penalized_count,
                 [],
             )
 
@@ -682,6 +694,7 @@ class MLPredictor:
             good_boosted_count,
             early_loss_penalized_count,
             long_hold_bad_penalized_count,
+            severe_loss_penalized_count,
             weights,
         )
 
@@ -840,6 +853,7 @@ class MLPredictor:
         long_hold_bad: bool = False,
         missed_profit: bool = False,
         instant_loss: bool = False,
+        severe_loss: bool = False,
         hourly_multiplier: float = 1.0,
     ) -> float:
         weight = 1.0
@@ -874,6 +888,9 @@ class MLPredictor:
         if instant_loss:
             instant_loss_penalty = max(1.0, float(settings.ml_feedback_mfe_instant_loss_weight_multiplier))
             weight *= instant_loss_penalty
+        if severe_loss:
+            severe_loss_penalty = max(1.0, float(settings.ml_feedback_severe_loss_weight_multiplier))
+            weight *= severe_loss_penalty
         weight *= max(0.25, min(float(hourly_multiplier), 4.0))
         return max(0.05, weight)
 
