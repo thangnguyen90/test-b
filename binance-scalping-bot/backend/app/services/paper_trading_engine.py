@@ -97,6 +97,11 @@ class PaperTradingEngine:
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
+        hourly_profile_enabled: bool = True,
+        hourly_profile_min_samples: int = 60,
+        hourly_profile_prob_alpha: float = 0.25,
+        hourly_profile_refresh_sec: int = 300,
+        hourly_profile_lookback_days: int = 60,
         fee_taker_pct: float = 0.0005,
         fee_maker_pct: float = 0.0002,
     ) -> None:
@@ -177,6 +182,11 @@ class PaperTradingEngine:
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
+        self.hourly_profile_enabled = bool(hourly_profile_enabled)
+        self.hourly_profile_min_samples = max(10, int(hourly_profile_min_samples))
+        self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
+        self.hourly_profile_refresh_sec = max(30, int(hourly_profile_refresh_sec))
+        self.hourly_profile_lookback_days = max(1, min(3650, int(hourly_profile_lookback_days)))
         # Binance Futures fee rates (per-side). Default: taker=0.05%, maker=0.02%.
         self.fee_taker_pct = max(0.0, float(fee_taker_pct))
         self.fee_maker_pct = max(0.0, float(fee_maker_pct))
@@ -191,6 +201,8 @@ class PaperTradingEngine:
         self._open_pause_reason: str | None = None
         self._btc_up_shock_long_block_until_ts: float = 0.0
         self._btc_down_shock_short_block_until_ts: float = 0.0
+        self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
+        self._hourly_profiles_refreshed_ts: float = 0.0
         self.high_volatility_threshold_pct = 2.0
         self.high_volatility_leverage = 3
 
@@ -220,6 +232,7 @@ class PaperTradingEngine:
             await asyncio.sleep(self.poll_interval_sec)
 
     async def _run_once(self) -> None:
+        await asyncio.to_thread(self._refresh_hourly_profiles_if_needed)
         signals: list[dict[str, Any]] = []
         try:
             snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
@@ -291,6 +304,11 @@ class PaperTradingEngine:
                 # Blend model signal with realized historical accuracy for this symbol.
                 hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
+                effective_prob = self._apply_hourly_profile_to_probability(
+                    effective_prob=effective_prob,
+                    side=side,
+                    entry_type="LIMIT",
+                )
                 if effective_prob < self.min_win_probability:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
@@ -403,6 +421,13 @@ class PaperTradingEngine:
                 if raw_prob < self.test_ml_min_win_probability:
                     continue
                 side = str(test_signal.side)
+                effective_prob = self._apply_hourly_profile_to_probability(
+                    effective_prob=raw_prob,
+                    side=side,
+                    entry_type="ML_TEST",
+                )
+                if effective_prob < self.test_ml_min_win_probability:
+                    continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="ML_TEST"):
@@ -417,7 +442,7 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
-                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=raw_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -474,7 +499,7 @@ class PaperTradingEngine:
                         "btc_following": btc_following,
                         "entry_type": "ML_TEST",
                         "signal_win_probability": raw_prob,
-                        "effective_win_probability": raw_prob,
+                        "effective_win_probability": effective_prob,
                         "entry_price": entry,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
@@ -542,6 +567,11 @@ class PaperTradingEngine:
 
                 hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
+                effective_prob = self._apply_hourly_profile_to_probability(
+                    effective_prob=effective_prob,
+                    side=side,
+                    entry_type="LIQ_EMA99",
+                )
                 if effective_prob < self.min_win_probability:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
@@ -886,6 +916,64 @@ class PaperTradingEngine:
         now = datetime.now(self._vn_tz).replace(tzinfo=None)
         elapsed = (now - last_update).total_seconds()
         return elapsed < float(cooldown_minutes * 60)
+
+    def _refresh_hourly_profiles_if_needed(self) -> None:
+        if not self.hourly_profile_enabled:
+            return
+        now_ts = time.time()
+        if (now_ts - self._hourly_profiles_refreshed_ts) < float(self.hourly_profile_refresh_sec):
+            return
+        self._hourly_profiles_refreshed_ts = now_ts
+        try:
+            self.repo.refresh_hourly_profiles(lookback_days=self.hourly_profile_lookback_days)
+            self._hourly_profiles_cache = self.repo.hourly_profile_map()
+        except Exception as exc:
+            print(f"[paper-engine] hourly profile refresh failed: {type(exc).__name__}: {exc}")
+
+    def _apply_hourly_profile_to_probability(
+        self,
+        *,
+        effective_prob: float,
+        side: str,
+        entry_type: str,
+    ) -> float:
+        if not self.hourly_profile_enabled:
+            return max(0.0, min(1.0, float(effective_prob)))
+        if self.hourly_profile_prob_alpha <= 0:
+            return max(0.0, min(1.0, float(effective_prob)))
+        if not self._hourly_profiles_cache:
+            return max(0.0, min(1.0, float(effective_prob)))
+
+        hour_vn = int(datetime.now(self._vn_tz).hour)
+        side_key = str(side or "ALL").upper()
+        entry_scope = f"ENTRY:{str(entry_type or 'UNKNOWN').upper()}"
+        candidates: list[tuple[str, str]] = [
+            (entry_scope, side_key),
+            (entry_scope, "ALL"),
+            ("ALL", side_key),
+            ("ALL", "ALL"),
+        ]
+
+        chosen: dict[str, Any] | None = None
+        for scope, key in candidates:
+            chosen = (
+                self._hourly_profiles_cache.get(scope, {})
+                .get(key, {})
+                .get(hour_vn)
+            )
+            if chosen is not None:
+                break
+        if not chosen:
+            return max(0.0, min(1.0, float(effective_prob)))
+
+        total_orders = int(chosen.get("total_orders") or 0)
+        if total_orders < self.hourly_profile_min_samples:
+            return max(0.0, min(1.0, float(effective_prob)))
+
+        win_rate_pct = float(chosen.get("win_rate_pct") or 0.0)
+        edge = (win_rate_pct / 100.0) - 0.5
+        adjusted = float(effective_prob) + edge * self.hourly_profile_prob_alpha
+        return max(0.0, min(1.0, adjusted))
 
     def _handle_opposite_signal_on_touch(
         self,

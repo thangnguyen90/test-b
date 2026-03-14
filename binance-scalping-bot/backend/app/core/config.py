@@ -149,6 +149,15 @@ class Settings(BaseModel):
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
+    paper_trade_hourly_profile_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_ENABLED", "true").lower() == "true"
+    paper_trade_hourly_profile_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_MIN_SAMPLES", "60"))
+    paper_trade_hourly_profile_prob_alpha: float = float(os.getenv("PAPER_TRADE_HOURLY_PROFILE_PROB_ALPHA", "0.25"))
+    paper_trade_hourly_profile_refresh_sec: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_REFRESH_SEC", "300"))
+    paper_trade_hourly_profile_lookback_days: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_LOOKBACK_DAYS", "60"))
+
+    ml_feedback_hourly_weight_enabled: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_ENABLED", "true").lower() == "true"
+    ml_feedback_hourly_weight_min_samples: int = int(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_MIN_SAMPLES", "60"))
+    ml_feedback_hourly_weight_factor: float = float(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_FACTOR", "1.0"))
 
     ml_feedback_mfe_missed_profit_enabled: bool = os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_ENABLED", "true").lower() == "true"
     ml_feedback_mfe_missed_profit_min_pct: float = float(os.getenv("ML_FEEDBACK_MFE_MISSED_PROFIT_MIN_PCT", "5.0"))

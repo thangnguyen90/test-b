@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from random import random
 from threading import Lock
+from typing import Any
 import json
 
 import joblib
@@ -23,6 +24,8 @@ from app.services.data_pipeline import (
     PreparedData,
 )
 from app.services.mysql_trade_repo import MySQLTradeRepository
+
+_VN_TZ = timezone(timedelta(hours=7))
 
 
 @dataclass
@@ -144,6 +147,7 @@ class MLPredictor:
             )
 
             feedback_rows = self._load_feedback_rows(limit=settings.ml_feedback_train_limit)
+            hourly_profile_map = self._load_hourly_profile_map()
             (
                 feedback_prepared,
                 feedback_penalized,
@@ -152,7 +156,7 @@ class MLPredictor:
                 feedback_early_loss_penalized,
                 feedback_long_hold_bad_penalized,
                 feedback_weights,
-            ) = self._build_feedback_dataset(feedback_rows)
+            ) = self._build_feedback_dataset(feedback_rows, hourly_profile_map=hourly_profile_map)
             self.last_feedback_penalized_samples = int(feedback_penalized)
             self.last_feedback_recovery_penalized_samples = int(feedback_recovery_penalized)
             self.last_feedback_good_boosted_samples = int(feedback_good_boosted)
@@ -488,7 +492,27 @@ class MLPredictor:
         except Exception:
             return []
 
-    def _build_feedback_dataset(self, feedback_rows: list[dict]) -> tuple[PreparedData, int, int, int, int, int, list[float]]:
+    def _load_hourly_profile_map(self) -> dict[str, dict[str, dict[int, dict[str, Any]]]]:
+        if not settings.mysql_enabled:
+            return {}
+        try:
+            repo = MySQLTradeRepository(
+                host=settings.mysql_host,
+                port=settings.mysql_port,
+                user=settings.mysql_user,
+                password=settings.mysql_password,
+                database=settings.mysql_database,
+            )
+            repo.refresh_hourly_profiles(lookback_days=settings.paper_trade_hourly_profile_lookback_days)
+            return repo.hourly_profile_map()
+        except Exception:
+            return {}
+
+    def _build_feedback_dataset(
+        self,
+        feedback_rows: list[dict],
+        hourly_profile_map: dict[str, dict[str, dict[int, dict[str, Any]]]] | None = None,
+    ) -> tuple[PreparedData, int, int, int, int, int, list[float]]:
         if not feedback_rows:
             return PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)), 0, 0, 0, 0, 0, []
 
@@ -500,9 +524,8 @@ class MLPredictor:
         good_boosted_count = 0
         early_loss_penalized_count = 0
         long_hold_bad_penalized_count = 0
-        missed_profit_count = 0
-        instant_loss_count = 0
         symbol_cache: dict[str, pd.Series | None] = {}
+        profiles = hourly_profile_map or {}
 
         for row in feedback_rows:
             symbol = str(row.get("symbol") or "")
@@ -551,12 +574,10 @@ class MLPredictor:
                 if mfe_pct_value >= float(settings.ml_feedback_mfe_missed_profit_min_pct):
                     label = 1
                     missed_profit = True
-                    missed_profit_count += 1
             
             if settings.ml_feedback_mfe_instant_loss_enabled and label == 0:
                 if mfe_pct_value <= float(settings.ml_feedback_mfe_instant_loss_max_pct):
                     instant_loss = True
-                    instant_loss_count += 1
 
             if settings.ml_feedback_recovery_penalty_enabled and label == 1:
                 try:
@@ -622,6 +643,11 @@ class MLPredictor:
                 continue
             feature_rows.append(sample)
             labels.append(label)
+            hourly_multiplier = self._resolve_hourly_weight_multiplier(
+                row=row,
+                label=label,
+                hourly_profile_map=profiles,
+            )
             weights.append(
                 self._feedback_sample_weight(
                     row=row,
@@ -632,9 +658,11 @@ class MLPredictor:
                     long_hold_bad=long_hold_bad,
                     missed_profit=missed_profit,
                     instant_loss=instant_loss,
+                    hourly_multiplier=hourly_multiplier,
                 )
             )
 
+        if not feature_rows:
             return (
                 PreparedData(features=pd.DataFrame(columns=self.feature_columns), labels=pd.Series(dtype=int)),
                 penalized_count,
@@ -642,8 +670,6 @@ class MLPredictor:
                 good_boosted_count,
                 early_loss_penalized_count,
                 long_hold_bad_penalized_count,
-                missed_profit_count,
-                instant_loss_count,
                 [],
             )
 
@@ -656,10 +682,59 @@ class MLPredictor:
             good_boosted_count,
             early_loss_penalized_count,
             long_hold_bad_penalized_count,
-            missed_profit_count,
-            instant_loss_count,
             weights,
         )
+
+    def _resolve_hourly_weight_multiplier(
+        self,
+        *,
+        row: dict[str, Any],
+        label: int,
+        hourly_profile_map: dict[str, dict[str, dict[int, dict[str, Any]]]],
+    ) -> float:
+        if not settings.ml_feedback_hourly_weight_enabled:
+            return 1.0
+        if not hourly_profile_map:
+            return 1.0
+
+        dt = self._parse_datetime(row.get("created_at"))
+        if dt is None:
+            dt = self._parse_datetime(row.get("closed_at"))
+        if dt is None:
+            return 1.0
+        if dt.tzinfo is not None:
+            hour_vn = int(dt.astimezone(_VN_TZ).hour)
+        else:
+            hour_vn = int(dt.hour)
+
+        side_key = str(row.get("side") or "ALL").upper()
+        entry_scope = f"ENTRY:{str(row.get('entry_type') or 'LIMIT').upper()}"
+        candidates: list[tuple[str, str]] = [
+            (entry_scope, side_key),
+            (entry_scope, "ALL"),
+            ("ALL", side_key),
+            ("ALL", "ALL"),
+        ]
+        profile: dict[str, Any] | None = None
+        for scope, side in candidates:
+            profile = hourly_profile_map.get(scope, {}).get(side, {}).get(hour_vn)
+            if profile:
+                break
+        if not profile:
+            return 1.0
+
+        total_orders = int(profile.get("total_orders") or 0)
+        if total_orders < max(10, int(settings.ml_feedback_hourly_weight_min_samples)):
+            return 1.0
+
+        win_rate_pct = float(profile.get("win_rate_pct") or 0.0)
+        edge = (win_rate_pct / 100.0) - 0.5
+        factor = max(0.0, float(settings.ml_feedback_hourly_weight_factor))
+        if label == 1:
+            multiplier = 1.0 + (edge * factor)
+        else:
+            multiplier = 1.0 - (edge * factor)
+        return max(0.5, min(2.0, float(multiplier)))
 
     def _feedback_sample_weight(
         self,
@@ -671,6 +746,7 @@ class MLPredictor:
         long_hold_bad: bool = False,
         missed_profit: bool = False,
         instant_loss: bool = False,
+        hourly_multiplier: float = 1.0,
     ) -> float:
         weight = 1.0
         if settings.ml_feedback_use_pnl_weight:
@@ -704,6 +780,7 @@ class MLPredictor:
         if instant_loss:
             instant_loss_penalty = max(1.0, float(settings.ml_feedback_mfe_instant_loss_weight_multiplier))
             weight *= instant_loss_penalty
+        weight *= max(0.25, min(float(hourly_multiplier), 4.0))
         return max(0.05, weight)
 
     @staticmethod

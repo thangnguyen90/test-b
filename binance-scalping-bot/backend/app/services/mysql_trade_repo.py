@@ -328,6 +328,26 @@ class MySQLTradeRepository:
                     cur.execute(
                         "ALTER TABLE paper_trades ADD COLUMN commission_usdt DOUBLE NULL AFTER pnl"
                     )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS trade_hourly_profiles (
+                        scope VARCHAR(32) NOT NULL,
+                        side_key VARCHAR(10) NOT NULL,
+                        hour_vn TINYINT UNSIGNED NOT NULL,
+                        total_orders INT NOT NULL,
+                        wins INT NOT NULL,
+                        losses INT NOT NULL,
+                        breakeven INT NOT NULL,
+                        win_rate_pct DOUBLE NOT NULL,
+                        loss_rate_pct DOUBLE NOT NULL,
+                        net_pnl DOUBLE NOT NULL,
+                        avg_pnl DOUBLE NOT NULL,
+                        updated_at DATETIME(6) NOT NULL,
+                        PRIMARY KEY (scope, side_key, hour_vn),
+                        INDEX idx_hour_scope (hour_vn, scope, side_key)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                    """
+                )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
@@ -757,6 +777,7 @@ class MySQLTradeRepository:
                         f.symbol,
                         f.side,
                         f.result,
+                        p.entry_type,
                         p.close_reason,
                         p.opened_at,
                         p.closed_at,
@@ -774,6 +795,201 @@ class MySQLTradeRepository:
                     """
                 )
                 return list(cur.fetchall())
+
+    @staticmethod
+    def _coerce_hour_vn(value: object) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return int(value.hour)
+        try:
+            return int(str(value)[11:13])
+        except Exception:
+            return None
+
+    def refresh_hourly_profiles(self, lookback_days: int = 60) -> int:
+        safe_days = max(1, min(int(lookback_days), 3650))
+        from_dt = _now_vn() - timedelta(days=safe_days)
+        now = _now_vn()
+        aggregates: dict[tuple[str, str, int], dict[str, float]] = {}
+
+        def touch(scope: str, side_key: str, hour_vn: int, pnl: float) -> None:
+            key = (scope, side_key, hour_vn)
+            state = aggregates.get(key)
+            if state is None:
+                state = {"total": 0.0, "wins": 0.0, "losses": 0.0, "breakeven": 0.0, "net_pnl": 0.0}
+                aggregates[key] = state
+            state["total"] += 1.0
+            state["net_pnl"] += float(pnl)
+            if pnl > 0:
+                state["wins"] += 1.0
+            elif pnl < 0:
+                state["losses"] += 1.0
+            else:
+                state["breakeven"] += 1.0
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT updated_at, side, entry_type, pnl
+                    FROM paper_trades
+                    WHERE status='CLOSED' AND pnl IS NOT NULL AND updated_at >= %s
+                    """,
+                    (from_dt,),
+                )
+                trade_rows = cur.fetchall() or []
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades_liq'
+                    """,
+                    (self.database,),
+                )
+                liq_exists = int((cur.fetchone() or {}).get("cnt") or 0) > 0
+                liq_rows: list[dict[str, Any]] = []
+                if liq_exists:
+                    cur.execute(
+                        """
+                        SELECT updated_at, side, pnl
+                        FROM paper_trades_liq
+                        WHERE status='CLOSED' AND pnl IS NOT NULL AND updated_at >= %s
+                        """,
+                        (from_dt,),
+                    )
+                    liq_rows = cur.fetchall() or []
+
+                for row in trade_rows:
+                    hour_vn = self._coerce_hour_vn(row.get("updated_at"))
+                    if hour_vn is None:
+                        continue
+                    pnl = float(row.get("pnl") or 0.0)
+                    side_key = str(row.get("side") or "UNKNOWN").upper()
+                    entry_scope = f"ENTRY:{str(row.get('entry_type') or 'UNKNOWN').upper()}"
+
+                    touch("ALL", "ALL", hour_vn, pnl)
+                    touch("ALL", side_key, hour_vn, pnl)
+                    touch(entry_scope, "ALL", hour_vn, pnl)
+                    touch(entry_scope, side_key, hour_vn, pnl)
+
+                for row in liq_rows:
+                    hour_vn = self._coerce_hour_vn(row.get("updated_at"))
+                    if hour_vn is None:
+                        continue
+                    pnl = float(row.get("pnl") or 0.0)
+                    side_key = str(row.get("side") or "UNKNOWN").upper()
+
+                    touch("ALL", "ALL", hour_vn, pnl)
+                    touch("ALL", side_key, hour_vn, pnl)
+                    touch("LIQ_TABLE", "ALL", hour_vn, pnl)
+                    touch("LIQ_TABLE", side_key, hour_vn, pnl)
+
+                rows_to_upsert: list[tuple[Any, ...]] = []
+                for (scope, side_key, hour_vn), state in aggregates.items():
+                    total = int(state["total"])
+                    wins = int(state["wins"])
+                    losses = int(state["losses"])
+                    breakeven = int(state["breakeven"])
+                    net_pnl = float(state["net_pnl"])
+                    avg_pnl = net_pnl / total if total > 0 else 0.0
+                    win_rate_pct = (wins / total) * 100.0 if total > 0 else 0.0
+                    loss_rate_pct = (losses / total) * 100.0 if total > 0 else 0.0
+                    rows_to_upsert.append(
+                        (
+                            scope,
+                            side_key,
+                            int(hour_vn),
+                            total,
+                            wins,
+                            losses,
+                            breakeven,
+                            win_rate_pct,
+                            loss_rate_pct,
+                            net_pnl,
+                            avg_pnl,
+                            now,
+                        )
+                    )
+
+                cur.execute("DELETE FROM trade_hourly_profiles")
+                if rows_to_upsert:
+                    cur.executemany(
+                        """
+                        INSERT INTO trade_hourly_profiles (
+                            scope, side_key, hour_vn, total_orders, wins, losses, breakeven,
+                            win_rate_pct, loss_rate_pct, net_pnl, avg_pnl, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        rows_to_upsert,
+                    )
+                return len(rows_to_upsert)
+
+    def list_hourly_profiles(self, scope: str | None = None, side_key: str | None = None) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if scope is not None and side_key is not None:
+                    cur.execute(
+                        """
+                        SELECT scope, side_key, hour_vn, total_orders, wins, losses, breakeven,
+                               win_rate_pct, loss_rate_pct, net_pnl, avg_pnl, updated_at
+                        FROM trade_hourly_profiles
+                        WHERE scope=%s AND side_key=%s
+                        ORDER BY hour_vn ASC
+                        """,
+                        (scope, side_key),
+                    )
+                elif scope is not None:
+                    cur.execute(
+                        """
+                        SELECT scope, side_key, hour_vn, total_orders, wins, losses, breakeven,
+                               win_rate_pct, loss_rate_pct, net_pnl, avg_pnl, updated_at
+                        FROM trade_hourly_profiles
+                        WHERE scope=%s
+                        ORDER BY side_key ASC, hour_vn ASC
+                        """,
+                        (scope,),
+                    )
+                elif side_key is not None:
+                    cur.execute(
+                        """
+                        SELECT scope, side_key, hour_vn, total_orders, wins, losses, breakeven,
+                               win_rate_pct, loss_rate_pct, net_pnl, avg_pnl, updated_at
+                        FROM trade_hourly_profiles
+                        WHERE side_key=%s
+                        ORDER BY scope ASC, hour_vn ASC
+                        """,
+                        (side_key,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT scope, side_key, hour_vn, total_orders, wins, losses, breakeven,
+                               win_rate_pct, loss_rate_pct, net_pnl, avg_pnl, updated_at
+                        FROM trade_hourly_profiles
+                        ORDER BY scope ASC, side_key ASC, hour_vn ASC
+                        """
+                    )
+                return list(cur.fetchall() or [])
+
+    def hourly_profile_map(self) -> dict[str, dict[str, dict[int, dict[str, Any]]]]:
+        rows = self.list_hourly_profiles()
+        out: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
+        for row in rows:
+            scope = str(row.get("scope") or "ALL")
+            side_key = str(row.get("side_key") or "ALL")
+            hour_vn = int(row.get("hour_vn") or 0)
+            out.setdefault(scope, {}).setdefault(side_key, {})[hour_vn] = {
+                "total_orders": int(row.get("total_orders") or 0),
+                "wins": int(row.get("wins") or 0),
+                "losses": int(row.get("losses") or 0),
+                "breakeven": int(row.get("breakeven") or 0),
+                "win_rate_pct": float(row.get("win_rate_pct") or 0.0),
+                "loss_rate_pct": float(row.get("loss_rate_pct") or 0.0),
+                "net_pnl": float(row.get("net_pnl") or 0.0),
+                "avg_pnl": float(row.get("avg_pnl") or 0.0),
+            }
+        return out
 
     def daily_summary(self, days: int = 30) -> list[dict[str, Any]]:
         safe_days = max(1, min(days, 365))

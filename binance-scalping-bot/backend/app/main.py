@@ -64,6 +64,10 @@ async def on_startup() -> None:
                 password=settings.mysql_password,
                 database=settings.mysql_database,
             )
+            try:
+                paper_trade_repo.refresh_hourly_profiles(lookback_days=settings.paper_trade_hourly_profile_lookback_days)
+            except Exception:
+                pass
             paper_trade_api.bind_repo(paper_trade_repo)
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
@@ -136,6 +140,11 @@ async def on_startup() -> None:
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
                 reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
                 reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,
+                hourly_profile_enabled=settings.paper_trade_hourly_profile_enabled,
+                hourly_profile_min_samples=settings.paper_trade_hourly_profile_min_samples,
+                hourly_profile_prob_alpha=settings.paper_trade_hourly_profile_prob_alpha,
+                hourly_profile_refresh_sec=settings.paper_trade_hourly_profile_refresh_sec,
+                hourly_profile_lookback_days=settings.paper_trade_hourly_profile_lookback_days,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
             paper_trade_api.bind_btc_follow_resolver(paper_trade_engine.is_symbol_following_btc)
