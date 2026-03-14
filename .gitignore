@@ -1,2 +1,12 @@
 binance-scalping-bot/backend/.runtime/backend.log
 .venv/
+
+# Python cache artifacts
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Runtime cache artifacts
+binance-scalping-bot/backend/.runtime/*.log
+binance-scalping-bot/backend/.runtime/*.pid

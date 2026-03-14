@@ -94,6 +94,9 @@ class PaperTradingEngine:
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
         test_ml_max_orders_per_cycle: int = 2,
+        single_position_per_symbol_side: bool = True,
+        reentry_cooldown_minutes: int = 0,
+        reentry_after_sl_cooldown_minutes: int = 30,
         fee_taker_pct: float = 0.0005,
         fee_maker_pct: float = 0.0002,
     ) -> None:
@@ -171,6 +174,9 @@ class PaperTradingEngine:
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
         self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
+        self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
+        self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
+        self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
         # Binance Futures fee rates (per-side). Default: taker=0.05%, maker=0.02%.
         self.fee_taker_pct = max(0.0, float(fee_taker_pct))
         self.fee_maker_pct = max(0.0, float(fee_maker_pct))
@@ -265,7 +271,9 @@ class PaperTradingEngine:
 
                 symbol = str(item.get("symbol"))
                 side = str(item.get("side"))
-                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+                if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+                    continue
+                if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
 
                 entry = float(item.get("predicted_entry_price") or 0.0)
@@ -395,7 +403,9 @@ class PaperTradingEngine:
                 if raw_prob < self.test_ml_min_win_probability:
                     continue
                 side = str(test_signal.side)
-                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
+                if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
+                    continue
+                if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
 
                 entry = float(test_signal.predicted_entry_price)
@@ -508,7 +518,9 @@ class PaperTradingEngine:
                 if raw_prob < self.liquid_min_win_probability:
                     continue
                 side = str(liq_signal.side)
-                if self.repo.has_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                    continue
+                if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
                     continue
 
                 entry = float(liq_signal.predicted_entry_price)
@@ -826,6 +838,54 @@ class PaperTradingEngine:
                 "quantity": float(quantity),
             }
         )
+
+    @staticmethod
+    def _parse_dt(value: object) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    def _has_conflicting_open_trade(self, *, symbol: str, side: str, entry_type: str) -> bool:
+        if self.single_position_per_symbol_side:
+            return self.repo.has_open_trade(symbol=symbol, side=side)
+        return self.repo.has_open_trade(symbol=symbol, side=side, entry_type=entry_type)
+
+    def _is_reentry_cooldown_active(self, *, symbol: str, side: str, entry_type: str) -> bool:
+        if self.reentry_cooldown_minutes <= 0 and self.reentry_after_sl_cooldown_minutes <= 0:
+            return False
+
+        latest = self.repo.latest_trade(
+            symbol=symbol,
+            side=side,
+            entry_type=None if self.single_position_per_symbol_side else entry_type,
+        )
+        if not latest:
+            return False
+
+        if str(latest.get("status") or "").upper() == "OPEN":
+            return True
+
+        last_update = self._parse_dt(latest.get("updated_at"))
+        if last_update is None:
+            last_update = self._parse_dt(latest.get("closed_at"))
+        if last_update is None:
+            return False
+
+        close_reason = str(latest.get("close_reason") or "").upper()
+        cooldown_minutes = self.reentry_cooldown_minutes
+        if close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
+            cooldown_minutes = max(cooldown_minutes, self.reentry_after_sl_cooldown_minutes)
+        if cooldown_minutes <= 0:
+            return False
+
+        now = datetime.now(self._vn_tz).replace(tzinfo=None)
+        elapsed = (now - last_update).total_seconds()
+        return elapsed < float(cooldown_minutes * 60)
 
     def _handle_opposite_signal_on_touch(
         self,

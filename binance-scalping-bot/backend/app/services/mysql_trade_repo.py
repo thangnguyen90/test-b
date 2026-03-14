@@ -405,6 +405,33 @@ class MySQLTradeRepository:
                 row = cur.fetchone()
                 return row is not None
 
+    def latest_trade(self, symbol: str, side: str, entry_type: str | None = None) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if entry_type:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, side, entry_type, status, close_reason, opened_at, closed_at, updated_at
+                        FROM paper_trades
+                        WHERE symbol=%s AND side=%s AND entry_type=%s
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (symbol, side, entry_type),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT id, symbol, side, entry_type, status, close_reason, opened_at, closed_at, updated_at
+                        FROM paper_trades
+                        WHERE symbol=%s AND side=%s
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (symbol, side),
+                    )
+                return cur.fetchone()
+
     def list_open_trades(self) -> list[dict[str, Any]]:
         with self._conn() as conn:
             with conn.cursor() as cur:

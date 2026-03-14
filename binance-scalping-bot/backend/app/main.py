@@ -133,6 +133,9 @@ async def on_startup() -> None:
                 test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
                 test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,
                 test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
+                single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
+                reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
+                reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
             paper_trade_api.bind_btc_follow_resolver(paper_trade_engine.is_symbol_following_btc)
