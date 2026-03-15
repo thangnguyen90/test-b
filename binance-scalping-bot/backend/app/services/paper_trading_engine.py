@@ -111,6 +111,12 @@ class PaperTradingEngine:
         hourly_bad_window_strict_win_rate_pct: float = 53.0,
         hourly_bad_window_strict_min_win_bonus: float = 0.04,
         hourly_bad_window_countertrend_hard_block: bool = True,
+        bullish_short_nonfollow_max_open_ratio: float = 0.25,
+        bullish_short_nonfollow_min_win_bonus: float = 0.05,
+        short_sl_streak_guard_enabled: bool = True,
+        short_sl_streak_threshold: int = 3,
+        short_sl_streak_cooldown_minutes: int = 45,
+        short_sl_streak_refresh_sec: int = 15,
         fee_taker_pct: float = 0.0005,
         fee_maker_pct: float = 0.0002,
     ) -> None:
@@ -207,6 +213,12 @@ class PaperTradingEngine:
             self.hourly_bad_window_strict_win_rate_pct = self.hourly_bad_window_block_win_rate_pct
         self.hourly_bad_window_strict_min_win_bonus = max(0.0, min(float(hourly_bad_window_strict_min_win_bonus), 0.25))
         self.hourly_bad_window_countertrend_hard_block = bool(hourly_bad_window_countertrend_hard_block)
+        self.bullish_short_nonfollow_max_open_ratio = max(0.0, min(float(bullish_short_nonfollow_max_open_ratio), 0.9))
+        self.bullish_short_nonfollow_min_win_bonus = max(0.0, min(float(bullish_short_nonfollow_min_win_bonus), 0.25))
+        self.short_sl_streak_guard_enabled = bool(short_sl_streak_guard_enabled)
+        self.short_sl_streak_threshold = max(1, int(short_sl_streak_threshold))
+        self.short_sl_streak_cooldown_minutes = max(1, int(short_sl_streak_cooldown_minutes))
+        self.short_sl_streak_refresh_sec = max(5, int(short_sl_streak_refresh_sec))
         # Binance Futures fee rates (per-side). Default: taker=0.05%, maker=0.02%.
         self.fee_taker_pct = max(0.0, float(fee_taker_pct))
         self.fee_maker_pct = max(0.0, float(fee_maker_pct))
@@ -223,6 +235,10 @@ class PaperTradingEngine:
         self._btc_down_shock_short_block_until_ts: float = 0.0
         self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
         self._hourly_profiles_refreshed_ts: float = 0.0
+        self._short_sl_pause_until_ts: float = 0.0
+        self._short_sl_streak_refreshed_ts: float = 0.0
+        self._short_sl_streak_count: int = 0
+        self._short_sl_last_processed_close_id: int = 0
         self.high_volatility_threshold_pct = 2.0
         self.high_volatility_leverage = 3
 
@@ -293,6 +309,7 @@ class PaperTradingEngine:
             market_prices.update(stream_prices)
         btc_guard = await asyncio.to_thread(self._resolve_btc_trend_guard)
         self._apply_btc_shock_pause(btc_guard)
+        await asyncio.to_thread(self._refresh_short_sl_streak_guard_if_needed)
         open_paused = self._is_open_paused()
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
@@ -338,7 +355,22 @@ class PaperTradingEngine:
                 )
                 if not can_open_now:
                     continue
+                required_min_win = self._apply_bullish_short_nonfollow_min_win_bonus(
+                    required_min_win=required_min_win,
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
+                    continue
+                if not self._pass_short_sl_streak_guard(side=side):
+                    continue
+                if not self._pass_bullish_short_nonfollow_ratio_guard(
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                ):
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -465,7 +497,22 @@ class PaperTradingEngine:
                 )
                 if not can_open_now:
                     continue
+                required_min_win = self._apply_bullish_short_nonfollow_min_win_bonus(
+                    required_min_win=required_min_win,
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
+                    continue
+                if not self._pass_short_sl_streak_guard(side=side):
+                    continue
+                if not self._pass_bullish_short_nonfollow_ratio_guard(
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                ):
                     continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
@@ -621,7 +668,22 @@ class PaperTradingEngine:
                 )
                 if not can_open_now:
                     continue
+                required_min_win = self._apply_bullish_short_nonfollow_min_win_bonus(
+                    required_min_win=required_min_win,
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
+                    continue
+                if not self._pass_short_sl_streak_guard(side=side):
+                    continue
+                if not self._pass_bullish_short_nonfollow_ratio_guard(
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                ):
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -966,6 +1028,137 @@ class PaperTradingEngine:
         now = datetime.now(self._vn_tz).replace(tzinfo=None)
         elapsed = (now - last_update).total_seconds()
         return elapsed < float(cooldown_minutes * 60)
+
+    @staticmethod
+    def _is_sl_close_reason(close_reason: str) -> bool:
+        reason = str(close_reason or "").upper()
+        return reason in {"SL", "MANUAL_FORCE_LOSS"}
+
+    def _is_btc_bullish_regime(self, btc_guard: dict[str, Any] | None) -> bool:
+        guard = btc_guard or {}
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        try:
+            confidence = float(guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        return trend_side == "LONG" and confidence >= self.btc_filter_min_confidence
+
+    @staticmethod
+    def _count_open_positions_by_side(
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+    ) -> tuple[int, int]:
+        total_open = 0
+        short_open = 0
+        for bucket in open_trades_by_symbol.values():
+            for row in bucket:
+                if str(row.get("status") or "OPEN").upper() != "OPEN":
+                    continue
+                total_open += 1
+                if str(row.get("side") or "").upper() == "SHORT":
+                    short_open += 1
+        return total_open, short_open
+
+    def _pass_bullish_short_nonfollow_ratio_guard(
+        self,
+        *,
+        side: str,
+        symbol: str,
+        btc_guard: dict[str, Any],
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return True
+        if not self._is_btc_bullish_regime(btc_guard):
+            return True
+        if self._is_symbol_following_btc(symbol):
+            return True
+
+        total_open, short_open = self._count_open_positions_by_side(open_trades_by_symbol)
+        projected_short_ratio = (short_open + 1) / max(1, total_open + 1)
+        return projected_short_ratio <= self.bullish_short_nonfollow_max_open_ratio
+
+    def _apply_bullish_short_nonfollow_min_win_bonus(
+        self,
+        *,
+        required_min_win: float,
+        side: str,
+        symbol: str,
+        btc_guard: dict[str, Any],
+    ) -> float:
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return required_min_win
+        if not self._is_btc_bullish_regime(btc_guard):
+            return required_min_win
+        if self._is_symbol_following_btc(symbol):
+            return required_min_win
+        return min(0.99, float(required_min_win) + self.bullish_short_nonfollow_min_win_bonus)
+
+    def _refresh_short_sl_streak_guard_if_needed(self) -> None:
+        if not self.short_sl_streak_guard_enabled:
+            return
+        now_ts = time.time()
+        if (now_ts - self._short_sl_streak_refreshed_ts) < float(self.short_sl_streak_refresh_sec):
+            return
+        self._short_sl_streak_refreshed_ts = now_ts
+        try:
+            rows = self.repo.list_recent_closed_trades_by_side(side="SHORT", limit=120)
+            if not rows:
+                return
+
+            if self._short_sl_last_processed_close_id <= 0:
+                latest_id = int(rows[0].get("id") or 0)
+                streak = 0
+                for row in rows:
+                    if self._is_sl_close_reason(str(row.get("close_reason") or "")):
+                        streak += 1
+                    else:
+                        break
+                self._short_sl_streak_count = int(streak)
+                self._short_sl_last_processed_close_id = latest_id
+                if self._short_sl_streak_count >= self.short_sl_streak_threshold:
+                    self._short_sl_pause_until_ts = max(
+                        self._short_sl_pause_until_ts,
+                        now_ts + float(self.short_sl_streak_cooldown_minutes * 60),
+                    )
+                return
+
+            fresh_rows = [
+                row
+                for row in reversed(rows)
+                if int(row.get("id") or 0) > self._short_sl_last_processed_close_id
+            ]
+            for row in fresh_rows:
+                close_id = int(row.get("id") or 0)
+                if close_id <= 0:
+                    continue
+                if self._is_sl_close_reason(str(row.get("close_reason") or "")):
+                    self._short_sl_streak_count += 1
+                else:
+                    self._short_sl_streak_count = 0
+                self._short_sl_last_processed_close_id = max(self._short_sl_last_processed_close_id, close_id)
+                if self._short_sl_streak_count >= self.short_sl_streak_threshold:
+                    self._short_sl_pause_until_ts = max(
+                        self._short_sl_pause_until_ts,
+                        now_ts + float(self.short_sl_streak_cooldown_minutes * 60),
+                    )
+        except Exception as exc:
+            print(f"[paper-engine] short streak guard refresh failed: {type(exc).__name__}: {exc}")
+
+    def _pass_short_sl_streak_guard(self, *, side: str) -> bool:
+        if not self.short_sl_streak_guard_enabled:
+            return True
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return True
+        if self._short_sl_pause_until_ts <= 0:
+            return True
+        now_ts = time.time()
+        if now_ts >= self._short_sl_pause_until_ts:
+            self._short_sl_pause_until_ts = 0.0
+            return True
+        return False
 
     def _refresh_hourly_profiles_if_needed(self) -> None:
         if not (self.hourly_profile_enabled or self.hourly_bad_window_enabled):

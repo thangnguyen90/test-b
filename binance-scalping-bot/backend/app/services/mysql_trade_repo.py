@@ -606,6 +606,25 @@ class MySQLTradeRepository:
                 rows = list(cur.fetchall())
         return rows, total
 
+    def list_recent_closed_trades_by_side(self, side: str, limit: int = 80) -> list[dict[str, Any]]:
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return []
+        safe_limit = max(1, min(int(limit), 500))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, side, close_reason, updated_at
+                    FROM paper_trades
+                    WHERE status='CLOSED' AND side=%s
+                    ORDER BY id DESC
+                    LIMIT {safe_limit}
+                    """,
+                    (side_key,),
+                )
+                return list(cur.fetchall() or [])
+
     def stats(self) -> dict[str, Any]:
         with self._conn() as conn:
             with conn.cursor() as cur:

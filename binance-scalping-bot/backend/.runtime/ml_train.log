@@ -191,3 +191,26 @@
 {"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "too many values to unpack (expected 7)", "started_at": "2026-03-13T21:53:37.435661+00:00", "finished_at": "2026-03-13T21:53:39.760978+00:00", "duration_sec": 2.325, "payload": null}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-14T01:53:39.900143+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "too many values to unpack (expected 7)", "started_at": "2026-03-14T01:53:39.900143+00:00", "finished_at": "2026-03-14T01:53:41.162198+00:00", "duration_sec": 1.262, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T04:09:27.137793+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "too many values to unpack (expected 7, got 9)", "started_at": "2026-03-14T04:09:27.137793+00:00", "finished_at": "2026-03-14T04:09:28.920072+00:00", "duration_sec": 1.782, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T04:37:41.010821+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T04:37:41.010821+00:00", "finished_at": "2026-03-14T04:37:43.951284+00:00", "duration_sec": 2.94, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T04:40:18.225653+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T04:40:18.225653+00:00", "finished_at": "2026-03-14T04:40:20.754022+00:00", "duration_sec": 2.528, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T08:40:24.853230+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T08:40:24.853230+00:00", "finished_at": "2026-03-14T08:40:26.263371+00:00", "duration_sec": 1.41, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T08:45:05.696082+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T08:45:05.696082+00:00", "finished_at": "2026-03-14T08:45:08.742871+00:00", "duration_sec": 3.047, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T08:51:18.436497+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T08:51:18.436497+00:00", "finished_at": "2026-03-14T08:51:21.085569+00:00", "duration_sec": 2.649, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T09:07:46.033904+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "FINISH", "trigger": "auto", "result": "FAILED", "error": "[Errno 45] Operation not supported: '/home/thangnguyen'", "started_at": "2026-03-14T09:07:46.033904+00:00", "finished_at": "2026-03-14T09:07:49.062784+00:00", "duration_sec": 3.029, "payload": null}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T09:50:27.464308+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T09:52:11.380183+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T13:18:56.721516+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T14:00:08.463174+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T14:42:09.256862+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T18:42:26.058037+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-14T22:42:28.999417+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-15T02:42:31.376613+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-15T06:42:30.999955+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

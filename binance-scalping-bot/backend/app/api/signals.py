@@ -187,6 +187,41 @@ def _evaluate_paper_entry_gate(
             btc_following = None
 
         try:
+            required_min_win = float(min_win)
+            required_min_win = float(
+                engine._apply_bullish_short_nonfollow_min_win_bonus(
+                    required_min_win=required_min_win,
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                )
+            )
+            if effective_probability < required_min_win:
+                return False, f"EffectiveWin<{required_min_win * 100:.1f}%", effective_probability, btc_following
+        except Exception:
+            pass
+
+        try:
+            if not bool(engine._pass_short_sl_streak_guard(side=side)):
+                return False, "Short SL cooldown", effective_probability, btc_following
+        except Exception:
+            pass
+
+        try:
+            open_index = engine._index_open_trades_by_symbol(open_rows)
+            if not bool(
+                engine._pass_bullish_short_nonfollow_ratio_guard(
+                    side=side,
+                    symbol=symbol,
+                    btc_guard=btc_guard,
+                    open_trades_by_symbol=open_index,
+                )
+            ):
+                return False, "Short ratio guard", effective_probability, btc_following
+        except Exception:
+            pass
+
+        try:
             pass_btc_filter = bool(
                 engine._pass_btc_filter(
                     symbol=symbol,

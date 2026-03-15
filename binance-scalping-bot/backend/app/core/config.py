@@ -165,6 +165,18 @@ class Settings(BaseModel):
     paper_trade_hourly_bad_window_strict_win_rate_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_WIN_RATE_PCT", "53"))
     paper_trade_hourly_bad_window_strict_min_win_bonus: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_MIN_WIN_BONUS", "0.04"))
     paper_trade_hourly_bad_window_countertrend_hard_block: bool = os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_COUNTERTREND_HARD_BLOCK", "true").lower() == "true"
+    paper_trade_bullish_short_nonfollow_max_open_ratio: float = float(
+        os.getenv("PAPER_TRADE_BULLISH_SHORT_NONFOLLOW_MAX_OPEN_RATIO", "0.25")
+    )
+    paper_trade_bullish_short_nonfollow_min_win_bonus: float = float(
+        os.getenv("PAPER_TRADE_BULLISH_SHORT_NONFOLLOW_MIN_WIN_BONUS", "0.05")
+    )
+    paper_trade_short_sl_streak_guard_enabled: bool = os.getenv("PAPER_TRADE_SHORT_SL_STREAK_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_short_sl_streak_threshold: int = int(os.getenv("PAPER_TRADE_SHORT_SL_STREAK_THRESHOLD", "3"))
+    paper_trade_short_sl_streak_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_SHORT_SL_STREAK_COOLDOWN_MINUTES", "45")
+    )
+    paper_trade_short_sl_streak_refresh_sec: int = int(os.getenv("PAPER_TRADE_SHORT_SL_STREAK_REFRESH_SEC", "15"))
 
     ml_feedback_hourly_weight_enabled: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_ENABLED", "true").lower() == "true"
     ml_feedback_hourly_weight_min_samples: int = int(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_MIN_SAMPLES", "60"))
