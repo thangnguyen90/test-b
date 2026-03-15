@@ -235,6 +235,7 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true
 PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE=5
+PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN=20
 PAPER_TRADE_BTC_FILTER_ENABLED=true
 PAPER_TRADE_BTC_FILTER_TIMEFRAME=15m
 PAPER_TRADE_BTC_FILTER_CACHE_SEC=20
@@ -341,6 +342,8 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
 - `PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true` sẽ tự scale ngưỡng theo leverage thực tế của lệnh.  
 : ví dụ cấu hình `trigger=5`, `reference_leverage=5` thì lệnh 10x sẽ kích hoạt ở `10%` PnL margin.
+- `PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN` chặn cứng giờ mở lệnh theo giờ VN (không ảnh hưởng quản lý lệnh đang mở).  
+: hỗ trợ `20`, `20,21`, `20-22`, `22-2`.
 - `PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT` là ngưỡng sốc BTC theo `%` (dựa trên biến động close-to-close hoặc range nến).
 - `PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES` là thời gian khóa tối thiểu cho lệnh cùng chiều sau shock.
 - `PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES` khóa riêng lệnh `LONG` sau shock tăng mạnh của BTC.

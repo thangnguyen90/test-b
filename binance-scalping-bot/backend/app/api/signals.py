@@ -107,6 +107,12 @@ def _evaluate_paper_entry_gate(
                 return False, (pause_reason or "Open paused"), raw_win_probability, None
         except Exception:
             pass
+        try:
+            hard_block_reason = engine._entry_hard_block_reason()
+            if hard_block_reason:
+                return False, str(hard_block_reason), raw_win_probability, None
+        except Exception:
+            pass
 
         try:
             if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):

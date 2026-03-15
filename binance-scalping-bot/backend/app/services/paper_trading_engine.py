@@ -97,6 +97,7 @@ class PaperTradingEngine:
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
+        entry_hard_block_hours_vn: str = "20",
         hourly_profile_enabled: bool = True,
         hourly_profile_min_samples: int = 60,
         hourly_profile_prob_alpha: float = 0.25,
@@ -197,6 +198,8 @@ class PaperTradingEngine:
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
+        self.entry_hard_block_hours_vn = str(entry_hard_block_hours_vn or "").strip()
+        self._entry_hard_block_hours_set = self._parse_entry_hard_block_hours(self.entry_hard_block_hours_vn)
         self.hourly_profile_enabled = bool(hourly_profile_enabled)
         self.hourly_profile_min_samples = max(10, int(hourly_profile_min_samples))
         self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
@@ -311,9 +314,10 @@ class PaperTradingEngine:
         self._apply_btc_shock_pause(btc_guard)
         await asyncio.to_thread(self._refresh_short_sl_streak_guard_if_needed)
         open_paused = self._is_open_paused()
+        entry_hard_blocked = self._is_entry_hard_blocked_now()
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
-        if not open_paused:
+        if (not open_paused) and (not entry_hard_blocked):
             for item in signals:
                 raw_prob = float(item.get("win_probability") or 0.0)
                 if raw_prob < self.min_win_probability:
@@ -459,7 +463,7 @@ class PaperTradingEngine:
                 )
 
         # 1a) Optional test model: open separated ML_TEST orders for side-by-side comparison.
-        if (not open_paused) and self.test_ml_enabled and self.predictor_test is not None:
+        if (not open_paused) and (not entry_hard_blocked) and self.test_ml_enabled and self.predictor_test is not None:
             opened_test_orders = 0
             for symbol in test_symbols:
                 if opened_test_orders >= self.test_ml_max_orders_per_cycle:
@@ -609,7 +613,7 @@ class PaperTradingEngine:
                 opened_test_orders += 1
 
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
-        if (not open_paused) and self.liquid_enabled and self.liquid_predictor is not None:
+        if (not open_paused) and (not entry_hard_blocked) and self.liquid_enabled and self.liquid_predictor is not None:
             for symbol in top_vol_symbols:
                 market_price = market_prices.get(symbol)
                 if market_price is None:
@@ -1204,6 +1208,53 @@ class PaperTradingEngine:
     def _current_vn_hour_weekday(self) -> tuple[int, int]:
         now = datetime.now(self._vn_tz)
         return int(now.hour), int(now.weekday())
+
+    @staticmethod
+    def _parse_entry_hard_block_hours(raw: str) -> set[int]:
+        blocked: set[int] = set()
+        text = str(raw or "").strip()
+        if not text:
+            return blocked
+
+        for chunk in text.split(","):
+            token = str(chunk or "").strip()
+            if not token:
+                continue
+            if "-" in token:
+                start_text, end_text = token.split("-", 1)
+                try:
+                    start_hour = int(start_text.strip())
+                    end_hour = int(end_text.strip())
+                except Exception:
+                    continue
+                if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23):
+                    continue
+                if start_hour <= end_hour:
+                    blocked.update(range(start_hour, end_hour + 1))
+                else:
+                    blocked.update(range(start_hour, 24))
+                    blocked.update(range(0, end_hour + 1))
+                continue
+
+            try:
+                hour = int(token)
+            except Exception:
+                continue
+            if 0 <= hour <= 23:
+                blocked.add(hour)
+        return blocked
+
+    def _is_entry_hard_blocked_now(self) -> bool:
+        if not self._entry_hard_block_hours_set:
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return int(hour_vn) in self._entry_hard_block_hours_set
+
+    def _entry_hard_block_reason(self) -> str | None:
+        if not self._is_entry_hard_blocked_now():
+            return None
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return f"Hard block hour VN ({hour_vn:02d}h)"
 
     def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
         if not self.hourly_profile_use_btc_trend:

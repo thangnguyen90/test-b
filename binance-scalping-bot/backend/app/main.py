@@ -140,6 +140,7 @@ async def on_startup() -> None:
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
                 reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
                 reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,
+                entry_hard_block_hours_vn=settings.paper_trade_entry_hard_block_hours_vn,
                 hourly_profile_enabled=settings.paper_trade_hourly_profile_enabled,
                 hourly_profile_min_samples=settings.paper_trade_hourly_profile_min_samples,
                 hourly_profile_prob_alpha=settings.paper_trade_hourly_profile_prob_alpha,
