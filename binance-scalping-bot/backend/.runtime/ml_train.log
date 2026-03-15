@@ -214,3 +214,6 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-14T22:42:28.999417+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-15T02:42:31.376613+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-15T06:42:30.999955+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-15T09:30:04.676908+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-15T10:45:31.001098+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-15T10:57:32.706811+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

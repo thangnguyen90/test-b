@@ -220,6 +220,7 @@ PAPER_TRADE_MAJOR_DYNAMIC_CANDLE_LOOKBACK=24
 PAPER_TRADE_MAJOR_LEVERAGE=10
 PAPER_TRADE_MAJOR_MAX_RISK_PCT=20
 PAPER_TRADE_POLL_INTERVAL_SEC=6
+PAPER_TRADE_ENTRY_REQUIRE_FRESH_STREAM_PRICE=true
 PAPER_TRADE_MIN_SL_PCT=0.008
 PAPER_TRADE_MIN_SL_LOSS_PCT=5
 PAPER_TRADE_SL_EXTRA_BUFFER_PCT=0.002
@@ -235,6 +236,15 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true
 PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE=5
+PAPER_TRADE_INSTANT_SL_GUARD_ENABLED=true
+PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES=25
+PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT=10
+PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_MAE_PCT=8
+PAPER_TRADE_INSTANT_SL_GUARD_COOLDOWN_MINUTES=90
+PAPER_TRADE_INSTANT_SL_GLOBAL_GUARD_ENABLED=true
+PAPER_TRADE_INSTANT_SL_GLOBAL_THRESHOLD=3
+PAPER_TRADE_INSTANT_SL_GLOBAL_WINDOW_MINUTES=20
+PAPER_TRADE_INSTANT_SL_GLOBAL_COOLDOWN_MINUTES=60
 PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN=20
 PAPER_TRADE_BTC_FILTER_ENABLED=true
 PAPER_TRADE_BTC_FILTER_TIMEFRAME=15m
@@ -242,6 +252,10 @@ PAPER_TRADE_BTC_FILTER_CACHE_SEC=20
 PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE=0.55
 PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND=true
 PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN=0.77
+PAPER_TRADE_BTC_TREND_HOUR_LOCK_ENABLED=true
+PAPER_TRADE_BTC_TREND_HOUR_LOCK_MIN_CONFIDENCE=0.60
+PAPER_TRADE_BTC_TREND_HOUR_LOCK_COUNTERTREND_HOURS=2
+PAPER_TRADE_BTC_TREND_HOUR_LOCK_APPLY_NON_BTC_FOLLOW=true
 PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED=true
 PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT=1.2
 PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES=30
@@ -334,6 +348,8 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_MAINT_MARGIN_RATE` dùng để ước tính `Signal Margin Ratio%` (kiểu Binance `Tỉ lệ ký quỹ`) với công thức xấp xỉ:  
 : `margin_ratio_pct ~= leverage * maint_margin_rate * 100`.
 - `PAPER_TRADE_QUANTITY` chỉ dùng fallback khi không tính được từ giá.
+- `PAPER_TRADE_ENTRY_REQUIRE_FRESH_STREAM_PRICE=true` chỉ cho mở lệnh mới khi có giá WS còn fresh.  
+: bật để tránh mở lệnh bằng giá REST fallback khi lệch sàn.
 - `PAPER_TRADE_MIN_SL_PCT` + `PAPER_TRADE_SL_EXTRA_BUFFER_PCT` giúp kéo SL xa hơn để tránh bị quét quá sớm.
 - `PAPER_TRADE_SL_ATR_MULTIPLIER` dùng ATR để đặt ngưỡng SL tối thiểu theo biến động (0 = tắt ATR).
 - `PAPER_TRADE_MAX_TP_PCT` giới hạn TP tối đa theo `% giá vào` (mặc định 15%).  
@@ -342,8 +358,18 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
 - `PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true` sẽ tự scale ngưỡng theo leverage thực tế của lệnh.  
 : ví dụ cấu hình `trigger=5`, `reference_leverage=5` thì lệnh 10x sẽ kích hoạt ở `10%` PnL margin.
+- `PAPER_TRADE_INSTANT_SL_GUARD_ENABLED` khóa tái vào lệnh `symbol+side` nếu vừa bị SL nhanh và sâu.
+- `PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES` xác định thế nào là "SL nhanh".
+- `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT` / `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_MAE_PCT` là ngưỡng phạt.
+- `PAPER_TRADE_INSTANT_SL_GUARD_COOLDOWN_MINUTES` là thời gian khóa `symbol+side` sau tín hiệu xấu.
+- `PAPER_TRADE_INSTANT_SL_GLOBAL_*` là tầng bảo vệ toàn cục: nếu SL nhanh/sâu dồn dập thì tạm dừng mở lệnh mới.
 - `PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN` chặn cứng giờ mở lệnh theo giờ VN (không ảnh hưởng quản lý lệnh đang mở).  
 : hỗ trợ `20`, `20,21`, `20-22`, `22-2`.
+- `PAPER_TRADE_BTC_TREND_HOUR_LOCK_ENABLED` bật/tắt khóa theo trend BTC trong một khoảng giờ cố định.
+- `PAPER_TRADE_BTC_TREND_HOUR_LOCK_COUNTERTREND_HOURS` là số giờ khóa chiều ngược trend.  
+: ví dụ BTC bullish thì khóa SHORT trong X giờ.
+- `PAPER_TRADE_BTC_TREND_HOUR_LOCK_MIN_CONFIDENCE` là ngưỡng confidence tối thiểu để bắt đầu khóa.
+- `PAPER_TRADE_BTC_TREND_HOUR_LOCK_APPLY_NON_BTC_FOLLOW=true` sẽ áp dụng khóa cả coin không follow BTC.
 - `PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT` là ngưỡng sốc BTC theo `%` (dựa trên biến động close-to-close hoặc range nến).
 - `PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES` là thời gian khóa tối thiểu cho lệnh cùng chiều sau shock.
 - `PAPER_TRADE_BTC_SHOCK_UP_LONG_BLOCK_MINUTES` khóa riêng lệnh `LONG` sau shock tăng mạnh của BTC.

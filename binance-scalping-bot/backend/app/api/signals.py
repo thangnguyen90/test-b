@@ -113,12 +113,23 @@ def _evaluate_paper_entry_gate(
                 return False, str(hard_block_reason), raw_win_probability, None
         except Exception:
             pass
+        try:
+            instant_sl_guard_reason = engine._instant_sl_guard_reason(symbol=symbol, side=side)
+            if instant_sl_guard_reason:
+                return False, str(instant_sl_guard_reason), raw_win_probability, None
+        except Exception:
+            pass
 
         try:
             if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
                 return False, "Duplicate", raw_win_probability, None
         except Exception:
             return False, "Repo unavailable", raw_win_probability, None
+        try:
+            if bool(engine._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT")):
+                return False, "Reentry cooldown", raw_win_probability, None
+        except Exception:
+            pass
 
         # Align precheck with engine flip rule:
         # opposite-direction open trades must be profitable before allowing a flip.
@@ -191,6 +202,17 @@ def _evaluate_paper_entry_gate(
             btc_following = bool(engine._is_symbol_following_btc(symbol))
         except Exception:
             btc_following = None
+
+        try:
+            trend_hour_lock_reason = engine._btc_trend_hour_lock_reason(
+                symbol=symbol,
+                side=side,
+                btc_guard=btc_guard,
+            )
+            if trend_hour_lock_reason:
+                return False, str(trend_hour_lock_reason), effective_probability, btc_following
+        except Exception:
+            pass
 
         try:
             required_min_win = float(min_win)

@@ -47,6 +47,7 @@ class PaperTradingEngine:
         major_symbol_max_risk_pct: float = 20.0,
         poll_interval_sec: float = 6.0,
         stream_max_stale_sec: float = 5.0,
+        entry_require_fresh_stream_price: bool = True,
         min_sl_pct: float = 0.004,
         min_sl_loss_pct: float = 5.0,
         sl_extra_buffer_pct: float = 0.0,
@@ -73,6 +74,10 @@ class PaperTradingEngine:
         btc_filter_min_confidence: float = 0.55,
         btc_filter_block_countertrend: bool = True,
         btc_filter_countertrend_min_win: float = 0.9,
+        btc_trend_hour_lock_enabled: bool = True,
+        btc_trend_hour_lock_min_confidence: float = 0.60,
+        btc_trend_hour_lock_countertrend_hours: float = 2.0,
+        btc_trend_hour_lock_apply_non_btc_follow: bool = True,
         btc_shock_pause_enabled: bool = True,
         btc_shock_threshold_pct: float = 1.2,
         btc_shock_cooldown_minutes: int = 30,
@@ -97,6 +102,15 @@ class PaperTradingEngine:
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
+        instant_sl_guard_enabled: bool = True,
+        instant_sl_guard_max_hold_minutes: int = 25,
+        instant_sl_guard_min_abs_pnl_pct: float = 10.0,
+        instant_sl_guard_min_abs_mae_pct: float = 8.0,
+        instant_sl_guard_cooldown_minutes: int = 90,
+        instant_sl_global_guard_enabled: bool = True,
+        instant_sl_global_threshold: int = 3,
+        instant_sl_global_window_minutes: int = 20,
+        instant_sl_global_cooldown_minutes: int = 60,
         entry_hard_block_hours_vn: str = "20",
         hourly_profile_enabled: bool = True,
         hourly_profile_min_samples: int = 60,
@@ -148,6 +162,7 @@ class PaperTradingEngine:
         self._major_symbols_runtime_updated_ts: float = 0.0
         self.poll_interval_sec = max(1.0, poll_interval_sec)
         self.stream_max_stale_sec = max(1.0, float(stream_max_stale_sec))
+        self.entry_require_fresh_stream_price = bool(entry_require_fresh_stream_price)
         self.min_sl_pct = min_sl_pct
         self.min_sl_loss_pct = max(0.0, min_sl_loss_pct)
         self.sl_extra_buffer_pct = max(0.0, sl_extra_buffer_pct)
@@ -174,6 +189,10 @@ class PaperTradingEngine:
         self.btc_filter_min_confidence = max(0.5, min(float(btc_filter_min_confidence), 0.99))
         self.btc_filter_block_countertrend = btc_filter_block_countertrend
         self.btc_filter_countertrend_min_win = max(0.5, min(float(btc_filter_countertrend_min_win), 0.99))
+        self.btc_trend_hour_lock_enabled = bool(btc_trend_hour_lock_enabled)
+        self.btc_trend_hour_lock_min_confidence = max(0.5, min(float(btc_trend_hour_lock_min_confidence), 0.99))
+        self.btc_trend_hour_lock_countertrend_hours = max(0.0, float(btc_trend_hour_lock_countertrend_hours))
+        self.btc_trend_hour_lock_apply_non_btc_follow = bool(btc_trend_hour_lock_apply_non_btc_follow)
         self.btc_shock_pause_enabled = btc_shock_pause_enabled
         self.btc_shock_threshold_pct = max(0.2, float(btc_shock_threshold_pct))
         self.btc_shock_cooldown_minutes = max(1, int(btc_shock_cooldown_minutes))
@@ -198,6 +217,15 @@ class PaperTradingEngine:
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
+        self.instant_sl_guard_enabled = bool(instant_sl_guard_enabled)
+        self.instant_sl_guard_max_hold_minutes = max(1, int(instant_sl_guard_max_hold_minutes))
+        self.instant_sl_guard_min_abs_pnl_pct = max(0.0, float(instant_sl_guard_min_abs_pnl_pct))
+        self.instant_sl_guard_min_abs_mae_pct = max(0.0, float(instant_sl_guard_min_abs_mae_pct))
+        self.instant_sl_guard_cooldown_minutes = max(1, int(instant_sl_guard_cooldown_minutes))
+        self.instant_sl_global_guard_enabled = bool(instant_sl_global_guard_enabled)
+        self.instant_sl_global_threshold = max(1, int(instant_sl_global_threshold))
+        self.instant_sl_global_window_minutes = max(1, int(instant_sl_global_window_minutes))
+        self.instant_sl_global_cooldown_minutes = max(1, int(instant_sl_global_cooldown_minutes))
         self.entry_hard_block_hours_vn = str(entry_hard_block_hours_vn or "").strip()
         self._entry_hard_block_hours_set = self._parse_entry_hard_block_hours(self.entry_hard_block_hours_vn)
         self.hourly_profile_enabled = bool(hourly_profile_enabled)
@@ -234,6 +262,8 @@ class PaperTradingEngine:
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
         self._open_pause_reason: str | None = None
+        self._btc_long_regime_short_lock_until_ts: float = 0.0
+        self._btc_short_regime_long_lock_until_ts: float = 0.0
         self._btc_up_shock_long_block_until_ts: float = 0.0
         self._btc_down_shock_short_block_until_ts: float = 0.0
         self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
@@ -242,6 +272,8 @@ class PaperTradingEngine:
         self._short_sl_streak_refreshed_ts: float = 0.0
         self._short_sl_streak_count: int = 0
         self._short_sl_last_processed_close_id: int = 0
+        self._instant_sl_symbol_side_lock_until_ts: dict[str, float] = {}
+        self._instant_sl_global_events_ts: list[float] = []
         self.high_volatility_threshold_pct = 2.0
         self.high_volatility_leverage = 3
 
@@ -311,6 +343,7 @@ class PaperTradingEngine:
             # Prefer websocket stream cache for realtime TP/SL checks.
             market_prices.update(stream_prices)
         btc_guard = await asyncio.to_thread(self._resolve_btc_trend_guard)
+        self._apply_btc_trend_hour_lock(btc_guard)
         self._apply_btc_shock_pause(btc_guard)
         await asyncio.to_thread(self._refresh_short_sl_streak_guard_if_needed)
         open_paused = self._is_open_paused()
@@ -329,6 +362,8 @@ class PaperTradingEngine:
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
+                if not self._pass_instant_sl_guard(symbol=symbol, side=side):
+                    continue
 
                 entry = float(item.get("predicted_entry_price") or 0.0)
                 tp = float(item.get("take_profit") or 0.0)
@@ -336,7 +371,11 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
-                market_price = market_prices.get(symbol)
+                market_price = stream_prices.get(symbol)
+                if market_price is None and self.entry_require_fresh_stream_price:
+                    continue
+                if market_price is None:
+                    market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
                 if market_price is None:
@@ -468,7 +507,11 @@ class PaperTradingEngine:
             for symbol in test_symbols:
                 if opened_test_orders >= self.test_ml_max_orders_per_cycle:
                     break
-                market_price = market_prices.get(symbol)
+                market_price = stream_prices.get(symbol)
+                if market_price is None and self.entry_require_fresh_stream_price:
+                    continue
+                if market_price is None:
+                    market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
                 if market_price is None:
@@ -521,6 +564,8 @@ class PaperTradingEngine:
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="ML_TEST"):
+                    continue
+                if not self._pass_instant_sl_guard(symbol=symbol, side=side):
                     continue
 
                 entry = float(test_signal.predicted_entry_price)
@@ -615,7 +660,11 @@ class PaperTradingEngine:
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
         if (not open_paused) and (not entry_hard_blocked) and self.liquid_enabled and self.liquid_predictor is not None:
             for symbol in top_vol_symbols:
-                market_price = market_prices.get(symbol)
+                market_price = stream_prices.get(symbol)
+                if market_price is None and self.entry_require_fresh_stream_price:
+                    continue
+                if market_price is None:
+                    market_price = market_prices.get(symbol)
                 if market_price is None:
                     market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
                 if market_price is None:
@@ -637,6 +686,8 @@ class PaperTradingEngine:
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIQ_EMA99"):
+                    continue
+                if not self._pass_instant_sl_guard(symbol=symbol, side=side):
                     continue
 
                 entry = float(liq_signal.predicted_entry_price)
@@ -881,6 +932,13 @@ class PaperTradingEngine:
                     close_reason = 1 if pnl >= 0 else 0
                     commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
                     net_pnl = pnl - commission
+                    self._register_instant_sl_event(
+                        symbol=symbol,
+                        side=side,
+                        opened_at=trade.get("opened_at"),
+                        pnl_pct=pnl_pct,
+                        mae_pct=next_mae,
+                    )
                     self.repo.close_trade(
                         trade_id=int(trade["id"]),
                         close_price=price,
@@ -1002,7 +1060,11 @@ class PaperTradingEngine:
         return self.repo.has_open_trade(symbol=symbol, side=side, entry_type=entry_type)
 
     def _is_reentry_cooldown_active(self, *, symbol: str, side: str, entry_type: str) -> bool:
-        if self.reentry_cooldown_minutes <= 0 and self.reentry_after_sl_cooldown_minutes <= 0:
+        if (
+            self.reentry_cooldown_minutes <= 0
+            and self.reentry_after_sl_cooldown_minutes <= 0
+            and (not self.instant_sl_guard_enabled)
+        ):
             return False
 
         latest = self.repo.latest_trade(
@@ -1026,12 +1088,178 @@ class PaperTradingEngine:
         cooldown_minutes = self.reentry_cooldown_minutes
         if close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
             cooldown_minutes = max(cooldown_minutes, self.reentry_after_sl_cooldown_minutes)
+            if self._is_severe_instant_sl_row(latest):
+                cooldown_minutes = max(cooldown_minutes, self.instant_sl_guard_cooldown_minutes)
         if cooldown_minutes <= 0:
             return False
 
         now = datetime.now(self._vn_tz).replace(tzinfo=None)
         elapsed = (now - last_update).total_seconds()
         return elapsed < float(cooldown_minutes * 60)
+
+    def _elapsed_seconds_since(self, value: object) -> float | None:
+        dt = self._parse_dt(value)
+        if dt is None:
+            return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(self._vn_tz).replace(tzinfo=None)
+        now = datetime.now(self._vn_tz).replace(tzinfo=None)
+        return max(0.0, (now - dt).total_seconds())
+
+    def _estimate_margin_base_from_trade_row(self, row: dict[str, Any]) -> float:
+        try:
+            margin = float(row.get("margin_usdt") or 0.0)
+        except Exception:
+            margin = 0.0
+        if margin > 0:
+            return margin
+        try:
+            entry = float(row.get("entry_price") or 0.0)
+            qty = float(row.get("quantity") or 0.0)
+            lev = float(row.get("leverage") or 0.0)
+            if entry > 0 and qty > 0 and lev > 0:
+                return (entry * qty) / lev
+        except Exception:
+            pass
+        return 0.0
+
+    def _estimate_trade_pnl_pct_from_row(self, row: dict[str, Any]) -> float:
+        try:
+            pnl = float(row.get("pnl") or 0.0)
+        except Exception:
+            pnl = 0.0
+        margin = self._estimate_margin_base_from_trade_row(row)
+        if margin <= 0:
+            return 0.0
+        return (pnl / margin) * 100.0
+
+    def _is_severe_instant_sl_row(self, row: dict[str, Any]) -> bool:
+        if not self.instant_sl_guard_enabled:
+            return False
+        opened_at = row.get("opened_at")
+        closed_at = row.get("closed_at")
+        if closed_at is None:
+            closed_at = row.get("updated_at")
+        hold_sec = None
+        if opened_at is not None and closed_at is not None:
+            opened_dt = self._parse_dt(opened_at)
+            closed_dt = self._parse_dt(closed_at)
+            if opened_dt is not None and closed_dt is not None:
+                if opened_dt.tzinfo is not None:
+                    opened_dt = opened_dt.astimezone(self._vn_tz).replace(tzinfo=None)
+                if closed_dt.tzinfo is not None:
+                    closed_dt = closed_dt.astimezone(self._vn_tz).replace(tzinfo=None)
+                hold_sec = max(0.0, (closed_dt - opened_dt).total_seconds())
+        if hold_sec is None:
+            hold_sec = self._elapsed_seconds_since(opened_at)
+        if hold_sec is None:
+            return False
+        if hold_sec > float(self.instant_sl_guard_max_hold_minutes * 60):
+            return False
+
+        pnl_pct = self._estimate_trade_pnl_pct_from_row(row)
+        try:
+            mae_pct = float(row.get("mae_pct") or 0.0)
+        except Exception:
+            mae_pct = 0.0
+        severe_loss = abs(min(0.0, pnl_pct)) >= self.instant_sl_guard_min_abs_pnl_pct
+        severe_mae = abs(min(0.0, mae_pct)) >= self.instant_sl_guard_min_abs_mae_pct
+        return severe_loss or severe_mae
+
+    def _instant_sl_guard_key(self, symbol: str, side: str) -> str:
+        return f"{self._normalize_symbol_key(symbol)}|{str(side or '').upper()}"
+
+    def _instant_sl_guard_reason(self, *, symbol: str, side: str) -> str | None:
+        if not self.instant_sl_guard_enabled:
+            return None
+        key = self._instant_sl_guard_key(symbol, side)
+        lock_until_ts = float(self._instant_sl_symbol_side_lock_until_ts.get(key) or 0.0)
+        if lock_until_ts <= 0:
+            try:
+                latest = self.repo.latest_trade(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=None,
+                )
+            except Exception:
+                latest = None
+            if latest and str(latest.get("status") or "").upper() != "OPEN":
+                close_reason = str(latest.get("close_reason") or "").upper()
+                if self._is_sl_close_reason(close_reason) and self._is_severe_instant_sl_row(latest):
+                    latest_update = self._parse_dt(latest.get("updated_at")) or self._parse_dt(latest.get("closed_at"))
+                    if latest_update is not None:
+                        if latest_update.tzinfo is not None:
+                            latest_update = latest_update.astimezone(self._vn_tz).replace(tzinfo=None)
+                        now_naive = datetime.now(self._vn_tz).replace(tzinfo=None)
+                        elapsed = max(0.0, (now_naive - latest_update).total_seconds())
+                        remain_seconds = float(self.instant_sl_guard_cooldown_minutes * 60) - elapsed
+                        if remain_seconds > 0:
+                            lock_until_ts = time.time() + remain_seconds
+                            self._instant_sl_symbol_side_lock_until_ts[key] = lock_until_ts
+        if lock_until_ts <= 0:
+            return None
+        now_ts = time.time()
+        if now_ts >= lock_until_ts:
+            self._instant_sl_symbol_side_lock_until_ts.pop(key, None)
+            return None
+        remain_minutes = max(1, int(math.ceil((lock_until_ts - now_ts) / 60.0)))
+        side_key = str(side or "").upper()
+        return f"Instant-SL guard {side_key} ({remain_minutes}m left)"
+
+    def _pass_instant_sl_guard(self, *, symbol: str, side: str) -> bool:
+        return self._instant_sl_guard_reason(symbol=symbol, side=side) is None
+
+    def _register_instant_sl_event(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        opened_at: object,
+        pnl_pct: float,
+        mae_pct: float,
+    ) -> None:
+        if not self.instant_sl_guard_enabled:
+            return
+        if pnl_pct >= 0:
+            return
+
+        held_seconds = self._elapsed_seconds_since(opened_at)
+        if held_seconds is None:
+            return
+        if held_seconds > float(self.instant_sl_guard_max_hold_minutes * 60):
+            return
+
+        abs_loss_pct = abs(float(pnl_pct))
+        abs_mae_pct = abs(min(0.0, float(mae_pct)))
+        severe_loss = abs_loss_pct >= self.instant_sl_guard_min_abs_pnl_pct
+        severe_mae = abs_mae_pct >= self.instant_sl_guard_min_abs_mae_pct
+        if not (severe_loss or severe_mae):
+            return
+
+        now_ts = time.time()
+        lock_until_ts = now_ts + float(self.instant_sl_guard_cooldown_minutes * 60)
+        key = self._instant_sl_guard_key(symbol, side)
+        self._instant_sl_symbol_side_lock_until_ts[key] = max(
+            float(self._instant_sl_symbol_side_lock_until_ts.get(key) or 0.0),
+            lock_until_ts,
+        )
+
+        if not self.instant_sl_global_guard_enabled:
+            return
+
+        self._instant_sl_global_events_ts.append(now_ts)
+        window_seconds = float(self.instant_sl_global_window_minutes * 60)
+        cutoff_ts = now_ts - window_seconds
+        self._instant_sl_global_events_ts = [ts for ts in self._instant_sl_global_events_ts if ts >= cutoff_ts]
+        if len(self._instant_sl_global_events_ts) < self.instant_sl_global_threshold:
+            return
+
+        pause_until_ts = now_ts + float(self.instant_sl_global_cooldown_minutes * 60)
+        self._open_pause_until_ts = max(self._open_pause_until_ts, pause_until_ts)
+        self._open_pause_reason = (
+            f"Instant-SL global pause {self.instant_sl_global_cooldown_minutes}m "
+            f"({len(self._instant_sl_global_events_ts)} severe losses/{self.instant_sl_global_window_minutes}m)"
+        )
 
     @staticmethod
     def _is_sl_close_reason(close_reason: str) -> bool:
@@ -1713,6 +1941,8 @@ class PaperTradingEngine:
         return payload
 
     def _pass_btc_filter(self, symbol: str, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
+        if not self._pass_btc_trend_hour_lock(symbol=symbol, side=side):
+            return False
         if not self._pass_btc_shock_directional_guard(symbol=symbol, side=side, btc_guard=btc_guard):
             return False
         if not self.btc_filter_enabled:
@@ -1734,6 +1964,74 @@ class PaperTradingEngine:
         if self.btc_filter_block_countertrend:
             return False
         return effective_prob >= self.btc_filter_countertrend_min_win
+
+    def _apply_btc_trend_hour_lock(self, btc_guard: dict[str, Any]) -> None:
+        if not self.btc_trend_hour_lock_enabled:
+            return
+        if self.btc_trend_hour_lock_countertrend_hours <= 0:
+            return
+
+        trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+        if trend_side not in {"LONG", "SHORT"}:
+            return
+        try:
+            confidence = float((btc_guard or {}).get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if confidence < self.btc_trend_hour_lock_min_confidence:
+            return
+
+        now_ts = time.time()
+        lock_until_ts = now_ts + (self.btc_trend_hour_lock_countertrend_hours * 3600.0)
+        if trend_side == "LONG":
+            self._btc_long_regime_short_lock_until_ts = max(self._btc_long_regime_short_lock_until_ts, lock_until_ts)
+            return
+        self._btc_short_regime_long_lock_until_ts = max(self._btc_short_regime_long_lock_until_ts, lock_until_ts)
+
+    def _resolve_btc_trend_hour_lock_until(self, side: str) -> float:
+        side_key = str(side or "").upper()
+        if side_key == "SHORT":
+            return float(self._btc_long_regime_short_lock_until_ts)
+        if side_key == "LONG":
+            return float(self._btc_short_regime_long_lock_until_ts)
+        return 0.0
+
+    def _pass_btc_trend_hour_lock(self, *, symbol: str, side: str) -> bool:
+        if not self.btc_trend_hour_lock_enabled:
+            return True
+        if self.btc_trend_hour_lock_countertrend_hours <= 0:
+            return True
+        if not self.btc_trend_hour_lock_apply_non_btc_follow and (not self._is_symbol_following_btc(symbol)):
+            return True
+
+        lock_until_ts = self._resolve_btc_trend_hour_lock_until(side=side)
+        if lock_until_ts <= 0:
+            return True
+        now_ts = time.time()
+        if now_ts >= lock_until_ts:
+            side_key = str(side or "").upper()
+            if side_key == "SHORT":
+                self._btc_long_regime_short_lock_until_ts = 0.0
+            elif side_key == "LONG":
+                self._btc_short_regime_long_lock_until_ts = 0.0
+            return True
+        return False
+
+    def _btc_trend_hour_lock_reason(self, *, symbol: str, side: str, btc_guard: dict[str, Any] | None = None) -> str | None:
+        if btc_guard is not None:
+            self._apply_btc_trend_hour_lock(btc_guard)
+        if self._pass_btc_trend_hour_lock(symbol=symbol, side=side):
+            return None
+
+        lock_until_ts = self._resolve_btc_trend_hour_lock_until(side=side)
+        now_ts = time.time()
+        remain_minutes = max(1, int(math.ceil((lock_until_ts - now_ts) / 60.0)))
+        side_key = str(side or "").upper()
+        if side_key == "SHORT":
+            return f"BTC bullish lock SHORT ({remain_minutes}m left)"
+        if side_key == "LONG":
+            return f"BTC bearish lock LONG ({remain_minutes}m left)"
+        return f"BTC trend hour lock ({remain_minutes}m left)"
 
     def _should_close_profit_on_btc_trend(
         self,
@@ -1951,8 +2249,14 @@ class PaperTradingEngine:
         return False
 
     def _is_open_paused(self) -> bool:
-        # BTC shock logic is directional and symbol-specific; no global open pause.
-        return False
+        if self._open_pause_until_ts <= 0:
+            return False
+        now_ts = time.time()
+        if now_ts >= self._open_pause_until_ts:
+            self._open_pause_until_ts = 0.0
+            self._open_pause_reason = None
+            return False
+        return True
 
     @staticmethod
     def _ema_last(values: list[float], period: int) -> float:
@@ -1989,13 +2293,20 @@ class PaperTradingEngine:
 
     @staticmethod
     def _extract_price_from_ticker(ticker: dict[str, Any]) -> float | None:
-        price = ticker.get("last") or ticker.get("close")
-        if price is not None:
-            return float(price)
         bid = ticker.get("bid")
         ask = ticker.get("ask")
         if bid is not None and ask is not None:
             return float((bid + ask) / 2)
+        mark_price = ticker.get("markPrice")
+        if mark_price is None:
+            info = ticker.get("info")
+            if isinstance(info, dict):
+                mark_price = info.get("markPrice")
+        if mark_price is not None:
+            return float(mark_price)
+        price = ticker.get("last") or ticker.get("close")
+        if price is not None:
+            return float(price)
         return None
 
     @staticmethod

@@ -104,6 +104,10 @@ class Settings(BaseModel):
     paper_trade_major_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAJOR_MAX_RISK_PCT", "20"))
     paper_trade_poll_interval_sec: float = float(os.getenv("PAPER_TRADE_POLL_INTERVAL_SEC", "6"))
     paper_trade_stream_max_stale_sec: float = float(os.getenv("PAPER_TRADE_STREAM_MAX_STALE_SEC", "5"))
+    paper_trade_entry_require_fresh_stream_price: bool = os.getenv(
+        "PAPER_TRADE_ENTRY_REQUIRE_FRESH_STREAM_PRICE",
+        "true",
+    ).lower() == "true"
     paper_trade_min_sl_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_PCT", "0.008"))
     paper_trade_min_sl_loss_pct: float = float(os.getenv("PAPER_TRADE_MIN_SL_LOSS_PCT", "5"))
     paper_trade_sl_extra_buffer_pct: float = float(os.getenv("PAPER_TRADE_SL_EXTRA_BUFFER_PCT", "0.002"))
@@ -125,6 +129,17 @@ class Settings(BaseModel):
     paper_trade_btc_filter_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE", "0.55"))
     paper_trade_btc_filter_block_countertrend: bool = os.getenv("PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND", "true").lower() == "true"
     paper_trade_btc_filter_countertrend_min_win: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN", "0.9"))
+    paper_trade_btc_trend_hour_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_TREND_HOUR_LOCK_ENABLED", "true").lower() == "true"
+    paper_trade_btc_trend_hour_lock_min_confidence: float = float(
+        os.getenv("PAPER_TRADE_BTC_TREND_HOUR_LOCK_MIN_CONFIDENCE", "0.60")
+    )
+    paper_trade_btc_trend_hour_lock_countertrend_hours: float = float(
+        os.getenv("PAPER_TRADE_BTC_TREND_HOUR_LOCK_COUNTERTREND_HOURS", "2")
+    )
+    paper_trade_btc_trend_hour_lock_apply_non_btc_follow: bool = os.getenv(
+        "PAPER_TRADE_BTC_TREND_HOUR_LOCK_APPLY_NON_BTC_FOLLOW",
+        "true",
+    ).lower() == "true"
     paper_trade_btc_shock_pause_enabled: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_PAUSE_ENABLED", "true").lower() == "true"
     paper_trade_btc_shock_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_THRESHOLD_PCT", "1.2"))
     paper_trade_btc_shock_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_COOLDOWN_MINUTES", "30"))
@@ -149,6 +164,32 @@ class Settings(BaseModel):
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
+    paper_trade_instant_sl_guard_enabled: bool = os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_instant_sl_guard_max_hold_minutes: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES", "25")
+    )
+    paper_trade_instant_sl_guard_min_abs_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT", "10")
+    )
+    paper_trade_instant_sl_guard_min_abs_mae_pct: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_MAE_PCT", "8")
+    )
+    paper_trade_instant_sl_guard_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_COOLDOWN_MINUTES", "90")
+    )
+    paper_trade_instant_sl_global_guard_enabled: bool = os.getenv(
+        "PAPER_TRADE_INSTANT_SL_GLOBAL_GUARD_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_instant_sl_global_threshold: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GLOBAL_THRESHOLD", "3")
+    )
+    paper_trade_instant_sl_global_window_minutes: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GLOBAL_WINDOW_MINUTES", "20")
+    )
+    paper_trade_instant_sl_global_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GLOBAL_COOLDOWN_MINUTES", "60")
+    )
     paper_trade_entry_hard_block_hours_vn: str = os.getenv("PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN", "20")
     paper_trade_hourly_profile_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_ENABLED", "true").lower() == "true"
     paper_trade_hourly_profile_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_MIN_SAMPLES", "60"))

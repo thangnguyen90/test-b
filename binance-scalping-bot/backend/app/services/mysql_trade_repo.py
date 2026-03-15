@@ -423,14 +423,21 @@ class MySQLTradeRepository:
                         """
                         SELECT id
                         FROM paper_trades
-                        WHERE symbol=%s AND side=%s AND entry_type=%s AND status='OPEN'
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND side=%s AND entry_type=%s AND status='OPEN'
                         LIMIT 1
                         """,
                         (symbol, side, entry_type),
                     )
                 else:
                     cur.execute(
-                        "SELECT id FROM paper_trades WHERE symbol=%s AND side=%s AND status='OPEN' LIMIT 1",
+                        """
+                        SELECT id
+                        FROM paper_trades
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND side=%s AND status='OPEN'
+                        LIMIT 1
+                        """,
                         (symbol, side),
                     )
                 row = cur.fetchone()
@@ -442,9 +449,13 @@ class MySQLTradeRepository:
                 if entry_type:
                     cur.execute(
                         """
-                        SELECT id, symbol, side, entry_type, status, close_reason, opened_at, closed_at, updated_at
+                        SELECT
+                            id, symbol, side, entry_type, status, close_reason,
+                            opened_at, closed_at, updated_at,
+                            pnl, mae_pct, mfe_pct, margin_usdt, entry_price, quantity, leverage
                         FROM paper_trades
-                        WHERE symbol=%s AND side=%s AND entry_type=%s
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND side=%s AND entry_type=%s
                         ORDER BY updated_at DESC
                         LIMIT 1
                         """,
@@ -453,9 +464,13 @@ class MySQLTradeRepository:
                 else:
                     cur.execute(
                         """
-                        SELECT id, symbol, side, entry_type, status, close_reason, opened_at, closed_at, updated_at
+                        SELECT
+                            id, symbol, side, entry_type, status, close_reason,
+                            opened_at, closed_at, updated_at,
+                            pnl, mae_pct, mfe_pct, margin_usdt, entry_price, quantity, leverage
                         FROM paper_trades
-                        WHERE symbol=%s AND side=%s
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND side=%s
                         ORDER BY updated_at DESC
                         LIMIT 1
                         """,
