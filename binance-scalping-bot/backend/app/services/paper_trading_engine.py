@@ -99,6 +99,11 @@ class PaperTradingEngine:
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
         test_ml_max_orders_per_cycle: int = 2,
+        test_ml_fixed_sl_pct: float = 30.0,
+        test_ml_tp_min_pct: float = 8.0,
+        test_ml_tp_max_pct: float = 20.0,
+        test_ml_max_hold_minutes: int = 240,
+        test_ml_timeout_min_pnl_usdt: float = 0.1,
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
@@ -112,6 +117,27 @@ class PaperTradingEngine:
         instant_sl_global_window_minutes: int = 20,
         instant_sl_global_cooldown_minutes: int = 60,
         entry_hard_block_hours_vn: str = "20",
+        short_bad_hour_block_enabled: bool = False,
+        short_bad_hour_block_hours_vn: str = "20",
+        short_bad_hour_block_on_btc_bullish: bool = True,
+        short_bad_hour_block_min_btc_confidence: float = 0.60,
+        short_bad_hour_block_on_non_btc_follow: bool = True,
+        btc_wave_bad_hour_block_enabled: bool = False,
+        btc_wave_bad_hour_block_hours_vn: str = "20",
+        btc_wave_bad_hour_block_min_confidence: float = 0.60,
+        btc_wave_bad_hour_block_apply_non_btc_follow: bool = True,
+        high_prob_guard_enabled: bool = False,
+        high_prob_guard_min_effective_win: float = 0.92,
+        high_prob_guard_min_samples: int = 80,
+        high_prob_guard_countertrend_btc_confidence: float = 0.62,
+        high_prob_guard_block_non_btc_follow: bool = True,
+        pre_entry_mae_guard_enabled: bool = False,
+        pre_entry_mae_lookback_days: int = 60,
+        pre_entry_mae_min_samples: int = 20,
+        pre_entry_mae_quantile: float = 0.65,
+        pre_entry_mae_max_abs_pct: float = 9.0,
+        pre_entry_mae_max_sl_ratio: float = 0.85,
+        pre_entry_mae_cache_sec: int = 300,
         hourly_profile_enabled: bool = True,
         hourly_profile_min_samples: int = 60,
         hourly_profile_prob_alpha: float = 0.25,
@@ -214,6 +240,11 @@ class PaperTradingEngine:
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
         self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
+        self.test_ml_fixed_sl_pct = max(1.0, min(float(test_ml_fixed_sl_pct), 90.0))
+        self.test_ml_tp_min_pct = max(0.2, min(float(test_ml_tp_min_pct), 200.0))
+        self.test_ml_tp_max_pct = max(self.test_ml_tp_min_pct, min(float(test_ml_tp_max_pct), 300.0))
+        self.test_ml_max_hold_minutes = max(1, int(test_ml_max_hold_minutes))
+        self.test_ml_timeout_min_pnl_usdt = max(0.0, float(test_ml_timeout_min_pnl_usdt))
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
@@ -228,6 +259,35 @@ class PaperTradingEngine:
         self.instant_sl_global_cooldown_minutes = max(1, int(instant_sl_global_cooldown_minutes))
         self.entry_hard_block_hours_vn = str(entry_hard_block_hours_vn or "").strip()
         self._entry_hard_block_hours_set = self._parse_entry_hard_block_hours(self.entry_hard_block_hours_vn)
+        self.short_bad_hour_block_enabled = bool(short_bad_hour_block_enabled)
+        self.short_bad_hour_block_hours_vn = str(short_bad_hour_block_hours_vn or "").strip()
+        self._short_bad_hour_block_hours_set = self._parse_entry_hard_block_hours(self.short_bad_hour_block_hours_vn)
+        self.short_bad_hour_block_on_btc_bullish = bool(short_bad_hour_block_on_btc_bullish)
+        self.short_bad_hour_block_min_btc_confidence = max(
+            0.0,
+            min(float(short_bad_hour_block_min_btc_confidence), 0.99),
+        )
+        self.short_bad_hour_block_on_non_btc_follow = bool(short_bad_hour_block_on_non_btc_follow)
+        self.btc_wave_bad_hour_block_enabled = bool(btc_wave_bad_hour_block_enabled)
+        self.btc_wave_bad_hour_block_hours_vn = str(btc_wave_bad_hour_block_hours_vn or "").strip()
+        self._btc_wave_bad_hour_block_hours_set = self._parse_entry_hard_block_hours(self.btc_wave_bad_hour_block_hours_vn)
+        self.btc_wave_bad_hour_block_min_confidence = max(0.0, min(float(btc_wave_bad_hour_block_min_confidence), 0.99))
+        self.btc_wave_bad_hour_block_apply_non_btc_follow = bool(btc_wave_bad_hour_block_apply_non_btc_follow)
+        self.high_prob_guard_enabled = bool(high_prob_guard_enabled)
+        self.high_prob_guard_min_effective_win = max(0.0, min(float(high_prob_guard_min_effective_win), 1.0))
+        self.high_prob_guard_min_samples = max(10, int(high_prob_guard_min_samples))
+        self.high_prob_guard_countertrend_btc_confidence = max(
+            0.0,
+            min(float(high_prob_guard_countertrend_btc_confidence), 0.99),
+        )
+        self.high_prob_guard_block_non_btc_follow = bool(high_prob_guard_block_non_btc_follow)
+        self.pre_entry_mae_guard_enabled = bool(pre_entry_mae_guard_enabled)
+        self.pre_entry_mae_lookback_days = max(1, min(int(pre_entry_mae_lookback_days), 3650))
+        self.pre_entry_mae_min_samples = max(5, min(int(pre_entry_mae_min_samples), 10000))
+        self.pre_entry_mae_quantile = max(0.0, min(float(pre_entry_mae_quantile), 1.0))
+        self.pre_entry_mae_max_abs_pct = max(0.1, float(pre_entry_mae_max_abs_pct))
+        self.pre_entry_mae_max_sl_ratio = max(0.05, min(float(pre_entry_mae_max_sl_ratio), 1.5))
+        self.pre_entry_mae_cache_sec = max(15, int(pre_entry_mae_cache_sec))
         self.hourly_profile_enabled = bool(hourly_profile_enabled)
         self.hourly_profile_min_samples = max(10, int(hourly_profile_min_samples))
         self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
@@ -268,6 +328,7 @@ class PaperTradingEngine:
         self._btc_down_shock_short_block_until_ts: float = 0.0
         self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
         self._hourly_profiles_refreshed_ts: float = 0.0
+        self._pre_entry_mae_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._short_sl_pause_until_ts: float = 0.0
         self._short_sl_streak_refreshed_ts: float = 0.0
         self._short_sl_streak_count: int = 0
@@ -306,7 +367,13 @@ class PaperTradingEngine:
         await asyncio.to_thread(self._refresh_hourly_profiles_if_needed)
         signals: list[dict[str, Any]] = []
         try:
-            snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
+            # Entry scan must be live-only: never reuse cached signal snapshot.
+            snapshot = await asyncio.to_thread(
+                get_scan_snapshot,
+                min_win=0.7,
+                max_symbols=100,
+                allow_cache=False,
+            )
             signals = snapshot.get("signals", [])
             if self.major_dynamic_enabled:
                 await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)
@@ -406,6 +473,14 @@ class PaperTradingEngine:
                 )
                 if effective_prob < required_min_win:
                     continue
+                if not self._pass_high_prob_overconfidence_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="LIMIT",
+                    effective_prob=effective_prob,
+                    btc_guard=btc_guard,
+                ):
+                    continue
                 if not self._pass_short_sl_streak_guard(side=side):
                     continue
                 if not self._pass_bullish_short_nonfollow_ratio_guard(
@@ -413,6 +488,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                     open_trades_by_symbol=open_trades_by_symbol,
+                ):
+                    continue
+                if not self._pass_short_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                ):
+                    continue
+                if not self._pass_btc_wave_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
                 ):
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
@@ -459,6 +546,16 @@ class PaperTradingEngine:
                 )
                 if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
+                pass_pre_entry_mae, pre_entry_mae = self._evaluate_pre_entry_mae_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="LIMIT",
+                    entry_price=entry,
+                    stop_loss=normalized_sl,
+                    leverage=leverage,
+                )
+                if not pass_pre_entry_mae:
+                    continue
 
                 quantity = calc_quantity_from_order_usdt(
                     entry_price=entry,
@@ -489,6 +586,21 @@ class PaperTradingEngine:
                         "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
+                        "expected_mae_pct": (
+                            float(pre_entry_mae.get("expected_mae_pct"))
+                            if pre_entry_mae and pre_entry_mae.get("expected_mae_pct") is not None
+                            else None
+                        ),
+                        "expected_mae_samples": (
+                            int(pre_entry_mae.get("samples"))
+                            if pre_entry_mae and pre_entry_mae.get("samples") is not None
+                            else None
+                        ),
+                        "expected_mae_tier": (
+                            str(pre_entry_mae.get("tier"))
+                            if pre_entry_mae and pre_entry_mae.get("tier") is not None
+                            else None
+                        ),
                         "feature_snapshot": feature_snapshot,
                     }
                 )
@@ -552,6 +664,14 @@ class PaperTradingEngine:
                 )
                 if effective_prob < required_min_win:
                     continue
+                if not self._pass_high_prob_overconfidence_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="ML_TEST",
+                    effective_prob=effective_prob,
+                    btc_guard=btc_guard,
+                ):
+                    continue
                 if not self._pass_short_sl_streak_guard(side=side):
                     continue
                 if not self._pass_bullish_short_nonfollow_ratio_guard(
@@ -559,6 +679,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                     open_trades_by_symbol=open_trades_by_symbol,
+                ):
+                    continue
+                if not self._pass_short_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                ):
+                    continue
+                if not self._pass_btc_wave_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
                 ):
                     continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="ML_TEST"):
@@ -569,9 +701,7 @@ class PaperTradingEngine:
                     continue
 
                 entry = float(test_signal.predicted_entry_price)
-                tp = float(test_signal.take_profit)
-                sl = float(test_signal.stop_loss)
-                if entry <= 0 or tp <= 0 or sl <= 0:
+                if entry <= 0:
                     continue
 
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
@@ -592,29 +722,34 @@ class PaperTradingEngine:
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
                 atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct)
-                normalized_tp, normalized_sl = normalize_tp_sl(
+                normalized_tp, normalized_sl = self._resolve_test_ml_tp_sl(
                     side=side,
                     entry_price=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
-                    min_sl_pct=max(
-                        self.min_sl_pct,
-                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
-                    ),
-                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
-                    atr_value=atr_value,
-                    sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
                     leverage=leverage,
-                    max_margin_loss_pct=10.5,
+                    effective_prob=effective_prob,
                 )
+                if normalized_tp <= 0 or normalized_sl <= 0:
+                    continue
+                if side == "LONG" and (normalized_tp <= entry or normalized_sl >= entry):
+                    continue
+                if side == "SHORT" and (normalized_tp >= entry or normalized_sl <= entry):
+                    continue
                 
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
                 )
                 if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
+                    continue
+                pass_pre_entry_mae, pre_entry_mae = self._evaluate_pre_entry_mae_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="ML_TEST",
+                    entry_price=entry,
+                    stop_loss=normalized_sl,
+                    leverage=leverage,
+                )
+                if not pass_pre_entry_mae:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
@@ -644,6 +779,21 @@ class PaperTradingEngine:
                         "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
+                        "expected_mae_pct": (
+                            float(pre_entry_mae.get("expected_mae_pct"))
+                            if pre_entry_mae and pre_entry_mae.get("expected_mae_pct") is not None
+                            else None
+                        ),
+                        "expected_mae_samples": (
+                            int(pre_entry_mae.get("samples"))
+                            if pre_entry_mae and pre_entry_mae.get("samples") is not None
+                            else None
+                        ),
+                        "expected_mae_tier": (
+                            str(pre_entry_mae.get("tier"))
+                            if pre_entry_mae and pre_entry_mae.get("tier") is not None
+                            else None
+                        ),
                         "feature_snapshot": feature_snapshot,
                     }
                 )
@@ -731,6 +881,14 @@ class PaperTradingEngine:
                 )
                 if effective_prob < required_min_win:
                     continue
+                if not self._pass_high_prob_overconfidence_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="LIQ_EMA99",
+                    effective_prob=effective_prob,
+                    btc_guard=btc_guard,
+                ):
+                    continue
                 if not self._pass_short_sl_streak_guard(side=side):
                     continue
                 if not self._pass_bullish_short_nonfollow_ratio_guard(
@@ -738,6 +896,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                     open_trades_by_symbol=open_trades_by_symbol,
+                ):
+                    continue
+                if not self._pass_short_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                ):
+                    continue
+                if not self._pass_btc_wave_bad_hour_guard(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
                 ):
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
@@ -779,6 +949,16 @@ class PaperTradingEngine:
                 )
                 if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
                     continue
+                pass_pre_entry_mae, pre_entry_mae = self._evaluate_pre_entry_mae_guard(
+                    symbol=symbol,
+                    side=side,
+                    entry_type="LIQ_EMA99",
+                    entry_price=entry,
+                    stop_loss=normalized_sl,
+                    leverage=leverage,
+                )
+                if not pass_pre_entry_mae:
+                    continue
 
                 quantity = calc_quantity_from_order_usdt(
                     entry_price=entry,
@@ -807,6 +987,21 @@ class PaperTradingEngine:
                         "leverage": leverage,
                         "mae_pct": 0.0,
                         "mfe_pct": 0.0,
+                        "expected_mae_pct": (
+                            float(pre_entry_mae.get("expected_mae_pct"))
+                            if pre_entry_mae and pre_entry_mae.get("expected_mae_pct") is not None
+                            else None
+                        ),
+                        "expected_mae_samples": (
+                            int(pre_entry_mae.get("samples"))
+                            if pre_entry_mae and pre_entry_mae.get("samples") is not None
+                            else None
+                        ),
+                        "expected_mae_tier": (
+                            str(pre_entry_mae.get("tier"))
+                            if pre_entry_mae and pre_entry_mae.get("tier") is not None
+                            else None
+                        ),
                         "feature_snapshot": feature_snapshot,
                     }
                 )
@@ -827,6 +1022,7 @@ class PaperTradingEngine:
                     continue
                 symbol = str(trade["symbol"])
                 side = str(trade["side"])
+                entry_type = str(trade.get("entry_type") or "LIMIT").upper()
                 price = market_prices.get(symbol)
                 if price is None:
                     stream_price = await self._resolve_stream_price(symbol)
@@ -966,7 +1162,10 @@ class PaperTradingEngine:
                     continue
 
                 # Timeout policy.
-                if not self._is_expired(trade.get("opened_at")):
+                timeout_hold_minutes = self.test_ml_max_hold_minutes if entry_type == "ML_TEST" else self.max_hold_minutes
+                if not self._is_expired(trade.get("opened_at"), timeout_hold_minutes):
+                    continue
+                if entry_type == "ML_TEST" and pnl <= self.test_ml_timeout_min_pnl_usdt:
                     continue
 
                 if pnl > 0:
@@ -1483,6 +1682,429 @@ class PaperTradingEngine:
             return None
         hour_vn, _ = self._current_vn_hour_weekday()
         return f"Hard block hour VN ({hour_vn:02d}h)"
+
+    def _is_short_bad_hour_active_now(self) -> bool:
+        if not self.short_bad_hour_block_enabled:
+            return False
+        if not self._short_bad_hour_block_hours_set:
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return int(hour_vn) in self._short_bad_hour_block_hours_set
+
+    def _should_block_short_bad_hour(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> tuple[bool, str | None]:
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return False, None
+        if not self._is_short_bad_hour_active_now():
+            return False, None
+        if not self.short_bad_hour_block_on_btc_bullish and not self.short_bad_hour_block_on_non_btc_follow:
+            return False, None
+
+        guard = btc_guard or {}
+        reasons: list[str] = []
+        if self.short_bad_hour_block_on_btc_bullish:
+            trend_side = str(guard.get("side") or "NEUTRAL").upper()
+            try:
+                confidence = float(guard.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            if trend_side == "LONG" and confidence >= self.short_bad_hour_block_min_btc_confidence:
+                reasons.append(f"BTC bullish {confidence * 100:.1f}%")
+
+        if self.short_bad_hour_block_on_non_btc_follow:
+            follows_btc = symbol_follows_btc
+            if follows_btc is None:
+                try:
+                    follows_btc = bool(self._is_symbol_following_btc(symbol))
+                except Exception:
+                    follows_btc = None
+            if follows_btc is False:
+                reasons.append("non-BTC-follow")
+
+        if not reasons:
+            return False, None
+
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return True, f"Bad hour SHORT block ({hour_vn:02d}h: {', '.join(reasons)})"
+
+    def _pass_short_bad_hour_guard(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> bool:
+        blocked, _ = self._should_block_short_bad_hour(
+            symbol=symbol,
+            side=side,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        return not blocked
+
+    def _short_bad_hour_block_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> str | None:
+        blocked, reason = self._should_block_short_bad_hour(
+            symbol=symbol,
+            side=side,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        if not blocked:
+            return None
+        return reason or "Bad hour SHORT block"
+
+    def _is_btc_wave_bad_hour_active_now(self) -> bool:
+        if not self.btc_wave_bad_hour_block_enabled:
+            return False
+        if not self._btc_wave_bad_hour_block_hours_set:
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return int(hour_vn) in self._btc_wave_bad_hour_block_hours_set
+
+    def _should_block_btc_wave_bad_hour(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> tuple[bool, str | None]:
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return False, None
+        if not self._is_btc_wave_bad_hour_active_now():
+            return False, None
+
+        guard = btc_guard or {}
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        if trend_side not in {"LONG", "SHORT"}:
+            return False, None
+        if side_key == trend_side:
+            return False, None
+        try:
+            confidence = float(guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        if confidence < self.btc_wave_bad_hour_block_min_confidence:
+            return False, None
+
+        follows_btc = symbol_follows_btc
+        if follows_btc is None:
+            try:
+                follows_btc = bool(self._is_symbol_following_btc(symbol))
+            except Exception:
+                follows_btc = None
+        if follows_btc is False and (not self.btc_wave_bad_hour_block_apply_non_btc_follow):
+            return False, None
+
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return True, f"Bad hour BTC-wave block ({hour_vn:02d}h: BTC {trend_side} {confidence * 100:.1f}%)"
+
+    def _pass_btc_wave_bad_hour_guard(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> bool:
+        blocked, _ = self._should_block_btc_wave_bad_hour(
+            symbol=symbol,
+            side=side,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        return not blocked
+
+    def _btc_wave_bad_hour_block_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> str | None:
+        blocked, reason = self._should_block_btc_wave_bad_hour(
+            symbol=symbol,
+            side=side,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        if not blocked:
+            return None
+        return reason or "Bad hour BTC-wave block"
+
+    def _should_block_high_prob_overconfidence(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        effective_prob: float,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> tuple[bool, str | None]:
+        if not self.high_prob_guard_enabled:
+            return False, None
+        if float(effective_prob) < self.high_prob_guard_min_effective_win:
+            return False, None
+
+        profile = self._find_hourly_profile_for_now(
+            side=side,
+            entry_type=entry_type,
+            btc_guard=btc_guard,
+        )
+        if profile:
+            total_orders = int(profile.get("total_orders") or 0)
+            net_pnl = float(profile.get("net_pnl") or 0.0)
+            if total_orders >= self.high_prob_guard_min_samples and net_pnl < 0.0:
+                hour_vn, _ = self._current_vn_hour_weekday()
+                return True, f"High-prob guard ({hour_vn:02d}h net<0, n={total_orders})"
+
+        guard = btc_guard or {}
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        side_key = str(side or "").upper()
+        if trend_side in {"LONG", "SHORT"} and side_key in {"LONG", "SHORT"} and side_key != trend_side:
+            try:
+                confidence = float(guard.get("confidence") or 0.0)
+            except Exception:
+                confidence = 0.0
+            if confidence >= self.high_prob_guard_countertrend_btc_confidence:
+                follows_btc = symbol_follows_btc
+                if follows_btc is None:
+                    try:
+                        follows_btc = bool(self._is_symbol_following_btc(symbol))
+                    except Exception:
+                        follows_btc = None
+                if follows_btc is True or self.high_prob_guard_block_non_btc_follow:
+                    return True, f"High-prob countertrend BTC {trend_side} {confidence * 100:.1f}%"
+
+        return False, None
+
+    def _pass_high_prob_overconfidence_guard(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        effective_prob: float,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> bool:
+        blocked, _ = self._should_block_high_prob_overconfidence(
+            symbol=symbol,
+            side=side,
+            entry_type=entry_type,
+            effective_prob=effective_prob,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        return not blocked
+
+    def _high_prob_overconfidence_guard_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        effective_prob: float,
+        btc_guard: dict[str, Any] | None,
+        symbol_follows_btc: bool | None = None,
+    ) -> str | None:
+        blocked, reason = self._should_block_high_prob_overconfidence(
+            symbol=symbol,
+            side=side,
+            entry_type=entry_type,
+            effective_prob=effective_prob,
+            btc_guard=btc_guard,
+            symbol_follows_btc=symbol_follows_btc,
+        )
+        if not blocked:
+            return None
+        return reason or "High-prob guard"
+
+    @staticmethod
+    def _calc_sl_margin_loss_pct(side: str, entry: float, stop_loss: float, leverage: int) -> float:
+        if entry <= 0 or stop_loss <= 0 or leverage <= 0:
+            return 0.0
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            move_pct = (entry - stop_loss) / entry
+        elif side_key == "SHORT":
+            move_pct = (stop_loss - entry) / entry
+        else:
+            return 0.0
+        return max(0.0, abs(float(move_pct)) * float(leverage) * 100.0)
+
+    def _resolve_test_ml_tp_sl(
+        self,
+        *,
+        side: str,
+        entry_price: float,
+        leverage: int,
+        effective_prob: float,
+    ) -> tuple[float, float]:
+        lev = max(1, int(leverage))
+        entry = float(entry_price)
+        if entry <= 0:
+            return 0.0, 0.0
+
+        min_win = max(0.0, min(float(self.test_ml_min_win_probability), 0.999))
+        score = (float(effective_prob) - min_win) / max(1e-6, (1.0 - min_win))
+        score = max(0.0, min(score, 1.0))
+        tp_margin_pct = self.test_ml_tp_min_pct + (self.test_ml_tp_max_pct - self.test_ml_tp_min_pct) * score
+        tp_move_pct = (tp_margin_pct / 100.0) / float(lev)
+
+        sl_move_pct = (self.test_ml_fixed_sl_pct / 100.0) / float(lev)
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            tp_price = entry * (1.0 + tp_move_pct)
+            sl_price = entry * (1.0 - sl_move_pct)
+        else:
+            tp_price = entry * (1.0 - tp_move_pct)
+            sl_price = entry * (1.0 + sl_move_pct)
+        return float(tp_price), float(sl_price)
+
+    def _pre_entry_mae_cache_key(self, *, symbol: str, side: str, entry_type: str, hour_vn: int, weekday_vn: int) -> str:
+        return (
+            f"{self._normalize_symbol_key(symbol)}|{str(side or '').upper()}|{str(entry_type or '').upper()}"
+            f"|H:{int(hour_vn)}|D:{int(weekday_vn)}"
+        )
+
+    def _estimate_pre_entry_mae(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+    ) -> dict[str, Any] | None:
+        if not self.pre_entry_mae_guard_enabled:
+            return None
+        hour_vn, weekday_vn = self._current_vn_hour_weekday()
+        key = self._pre_entry_mae_cache_key(
+            symbol=symbol,
+            side=side,
+            entry_type=entry_type,
+            hour_vn=hour_vn,
+            weekday_vn=weekday_vn,
+        )
+        now_ts = time.time()
+        cached = self._pre_entry_mae_cache.get(key)
+        if cached and now_ts < float(cached[0]):
+            return cached[1]
+        try:
+            result = self.repo.estimate_expected_mae_pct(
+                symbol=symbol,
+                side=side,
+                entry_type=entry_type,
+                hour_vn=hour_vn,
+                weekday_vn=weekday_vn,
+                lookback_days=self.pre_entry_mae_lookback_days,
+                min_samples=self.pre_entry_mae_min_samples,
+                quantile=self.pre_entry_mae_quantile,
+            )
+        except Exception:
+            result = None
+        self._pre_entry_mae_cache[key] = (now_ts + float(self.pre_entry_mae_cache_sec), result)
+        return result
+
+    def _evaluate_pre_entry_mae_guard(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        entry_price: float,
+        stop_loss: float,
+        leverage: int,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        estimate = self._estimate_pre_entry_mae(symbol=symbol, side=side, entry_type=entry_type)
+        if not self.pre_entry_mae_guard_enabled:
+            return True, estimate
+        if not estimate:
+            return True, None
+
+        try:
+            expected_mae_pct = float(estimate.get("expected_mae_pct") or 0.0)
+        except Exception:
+            expected_mae_pct = 0.0
+        expected_abs = abs(min(0.0, expected_mae_pct))
+        if expected_abs <= 0.0:
+            return True, estimate
+        if expected_abs >= self.pre_entry_mae_max_abs_pct:
+            return False, estimate
+
+        sl_loss_pct = self._calc_sl_margin_loss_pct(
+            side=side,
+            entry=entry_price,
+            stop_loss=stop_loss,
+            leverage=leverage,
+        )
+        if sl_loss_pct > 0 and expected_abs >= (sl_loss_pct * self.pre_entry_mae_max_sl_ratio):
+            return False, estimate
+        return True, estimate
+
+    def _pre_entry_mae_guard_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        entry_price: float,
+        stop_loss: float,
+        leverage: int | None = None,
+    ) -> str | None:
+        if not self.pre_entry_mae_guard_enabled:
+            return None
+        lev = int(leverage) if leverage is not None else int(self._resolve_symbol_leverage(symbol, 0.0))
+        passed, estimate = self._evaluate_pre_entry_mae_guard(
+            symbol=symbol,
+            side=side,
+            entry_type=entry_type,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            leverage=max(1, lev),
+        )
+        if passed:
+            return None
+        expected_mae_pct = None
+        samples = None
+        tier = None
+        if estimate:
+            try:
+                expected_mae_pct = float(estimate.get("expected_mae_pct"))
+            except Exception:
+                expected_mae_pct = None
+            try:
+                samples = int(estimate.get("samples"))
+            except Exception:
+                samples = None
+            tier = str(estimate.get("tier") or "").strip() or None
+        sl_loss_pct = self._calc_sl_margin_loss_pct(
+            side=side,
+            entry=entry_price,
+            stop_loss=stop_loss,
+            leverage=max(1, lev),
+        )
+        expected_text = f"{expected_mae_pct:.2f}%" if isinstance(expected_mae_pct, float) else "n/a"
+        sample_text = str(samples) if isinstance(samples, int) else "n/a"
+        tier_text = tier or "n/a"
+        return f"Pre-entry eMAE guard ({expected_text}, n={sample_text}, tier={tier_text}, sl={sl_loss_pct:.2f}%)"
 
     def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
         if not self.hourly_profile_use_btc_trend:
@@ -2551,7 +3173,7 @@ class PaperTradingEngine:
             self.major_symbols_runtime = runtime
             self._major_symbols_runtime_updated_ts = now
 
-    def _is_expired(self, opened_at: Any) -> bool:
+    def _is_expired(self, opened_at: Any, max_hold_minutes: int | None = None) -> bool:
         if opened_at is None:
             return False
         if isinstance(opened_at, datetime):
@@ -2565,5 +3187,6 @@ class PaperTradingEngine:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=self._vn_tz)
 
+        hold_minutes = self.max_hold_minutes if max_hold_minutes is None else max(1, int(max_hold_minutes))
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
-        return held_seconds >= (self.max_hold_minutes * 60)
+        return held_seconds >= (hold_minutes * 60)

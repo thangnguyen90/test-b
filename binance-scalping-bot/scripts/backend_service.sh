@@ -9,6 +9,7 @@ PID_FILE="$RUNTIME_DIR/backend.pid"
 LOG_FILE="$RUNTIME_DIR/backend.log"
 LOG_MAX_MB="${BACKEND_LOG_MAX_MB:-128}"
 LOG_KEEP_FILES="${BACKEND_LOG_KEEP_FILES:-5}"
+BACKEND_PYTHONWARNINGS="${BACKEND_PYTHONWARNINGS:-ignore::FutureWarning}"
 HOST="127.0.0.1"
 PORT="8000"
 
@@ -61,7 +62,8 @@ start_backend() {
 
   (
     cd "$BACKEND_DIR"
-    nohup "$UVICORN_BIN" app.main:app --host "$HOST" --port "$PORT" --no-access-log >>"$LOG_FILE" 2>&1 &
+    nohup env PYTHONWARNINGS="${PYTHONWARNINGS:-$BACKEND_PYTHONWARNINGS}" \
+      "$UVICORN_BIN" app.main:app --host "$HOST" --port "$PORT" --no-access-log >>"$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
   )
 

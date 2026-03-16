@@ -142,6 +142,16 @@ class PaperTradeAPI:
         return None
 
     @staticmethod
+    def _parse_calendar_date(value: str | None, field_name: str) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{field_name} must be YYYY-MM-DD") from exc
+
+    @staticmethod
     def _hourly_stats_from_row(row: dict | None) -> dict[str, float | int]:
         if not row:
             return {
@@ -231,6 +241,9 @@ class PaperTradeAPI:
             commission_usdt=float(row["commission_usdt"]) if row.get("commission_usdt") is not None else None,
             mae_pct=float(row["mae_pct"]) if row.get("mae_pct") is not None else None,
             mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
+            expected_mae_pct=float(row["expected_mae_pct"]) if row.get("expected_mae_pct") is not None else None,
+            expected_mae_samples=int(row["expected_mae_samples"]) if row.get("expected_mae_samples") is not None else None,
+            expected_mae_tier=str(row["expected_mae_tier"]) if row.get("expected_mae_tier") is not None else None,
             margin_usdt=margin_usdt,
             result=int(row["result"]) if row.get("result") is not None else None,
         )
@@ -248,10 +261,21 @@ class PaperTradeAPI:
         limit: int = Query(default=200, ge=1, le=2000),
         page: int | None = Query(default=None, ge=1),
         page_size: int | None = Query(default=None, ge=1, le=200),
+        from_date: str | None = Query(default=None),
+        to_date: str | None = Query(default=None),
     ) -> PaperTradeListResponse:
         repo = self._require_repo()
+        from_dt = self._parse_calendar_date(from_date, "from_date")
+        to_day_dt = self._parse_calendar_date(to_date, "to_date")
+        if from_dt and to_day_dt and from_dt > to_day_dt:
+            raise HTTPException(status_code=422, detail="from_date must be <= to_date")
+        to_dt_exclusive = (to_day_dt + timedelta(days=1)) if to_day_dt is not None else None
         if page is None and page_size is None:
-            rows = repo.list_recent_trades(limit=limit)
+            rows = repo.list_recent_trades(
+                limit=limit,
+                from_updated_at=from_dt,
+                to_updated_at_exclusive=to_dt_exclusive,
+            )
             btc_follow_map = self._resolve_btc_follow_map(rows)
             return PaperTradeListResponse(
                 items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
@@ -259,7 +283,12 @@ class PaperTradeAPI:
 
         target_page = page or 1
         target_page_size = page_size or min(limit, 200)
-        rows, total = repo.list_recent_trades_paged(page=target_page, page_size=target_page_size)
+        rows, total = repo.list_recent_trades_paged(
+            page=target_page,
+            page_size=target_page_size,
+            from_updated_at=from_dt,
+            to_updated_at_exclusive=to_dt_exclusive,
+        )
         btc_follow_map = self._resolve_btc_follow_map(rows)
         total_pages = max(1, math.ceil(total / target_page_size)) if total > 0 else 1
         return PaperTradeListResponse(
@@ -451,6 +480,21 @@ class PaperTradeAPI:
                 leverage=leverage,
             )
         feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, req.symbol, req.side)
+        expected_mae = None
+        try:
+            now_vn = datetime.now(timezone(timedelta(hours=7)))
+            expected_mae = repo.estimate_expected_mae_pct(
+                symbol=req.symbol,
+                side=req.side,
+                entry_type="MARKET",
+                hour_vn=int(now_vn.hour),
+                weekday_vn=int(now_vn.weekday()),
+                lookback_days=max(1, int(settings.paper_trade_pre_entry_mae_lookback_days)),
+                min_samples=max(5, int(settings.paper_trade_pre_entry_mae_min_samples)),
+                quantile=float(settings.paper_trade_pre_entry_mae_quantile),
+            )
+        except Exception:
+            expected_mae = None
         btc_following: bool | None = None
         if callable(self.btc_follow_resolver):
             try:
@@ -472,6 +516,21 @@ class PaperTradeAPI:
                 "quantity": quantity,
                 "margin_usdt": margin_usdt,
                 "leverage": leverage,
+                "expected_mae_pct": (
+                    float(expected_mae.get("expected_mae_pct"))
+                    if expected_mae and expected_mae.get("expected_mae_pct") is not None
+                    else None
+                ),
+                "expected_mae_samples": (
+                    int(expected_mae.get("samples"))
+                    if expected_mae and expected_mae.get("samples") is not None
+                    else None
+                ),
+                "expected_mae_tier": (
+                    str(expected_mae.get("tier"))
+                    if expected_mae and expected_mae.get("tier") is not None
+                    else None
+                ),
                 "feature_snapshot": feature_snapshot,
             }
         )

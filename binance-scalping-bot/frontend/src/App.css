@@ -95,6 +95,21 @@ h1 {
   font-size: 0.8rem;
 }
 
+.history-date-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: #5a6777;
+}
+
+.history-date-input {
+  min-width: 150px;
+  margin-top: 0;
+  padding: 0.34rem 0.5rem;
+  font-size: 0.8rem;
+}
+
 .grid {
   display: grid;
   gap: 0.95rem;
@@ -376,6 +391,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .tab-row {

@@ -31,6 +31,9 @@ class PaperTrade(BaseModel):
     commission_usdt: Optional[float] = None
     mae_pct: Optional[float] = None
     mfe_pct: Optional[float] = None
+    expected_mae_pct: Optional[float] = None
+    expected_mae_samples: Optional[int] = None
+    expected_mae_tier: Optional[str] = None
     margin_usdt: Optional[float] = None
     result: Optional[int] = None
 
@@ -67,6 +70,14 @@ class PaperTradeStats(BaseModel):
     limit_avg_pnl: float = 0.0
     limit_total_pnl_pct: float = 0.0
     limit_avg_pnl_pct: float = 0.0
+    ml_test_closed_trades: int = 0
+    ml_test_win_trades: int = 0
+    ml_test_win_rate: float = 0.0
+    ml_test_loss_trades: int = 0
+    ml_test_total_pnl: float = 0.0
+    ml_test_avg_pnl: float = 0.0
+    ml_test_total_pnl_pct: float = 0.0
+    ml_test_avg_pnl_pct: float = 0.0
 
 
 class PaperTradeListResponse(BaseModel):

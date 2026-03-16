@@ -162,6 +162,9 @@ type PaperTrade = {
   commission_usdt?: number | null
   mae_pct?: number | null
   mfe_pct?: number | null
+  expected_mae_pct?: number | null
+  expected_mae_samples?: number | null
+  expected_mae_tier?: string | null
   margin_usdt?: number | null
   result?: number | null
 }
@@ -198,6 +201,14 @@ type PaperTradeStats = {
   limit_avg_pnl: number
   limit_total_pnl_pct: number
   limit_avg_pnl_pct: number
+  ml_test_closed_trades: number
+  ml_test_win_trades: number
+  ml_test_win_rate: number
+  ml_test_loss_trades: number
+  ml_test_total_pnl: number
+  ml_test_avg_pnl: number
+  ml_test_total_pnl_pct: number
+  ml_test_avg_pnl_pct: number
 }
 
 type PaperTradeHistoryResponse = {
@@ -333,6 +344,7 @@ type OpenSortKey =
   | 'upnl_pct'
   | 'mae_pct'
   | 'mfe_pct'
+  | 'expected_mae_pct'
   | 'entry_type'
   | 'model'
   | 'side'
@@ -353,6 +365,7 @@ type HistorySortKey =
   | 'margin_usdt'
   | 'mae_pct'
   | 'mfe_pct'
+  | 'expected_mae_pct'
   | 'entry_type'
   | 'model'
   | 'side'
@@ -980,6 +993,8 @@ function App() {
   const [historyPage, setHistoryPage] = useState(1)
   const [historyPageSize, setHistoryPageSize] = useState(30)
   const [historyTotalItems, setHistoryTotalItems] = useState(0)
+  const [historyFromDate, setHistoryFromDate] = useState('')
+  const [historyToDate, setHistoryToDate] = useState('')
   const [tradeToasts, setTradeToasts] = useState<TradeToast[]>([])
   const [dailySummary, setDailySummary] = useState<DailyTradeSummary[]>([])
   const [hourlyWindows, setHourlyWindows] = useState<HourlyWindowRow[]>([])
@@ -1194,6 +1209,8 @@ function App() {
             return a.mae_pct ?? Number.NEGATIVE_INFINITY
           case 'mfe_pct':
             return a.mfe_pct ?? Number.NEGATIVE_INFINITY
+          case 'expected_mae_pct':
+            return a.expected_mae_pct ?? Number.NEGATIVE_INFINITY
           case 'pnl':
             return a.pnl ?? Number.NEGATIVE_INFINITY
           default:
@@ -1224,6 +1241,8 @@ function App() {
             return b.mae_pct ?? Number.NEGATIVE_INFINITY
           case 'mfe_pct':
             return b.mfe_pct ?? Number.NEGATIVE_INFINITY
+          case 'expected_mae_pct':
+            return b.expected_mae_pct ?? Number.NEGATIVE_INFINITY
           case 'pnl':
             return b.pnl ?? Number.NEGATIVE_INFINITY
           default:
@@ -1268,6 +1287,8 @@ function App() {
           return row.mae_pct ?? Number.NEGATIVE_INFINITY
         case 'mfe_pct':
           return row.mfe_pct ?? Number.NEGATIVE_INFINITY
+        case 'expected_mae_pct':
+          return row.expected_mae_pct ?? Number.NEGATIVE_INFINITY
         case 'entry_type':
           return row.entry_type ?? ''
         case 'model':
@@ -1630,10 +1651,17 @@ function App() {
   }
 
   async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
+    const historyParams = new URLSearchParams({
+      page: String(targetPage),
+      page_size: String(targetPageSize),
+    })
+    if (historyFromDate) historyParams.set('from_date', historyFromDate)
+    if (historyToDate) historyParams.set('to_date', historyToDate)
+
     const [statsRes, openRes, historyRes] = await Promise.all([
       fetch(`${API_BASE}/api/v1/paper-trades/stats`),
       fetch(`${API_BASE}/api/v1/paper-trades/open`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}`),
+      fetch(`${API_BASE}/api/v1/paper-trades/history?${historyParams.toString()}`),
     ])
     const errors: string[] = []
 
@@ -1987,7 +2015,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [showPaperScreen, historyPage, historyPageSize])
+  }, [showPaperScreen, historyPage, historyPageSize, historyFromDate, historyToDate])
 
   useEffect(() => {
     if (!showDailyScreen) return
@@ -2016,6 +2044,10 @@ function App() {
   useEffect(() => {
     setHistoryPage(1)
   }, [paperModelFilter])
+
+  useEffect(() => {
+    setHistoryPage(1)
+  }, [historyFromDate, historyToDate])
 
   useEffect(() => {
     if (!showPaperScreen || paperOpenTrades.length === 0) return
@@ -2455,6 +2487,7 @@ function App() {
             <div className="stats-item"><strong>Avg PnL%:</strong> {paperStats && typeof paperStats.avg_pnl_pct === 'number' ? `${paperStats.avg_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
             <div className="stats-item"><strong>Market Win Rate:</strong> {paperStats ? `${(paperStats.market_win_rate * 100).toFixed(2)}% (${paperStats.market_closed_trades})` : '0.00%'}</div>
             <div className="stats-item"><strong>Limit Win Rate:</strong> {paperStats ? `${(paperStats.limit_win_rate * 100).toFixed(2)}% (${paperStats.limit_closed_trades})` : '0.00%'}</div>
+            <div className="stats-item"><strong>ML_TEST Win Rate:</strong> {paperStats ? `${(paperStats.ml_test_win_rate * 100).toFixed(2)}% (${paperStats.ml_test_closed_trades})` : '0.00%'}</div>
           </div>
           <h3 className="section-title">Entry Type Breakdown</h3>
           <div className="content table-wrap">
@@ -2494,6 +2527,17 @@ function App() {
                   <td>{paperStats ? paperStats.limit_avg_pnl.toFixed(4) : '0.0000'}</td>
                   <td>{paperStats ? `${paperStats.limit_total_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
                   <td>{paperStats ? `${paperStats.limit_avg_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                </tr>
+                <tr>
+                  <td>ML_TEST</td>
+                  <td>{paperStats?.ml_test_closed_trades ?? 0}</td>
+                  <td>{paperStats?.ml_test_win_trades ?? 0}</td>
+                  <td>{paperStats?.ml_test_loss_trades ?? 0}</td>
+                  <td>{paperStats ? `${(paperStats.ml_test_win_rate * 100).toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? paperStats.ml_test_total_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? paperStats.ml_test_avg_pnl.toFixed(4) : '0.0000'}</td>
+                  <td>{paperStats ? `${paperStats.ml_test_total_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
+                  <td>{paperStats ? `${paperStats.ml_test_avg_pnl_pct.toFixed(2)}%` : '0.00%'}</td>
                 </tr>
               </tbody>
             </table>
@@ -2542,6 +2586,7 @@ function App() {
                     <th>BTC Follow</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('expected_mae_pct')}>eMAE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mfe_pct')}>MFE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_type')}>Type</button></th>
@@ -2598,6 +2643,13 @@ function App() {
                         {typeof upnlPct === 'number' ? (
                           <span className={upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                             {`${upnlPct >= 0 ? '+' : ''}${upnlPct.toFixed(2)}%`}
+                          </span>
+                        ) : '-'}
+                      </td>
+                      <td>
+                        {typeof row.expected_mae_pct === 'number' ? (
+                          <span className={row.expected_mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {`${row.expected_mae_pct >= 0 ? '+' : ''}${row.expected_mae_pct.toFixed(2)}%`}
                           </span>
                         ) : '-'}
                       </td>
@@ -2668,6 +2720,37 @@ function App() {
             <div className="scan-actions">
               <span className="badge neutral">Page {historyPage}/{historyMaxPage}</span>
               <span className="badge neutral">Rows: {historyTotalItems}</span>
+              <label className="history-date-label">
+                <span>From</span>
+                <input
+                  type="date"
+                  className="select-control history-date-input"
+                  value={historyFromDate}
+                  max={historyToDate || undefined}
+                  onChange={(event) => setHistoryFromDate(event.target.value)}
+                />
+              </label>
+              <label className="history-date-label">
+                <span>To</span>
+                <input
+                  type="date"
+                  className="select-control history-date-input"
+                  value={historyToDate}
+                  min={historyFromDate || undefined}
+                  onChange={(event) => setHistoryToDate(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn-inline btn-secondary"
+                onClick={() => {
+                  setHistoryFromDate('')
+                  setHistoryToDate('')
+                }}
+                disabled={!historyFromDate && !historyToDate}
+              >
+                Clear Date
+              </button>
               <select
                 className="select-control history-size-select"
                 value={historyPageSize}
@@ -2713,6 +2796,7 @@ function App() {
                     <th>BTC Follow</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('expected_mae_pct')}>eMAE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mfe_pct')}>MFE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('entry_type')}>Type</button></th>
@@ -2762,6 +2846,13 @@ function App() {
                           {typeof closePnlPct === 'number' ? (
                             <span className={closePnlPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
                               {`${closePnlPct >= 0 ? '+' : ''}${closePnlPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>
+                          {typeof row.expected_mae_pct === 'number' ? (
+                            <span className={row.expected_mae_pct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${row.expected_mae_pct >= 0 ? '+' : ''}${row.expected_mae_pct.toFixed(2)}%`}
                             </span>
                           ) : '-'}
                         </td>

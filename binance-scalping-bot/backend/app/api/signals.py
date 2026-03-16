@@ -119,6 +119,18 @@ def _evaluate_paper_entry_gate(
                 return False, str(instant_sl_guard_reason), raw_win_probability, None
         except Exception:
             pass
+        try:
+            pre_entry_mae_reason = engine._pre_entry_mae_guard_reason(
+                symbol=symbol,
+                side=side,
+                entry_type="LIMIT",
+                entry_price=entry,
+                stop_loss=stop_loss,
+            )
+            if pre_entry_mae_reason:
+                return False, str(pre_entry_mae_reason), raw_win_probability, None
+        except Exception:
+            pass
 
         try:
             if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
@@ -211,6 +223,41 @@ def _evaluate_paper_entry_gate(
             )
             if trend_hour_lock_reason:
                 return False, str(trend_hour_lock_reason), effective_probability, btc_following
+        except Exception:
+            pass
+        try:
+            high_prob_guard_reason = engine._high_prob_overconfidence_guard_reason(
+                symbol=symbol,
+                side=side,
+                entry_type="LIMIT",
+                effective_prob=effective_probability,
+                btc_guard=btc_guard,
+                symbol_follows_btc=btc_following,
+            )
+            if high_prob_guard_reason:
+                return False, str(high_prob_guard_reason), effective_probability, btc_following
+        except Exception:
+            pass
+        try:
+            btc_wave_bad_hour_reason = engine._btc_wave_bad_hour_block_reason(
+                symbol=symbol,
+                side=side,
+                btc_guard=btc_guard,
+                symbol_follows_btc=btc_following,
+            )
+            if btc_wave_bad_hour_reason:
+                return False, str(btc_wave_bad_hour_reason), effective_probability, btc_following
+        except Exception:
+            pass
+        try:
+            short_bad_hour_reason = engine._short_bad_hour_block_reason(
+                symbol=symbol,
+                side=side,
+                btc_guard=btc_guard,
+                symbol_follows_btc=btc_following,
+            )
+            if short_bad_hour_reason:
+                return False, str(short_bad_hour_reason), effective_probability, btc_following
         except Exception:
             pass
 
@@ -306,13 +353,18 @@ def _evaluate_paper_entry_gate(
         return False, "Precheck unavailable", raw_win_probability, None
 
 
-def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
+def _scan_signals_impl(
+    min_win: float,
+    max_symbols: int,
+    symbols: list[str] | None = None,
+    allow_cache: bool = True,
+) -> dict:
     global _LAST_SCAN_CACHE, _BLOCK_UNTIL_TS
 
     now_ts = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    if now_ts < _BLOCK_UNTIL_TS and _LAST_SCAN_CACHE is not None:
+    if allow_cache and now_ts < _BLOCK_UNTIL_TS and _LAST_SCAN_CACHE is not None:
         payload = {
             **_LAST_SCAN_CACHE,
             "source": "cache",
@@ -336,7 +388,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
     except Exception as exc:
         if _is_418_error(exc):
             _BLOCK_UNTIL_TS = now_ts + 180
-        if _LAST_SCAN_CACHE is not None:
+        if allow_cache and _LAST_SCAN_CACHE is not None:
             payload = {
                 **_LAST_SCAN_CACHE,
                 "source": "cache",
@@ -344,6 +396,16 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 "timestamp": now_iso,
             }
             return payload
+        if not allow_cache:
+            return {
+                "min_win": min_win,
+                "scanned": len(scan_symbols),
+                "count": 0,
+                "signals": [],
+                "source": "live",
+                "error": str(exc),
+                "timestamp": now_iso,
+            }
         tickers_map = {}
 
     for symbol in scan_symbols:
@@ -413,13 +475,24 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
         "source": "live",
         "timestamp": now_iso,
     }
-    _LAST_SCAN_CACHE = payload
+    if allow_cache:
+        _LAST_SCAN_CACHE = payload
     return payload
 
 
-def get_scan_snapshot(min_win: float = 0.7, max_symbols: int = 80, symbols: str | None = None) -> dict:
+def get_scan_snapshot(
+    min_win: float = 0.7,
+    max_symbols: int = 80,
+    symbols: str | None = None,
+    allow_cache: bool = True,
+) -> dict:
     parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
-    return _scan_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
+    return _scan_signals_impl(
+        min_win=min_win,
+        max_symbols=max_symbols,
+        symbols=parsed_symbols,
+        allow_cache=allow_cache,
+    )
 
 
 @router.get("/latest")

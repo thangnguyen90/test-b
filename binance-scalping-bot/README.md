@@ -365,6 +365,27 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_INSTANT_SL_GLOBAL_*` là tầng bảo vệ toàn cục: nếu SL nhanh/sâu dồn dập thì tạm dừng mở lệnh mới.
 - `PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN` chặn cứng giờ mở lệnh theo giờ VN (không ảnh hưởng quản lý lệnh đang mở).  
 : hỗ trợ `20`, `20,21`, `20-22`, `22-2`.
+- Nếu chỉ muốn chặn `SHORT` ở giờ xấu (không chặn `LONG`), dùng:
+: `PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ENABLED=true`
+: `PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_HOURS_VN=20`
+: `PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ON_BTC_BULLISH=true`
+: `PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_MIN_BTC_CONFIDENCE=0.60`
+: `PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ON_NON_BTC_FOLLOW=true`
+: Nếu đã bật rule này cho `20h`, nên bỏ `20` khỏi `PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN` để không chặn luôn cả lệnh LONG.
+- Nếu muốn chặn theo sóng BTC cho cả 2 chiều trong giờ xấu, dùng:
+: `PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_ENABLED=true`
+: `PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_HOURS_VN=20`
+: `PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_MIN_CONFIDENCE=0.60`
+: `PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_APPLY_NON_BTC_FOLLOW=true`
+: Logic: BTC bullish => chặn SHORT, BTC bearish => chặn LONG (chỉ trong giờ cấu hình).
+- Có thể bật guard phụ cho band xác suất cao (ví dụ `>=0.92`) để tránh overconfident nhưng payoff âm:
+: `PAPER_TRADE_HIGH_PROB_GUARD_ENABLED=true`
+: `PAPER_TRADE_HIGH_PROB_GUARD_MIN_EFFECTIVE_WIN=0.92`
+: `PAPER_TRADE_HIGH_PROB_GUARD_MIN_SAMPLES=80`
+: `PAPER_TRADE_HIGH_PROB_GUARD_COUNTERTREND_BTC_CONFIDENCE=0.62`
+: `PAPER_TRADE_HIGH_PROB_GUARD_BLOCK_NON_BTC_FOLLOW=true`
+- Nếu muốn A/B model chinh vs model test:
+: `PAPER_TRADE_TEST_ML_ENABLED=true` (khuyen nghi gioi han `PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE=1` de tranh overtrade).
 - `PAPER_TRADE_BTC_TREND_HOUR_LOCK_ENABLED` bật/tắt khóa theo trend BTC trong một khoảng giờ cố định.
 - `PAPER_TRADE_BTC_TREND_HOUR_LOCK_COUNTERTREND_HOURS` là số giờ khóa chiều ngược trend.  
 : ví dụ BTC bullish thì khóa SHORT trong X giờ.

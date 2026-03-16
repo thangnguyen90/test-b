@@ -66,6 +66,9 @@ class MySQLTradeRepository:
                         close_reason VARCHAR(32) NULL,
                         mae_pct DOUBLE NULL,
                         mfe_pct DOUBLE NULL,
+                        expected_mae_pct DOUBLE NULL,
+                        expected_mae_samples INT NULL,
+                        expected_mae_tier VARCHAR(32) NULL,
                         feature_snapshot_json LONGTEXT NULL,
                         feature_captured_at DATETIME(6) NULL,
                         pnl DOUBLE NULL,
@@ -149,6 +152,45 @@ class MySQLTradeRepository:
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute(
                         "ALTER TABLE paper_trades ADD COLUMN mfe_pct DOUBLE NULL AFTER mae_pct"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='expected_mae_pct'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN expected_mae_pct DOUBLE NULL AFTER mfe_pct"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='expected_mae_samples'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN expected_mae_samples INT NULL AFTER expected_mae_pct"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='expected_mae_tier'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN expected_mae_tier VARCHAR(32) NULL AFTER expected_mae_samples"
                     )
                 cur.execute(
                     """
@@ -382,10 +424,10 @@ class MySQLTradeRepository:
                     INSERT INTO paper_trades (
                         symbol, side, btc_following, entry_type, signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
-                        quantity, margin_usdt, leverage, mae_pct, mfe_pct,
+                        quantity, margin_usdt, leverage, mae_pct, mfe_pct, expected_mae_pct, expected_mae_samples, expected_mae_tier,
                         feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -406,6 +448,9 @@ class MySQLTradeRepository:
                         payload["leverage"],
                         payload.get("mae_pct", 0.0),
                         payload.get("mfe_pct", 0.0),
+                        payload.get("expected_mae_pct"),
+                        payload.get("expected_mae_samples"),
+                        payload.get("expected_mae_tier"),
                         feature_snapshot_json,
                         feature_captured_at,
                         now,
@@ -414,6 +459,129 @@ class MySQLTradeRepository:
                     ),
                 )
                 return int(cur.lastrowid)
+
+    @staticmethod
+    def _quantile(values: list[float], q: float) -> float | None:
+        if not values:
+            return None
+        safe_q = max(0.0, min(float(q), 1.0))
+        data = sorted(float(v) for v in values)
+        if len(data) == 1:
+            return float(data[0])
+        pos = safe_q * (len(data) - 1)
+        lower = int(pos)
+        upper = min(lower + 1, len(data) - 1)
+        weight = pos - lower
+        return float(data[lower] * (1.0 - weight) + data[upper] * weight)
+
+    def _load_mae_abs_samples(
+        self,
+        *,
+        lookback_from: datetime,
+        side: str,
+        entry_type: str,
+        symbol: str | None = None,
+        hour_vn: int | None = None,
+        weekday_vn: int | None = None,
+        limit: int = 4000,
+    ) -> list[float]:
+        where = [
+            "status='CLOSED'",
+            "mae_pct IS NOT NULL",
+            "updated_at >= %s",
+            "side=%s",
+            "entry_type=%s",
+        ]
+        params: list[Any] = [lookback_from, side, entry_type]
+        if symbol:
+            where.append("REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')")
+            params.append(symbol)
+        if hour_vn is not None:
+            where.append("HOUR(opened_at)=%s")
+            params.append(int(hour_vn))
+        if weekday_vn is not None:
+            # MySQL WEEKDAY: Monday=0 ... Sunday=6.
+            where.append("WEEKDAY(opened_at)=%s")
+            params.append(int(weekday_vn))
+
+        safe_limit = max(100, min(int(limit), 10000))
+        sql = f"""
+            SELECT mae_pct
+            FROM paper_trades
+            WHERE {' AND '.join(where)}
+            ORDER BY updated_at DESC
+            LIMIT %s
+        """
+        params.append(safe_limit)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = list(cur.fetchall() or [])
+
+        samples: list[float] = []
+        for row in rows:
+            try:
+                mae_val = float(row.get("mae_pct") or 0.0)
+            except Exception:
+                continue
+            adverse_abs = abs(min(0.0, mae_val))
+            if adverse_abs < 1e-9:
+                adverse_abs = 0.0
+            samples.append(float(adverse_abs))
+        return samples
+
+    def estimate_expected_mae_pct(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str = "LIMIT",
+        hour_vn: int | None = None,
+        weekday_vn: int | None = None,
+        lookback_days: int = 60,
+        min_samples: int = 20,
+        quantile: float = 0.65,
+    ) -> dict[str, Any] | None:
+        side_key = str(side or "").upper().strip()
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        entry_type_key = str(entry_type or "LIMIT").upper().strip()
+        safe_lookback = max(1, min(int(lookback_days), 3650))
+        safe_min_samples = max(5, min(int(min_samples), 10000))
+        safe_quantile = max(0.0, min(float(quantile), 1.0))
+        lookback_from = _now_vn() - timedelta(days=safe_lookback)
+
+        tiers: list[tuple[str, dict[str, Any]]] = [
+            ("SYMBOL_HOUR_DOW", {"symbol": symbol, "hour_vn": hour_vn, "weekday_vn": weekday_vn}),
+            ("SYMBOL_HOUR", {"symbol": symbol, "hour_vn": hour_vn, "weekday_vn": None}),
+            ("SYMBOL", {"symbol": symbol, "hour_vn": None, "weekday_vn": None}),
+            ("SIDE_HOUR_DOW", {"symbol": None, "hour_vn": hour_vn, "weekday_vn": weekday_vn}),
+            ("SIDE_HOUR", {"symbol": None, "hour_vn": hour_vn, "weekday_vn": None}),
+            ("SIDE", {"symbol": None, "hour_vn": None, "weekday_vn": None}),
+        ]
+
+        for tier_name, opts in tiers:
+            samples = self._load_mae_abs_samples(
+                lookback_from=lookback_from,
+                side=side_key,
+                entry_type=entry_type_key,
+                symbol=opts.get("symbol"),
+                hour_vn=opts.get("hour_vn"),
+                weekday_vn=opts.get("weekday_vn"),
+            )
+            if len(samples) < safe_min_samples:
+                continue
+            expected_abs = self._quantile(samples, safe_quantile)
+            if expected_abs is None:
+                continue
+            return {
+                "expected_mae_pct": -abs(float(expected_abs)),
+                "samples": len(samples),
+                "tier": tier_name,
+                "quantile": safe_quantile,
+                "lookback_days": safe_lookback,
+            }
+        return None
 
     def has_open_trade(self, symbol: str, side: str, entry_type: str | None = None) -> bool:
         with self._conn() as conn:
@@ -596,27 +764,64 @@ class MySQLTradeRepository:
                     (stop_loss, now, trade_id),
                 )
 
-    def list_recent_trades(self, limit: int = 200) -> list[dict[str, Any]]:
+    @staticmethod
+    def _build_recent_trade_time_where(
+        from_updated_at: datetime | None = None,
+        to_updated_at_exclusive: datetime | None = None,
+    ) -> tuple[str, list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if from_updated_at is not None:
+            clauses.append("updated_at >= %s")
+            params.append(from_updated_at)
+        if to_updated_at_exclusive is not None:
+            clauses.append("updated_at < %s")
+            params.append(to_updated_at_exclusive)
+        if not clauses:
+            return "", params
+        return f"WHERE {' AND '.join(clauses)}", params
+
+    def list_recent_trades(
+        self,
+        limit: int = 200,
+        from_updated_at: datetime | None = None,
+        to_updated_at_exclusive: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         safe_limit = max(1, min(limit, 2000))
+        where_sql, params = self._build_recent_trade_time_where(
+            from_updated_at=from_updated_at,
+            to_updated_at_exclusive=to_updated_at_exclusive,
+        )
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT {safe_limit}"
+                    f"SELECT * FROM paper_trades {where_sql} ORDER BY opened_at DESC LIMIT %s",
+                    (*params, safe_limit),
                 )
                 return list(cur.fetchall())
 
-    def list_recent_trades_paged(self, page: int = 1, page_size: int = 50) -> tuple[list[dict[str, Any]], int]:
+    def list_recent_trades_paged(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        from_updated_at: datetime | None = None,
+        to_updated_at_exclusive: datetime | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
         safe_page = max(1, int(page))
         safe_page_size = max(1, min(int(page_size), 200))
         offset = (safe_page - 1) * safe_page_size
+        where_sql, params = self._build_recent_trade_time_where(
+            from_updated_at=from_updated_at,
+            to_updated_at_exclusive=to_updated_at_exclusive,
+        )
         with self._conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS cnt FROM paper_trades")
+                cur.execute(f"SELECT COUNT(*) AS cnt FROM paper_trades {where_sql}", tuple(params))
                 total_row = cur.fetchone() or {}
                 total = int(total_row.get("cnt") or 0)
                 cur.execute(
-                    "SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT %s OFFSET %s",
-                    (safe_page_size, offset),
+                    f"SELECT * FROM paper_trades {where_sql} ORDER BY opened_at DESC LIMIT %s OFFSET %s",
+                    (*params, safe_page_size, offset),
                 )
                 rows = list(cur.fetchall())
         return rows, total
@@ -717,6 +922,39 @@ class MySQLTradeRepository:
                             ),
                             0
                         ) AS limit_avg_pnl_pct,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='ML_TEST' THEN 1 ELSE 0 END) AS ml_test_closed_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='ML_TEST' AND result=1 THEN 1 ELSE 0 END) AS ml_test_win_trades,
+                        SUM(CASE WHEN status='CLOSED' AND entry_type='ML_TEST' AND result=0 THEN 1 ELSE 0 END) AS ml_test_loss_trades,
+                        COALESCE(SUM(CASE WHEN status='CLOSED' AND entry_type='ML_TEST' THEN pnl ELSE 0 END), 0) AS ml_test_total_pnl,
+                        COALESCE(AVG(CASE WHEN status='CLOSED' AND entry_type='ML_TEST' THEN pnl ELSE NULL END), 0) AS ml_test_avg_pnl,
+                        COALESCE(
+                            SUM(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='ML_TEST' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE 0
+                                        END
+                                    ELSE 0
+                                END
+                            ),
+                            0
+                        ) AS ml_test_total_pnl_pct,
+                        COALESCE(
+                            AVG(
+                                CASE
+                                    WHEN status='CLOSED' AND entry_type='ML_TEST' AND pnl IS NOT NULL THEN
+                                        CASE
+                                            WHEN COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0)) > 0
+                                                THEN (pnl / COALESCE(margin_usdt, (entry_price * quantity) / NULLIF(leverage, 0))) * 100
+                                            ELSE NULL
+                                        END
+                                    ELSE NULL
+                                END
+                            ),
+                            0
+                        ) AS ml_test_avg_pnl_pct,
                         COALESCE(SUM(CASE WHEN status='CLOSED' THEN pnl ELSE 0 END), 0) AS total_pnl,
                         COALESCE(AVG(CASE WHEN status='CLOSED' THEN pnl ELSE NULL END), 0) AS avg_pnl,
                         COALESCE(
@@ -758,9 +996,12 @@ class MySQLTradeRepository:
         market_wins = int(row.get("market_win_trades") or 0)
         limit_closed = int(row.get("limit_closed_trades") or 0)
         limit_wins = int(row.get("limit_win_trades") or 0)
+        ml_test_closed = int(row.get("ml_test_closed_trades") or 0)
+        ml_test_wins = int(row.get("ml_test_win_trades") or 0)
         win_rate = (wins / closed) if closed > 0 else 0.0
         market_win_rate = (market_wins / market_closed) if market_closed > 0 else 0.0
         limit_win_rate = (limit_wins / limit_closed) if limit_closed > 0 else 0.0
+        ml_test_win_rate = (ml_test_wins / ml_test_closed) if ml_test_closed > 0 else 0.0
 
         return {
             "total_trades": int(row.get("total_trades") or 0),
@@ -789,6 +1030,14 @@ class MySQLTradeRepository:
             "limit_avg_pnl": float(row.get("limit_avg_pnl") or 0.0),
             "limit_total_pnl_pct": float(row.get("limit_total_pnl_pct") or 0.0),
             "limit_avg_pnl_pct": float(row.get("limit_avg_pnl_pct") or 0.0),
+            "ml_test_closed_trades": ml_test_closed,
+            "ml_test_win_trades": ml_test_wins,
+            "ml_test_win_rate": float(ml_test_win_rate),
+            "ml_test_loss_trades": int(row.get("ml_test_loss_trades") or 0),
+            "ml_test_total_pnl": float(row.get("ml_test_total_pnl") or 0.0),
+            "ml_test_avg_pnl": float(row.get("ml_test_avg_pnl") or 0.0),
+            "ml_test_total_pnl_pct": float(row.get("ml_test_total_pnl_pct") or 0.0),
+            "ml_test_avg_pnl_pct": float(row.get("ml_test_avg_pnl_pct") or 0.0),
         }
 
     def symbol_accuracy(self, symbol: str, lookback: int = 200) -> float | None:

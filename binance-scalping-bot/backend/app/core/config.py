@@ -161,6 +161,11 @@ class Settings(BaseModel):
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
+    paper_trade_test_ml_fixed_sl_pct: float = float(os.getenv("PAPER_TRADE_TEST_ML_FIXED_SL_PCT", "30"))
+    paper_trade_test_ml_tp_min_pct: float = float(os.getenv("PAPER_TRADE_TEST_ML_TP_MIN_PCT", "8"))
+    paper_trade_test_ml_tp_max_pct: float = float(os.getenv("PAPER_TRADE_TEST_ML_TP_MAX_PCT", "20"))
+    paper_trade_test_ml_max_hold_minutes: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_HOLD_MINUTES", "240"))
+    paper_trade_test_ml_timeout_min_pnl_usdt: float = float(os.getenv("PAPER_TRADE_TEST_ML_TIMEOUT_MIN_PNL_USDT", "0.1"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
@@ -191,6 +196,76 @@ class Settings(BaseModel):
         os.getenv("PAPER_TRADE_INSTANT_SL_GLOBAL_COOLDOWN_MINUTES", "60")
     )
     paper_trade_entry_hard_block_hours_vn: str = os.getenv("PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN", "20")
+    paper_trade_short_bad_hour_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ENABLED",
+        "false",
+    ).lower() == "true"
+    paper_trade_short_bad_hour_block_hours_vn: str = os.getenv("PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_HOURS_VN", "20")
+    paper_trade_short_bad_hour_block_on_btc_bullish: bool = os.getenv(
+        "PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ON_BTC_BULLISH",
+        "true",
+    ).lower() == "true"
+    paper_trade_short_bad_hour_block_min_btc_confidence: float = float(
+        os.getenv("PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_MIN_BTC_CONFIDENCE", "0.60")
+    )
+    paper_trade_short_bad_hour_block_on_non_btc_follow: bool = os.getenv(
+        "PAPER_TRADE_SHORT_BAD_HOUR_BLOCK_ON_NON_BTC_FOLLOW",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_wave_bad_hour_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_ENABLED",
+        "false",
+    ).lower() == "true"
+    paper_trade_btc_wave_bad_hour_block_hours_vn: str = os.getenv(
+        "PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_HOURS_VN",
+        "20",
+    )
+    paper_trade_btc_wave_bad_hour_block_min_confidence: float = float(
+        os.getenv("PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_MIN_CONFIDENCE", "0.60")
+    )
+    paper_trade_btc_wave_bad_hour_block_apply_non_btc_follow: bool = os.getenv(
+        "PAPER_TRADE_BTC_WAVE_BAD_HOUR_BLOCK_APPLY_NON_BTC_FOLLOW",
+        "true",
+    ).lower() == "true"
+    paper_trade_high_prob_guard_enabled: bool = os.getenv(
+        "PAPER_TRADE_HIGH_PROB_GUARD_ENABLED",
+        "false",
+    ).lower() == "true"
+    paper_trade_high_prob_guard_min_effective_win: float = float(
+        os.getenv("PAPER_TRADE_HIGH_PROB_GUARD_MIN_EFFECTIVE_WIN", "0.92")
+    )
+    paper_trade_high_prob_guard_min_samples: int = int(
+        os.getenv("PAPER_TRADE_HIGH_PROB_GUARD_MIN_SAMPLES", "80")
+    )
+    paper_trade_high_prob_guard_countertrend_btc_confidence: float = float(
+        os.getenv("PAPER_TRADE_HIGH_PROB_GUARD_COUNTERTREND_BTC_CONFIDENCE", "0.62")
+    )
+    paper_trade_high_prob_guard_block_non_btc_follow: bool = os.getenv(
+        "PAPER_TRADE_HIGH_PROB_GUARD_BLOCK_NON_BTC_FOLLOW",
+        "true",
+    ).lower() == "true"
+    paper_trade_pre_entry_mae_guard_enabled: bool = os.getenv(
+        "PAPER_TRADE_PRE_ENTRY_MAE_GUARD_ENABLED",
+        "false",
+    ).lower() == "true"
+    paper_trade_pre_entry_mae_lookback_days: int = int(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_LOOKBACK_DAYS", "60")
+    )
+    paper_trade_pre_entry_mae_min_samples: int = int(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_MIN_SAMPLES", "20")
+    )
+    paper_trade_pre_entry_mae_quantile: float = float(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_QUANTILE", "0.65")
+    )
+    paper_trade_pre_entry_mae_max_abs_pct: float = float(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_MAX_ABS_PCT", "9.0")
+    )
+    paper_trade_pre_entry_mae_max_sl_ratio: float = float(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_MAX_SL_RATIO", "0.85")
+    )
+    paper_trade_pre_entry_mae_cache_sec: int = int(
+        os.getenv("PAPER_TRADE_PRE_ENTRY_MAE_CACHE_SEC", "300")
+    )
     paper_trade_hourly_profile_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_ENABLED", "true").lower() == "true"
     paper_trade_hourly_profile_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_MIN_SAMPLES", "60"))
     paper_trade_hourly_profile_prob_alpha: float = float(os.getenv("PAPER_TRADE_HOURLY_PROFILE_PROB_ALPHA", "0.25"))
