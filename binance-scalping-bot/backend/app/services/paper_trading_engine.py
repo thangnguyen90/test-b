@@ -107,6 +107,12 @@ class PaperTradingEngine:
         instant_sl_guard_min_abs_pnl_pct: float = 10.0,
         instant_sl_guard_min_abs_mae_pct: float = 8.0,
         instant_sl_guard_cooldown_minutes: int = 90,
+        instant_sl_guard_short_top_test_bypass_enabled: bool = True,
+        instant_sl_guard_short_top_test_lookback_candles: int = 20,
+        instant_sl_guard_short_top_test_tolerance_pct: float = 0.001,
+        instant_sl_guard_short_rejection_min_upper_wick_ratio: float = 0.35,
+        instant_sl_guard_short_rejection_min_wick_body_ratio: float = 1.2,
+        instant_sl_guard_short_top_test_cache_sec: float = 8.0,
         instant_sl_global_guard_enabled: bool = True,
         instant_sl_global_threshold: int = 3,
         instant_sl_global_window_minutes: int = 20,
@@ -222,6 +228,27 @@ class PaperTradingEngine:
         self.instant_sl_guard_min_abs_pnl_pct = max(0.0, float(instant_sl_guard_min_abs_pnl_pct))
         self.instant_sl_guard_min_abs_mae_pct = max(0.0, float(instant_sl_guard_min_abs_mae_pct))
         self.instant_sl_guard_cooldown_minutes = max(1, int(instant_sl_guard_cooldown_minutes))
+        self.instant_sl_guard_short_top_test_bypass_enabled = bool(instant_sl_guard_short_top_test_bypass_enabled)
+        self.instant_sl_guard_short_top_test_lookback_candles = max(
+            5,
+            min(120, int(instant_sl_guard_short_top_test_lookback_candles)),
+        )
+        self.instant_sl_guard_short_top_test_tolerance_pct = max(
+            0.0,
+            min(float(instant_sl_guard_short_top_test_tolerance_pct), 0.02),
+        )
+        self.instant_sl_guard_short_rejection_min_upper_wick_ratio = max(
+            0.05,
+            min(float(instant_sl_guard_short_rejection_min_upper_wick_ratio), 0.95),
+        )
+        self.instant_sl_guard_short_rejection_min_wick_body_ratio = max(
+            0.5,
+            min(float(instant_sl_guard_short_rejection_min_wick_body_ratio), 8.0),
+        )
+        self.instant_sl_guard_short_top_test_cache_sec = max(
+            1.0,
+            min(float(instant_sl_guard_short_top_test_cache_sec), 60.0),
+        )
         self.instant_sl_global_guard_enabled = bool(instant_sl_global_guard_enabled)
         self.instant_sl_global_threshold = max(1, int(instant_sl_global_threshold))
         self.instant_sl_global_window_minutes = max(1, int(instant_sl_global_window_minutes))
@@ -258,6 +285,7 @@ class PaperTradingEngine:
         self._vn_tz = timezone(timedelta(hours=7))
         self._atr_cache: dict[str, tuple[float, float]] = {}
         self._top_vol_cache: tuple[float, list[str]] | None = None
+        self._short_top_test_rejection_cache: dict[str, tuple[float, bool]] = {}
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
@@ -1202,12 +1230,65 @@ class PaperTradingEngine:
         if now_ts >= lock_until_ts:
             self._instant_sl_symbol_side_lock_until_ts.pop(key, None)
             return None
-        remain_minutes = max(1, int(math.ceil((lock_until_ts - now_ts) / 60.0)))
         side_key = str(side or "").upper()
+        if side_key == "SHORT" and self._is_short_top_test_rejection(symbol=symbol):
+            return None
+        remain_minutes = max(1, int(math.ceil((lock_until_ts - now_ts) / 60.0)))
         return f"Instant-SL guard {side_key} ({remain_minutes}m left)"
 
     def _pass_instant_sl_guard(self, *, symbol: str, side: str) -> bool:
         return self._instant_sl_guard_reason(symbol=symbol, side=side) is None
+
+    def _is_short_top_test_rejection(self, *, symbol: str) -> bool:
+        if not self.instant_sl_guard_short_top_test_bypass_enabled:
+            return False
+
+        key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cached = self._short_top_test_rejection_cache.get(key)
+        if cached is not None:
+            cached_ts, cached_value = cached
+            if (now_ts - cached_ts) <= self.instant_sl_guard_short_top_test_cache_sec:
+                return bool(cached_value)
+
+        matched = False
+        try:
+            # Use the most recently closed 5m candle to avoid intrabar noise.
+            limit = max(self.instant_sl_guard_short_top_test_lookback_candles + 3, 18)
+            rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=limit)
+            if rows and len(rows) >= 4:
+                closed_idx = -2 if len(rows) >= 2 else -1
+                candle = rows[closed_idx]
+                prev_rows = rows[:closed_idx]
+                if len(prev_rows) >= 3:
+                    lookback = self.instant_sl_guard_short_top_test_lookback_candles
+                    prev_scope = prev_rows[-lookback:] if len(prev_rows) > lookback else prev_rows
+                    recent_high = max(float(r[2]) for r in prev_scope if len(r) >= 3)
+
+                    open_price = float(candle[1])
+                    high_price = float(candle[2])
+                    low_price = float(candle[3])
+                    close_price = float(candle[4])
+                    if recent_high > 0 and high_price > 0:
+                        top_tolerance = self.instant_sl_guard_short_top_test_tolerance_pct
+                        top_tested = high_price >= (recent_high * (1.0 - top_tolerance))
+                        close_back_below_top = close_price <= recent_high
+                        bearish_close = close_price <= open_price
+
+                        candle_range = max(1e-12, high_price - low_price)
+                        upper_wick = max(0.0, high_price - max(open_price, close_price))
+                        body_size = abs(close_price - open_price)
+                        upper_wick_ratio = upper_wick / candle_range
+                        wick_range_ok = upper_wick_ratio >= self.instant_sl_guard_short_rejection_min_upper_wick_ratio
+                        wick_body_ok = upper_wick >= (
+                            body_size * self.instant_sl_guard_short_rejection_min_wick_body_ratio
+                        )
+                        matched = top_tested and close_back_below_top and bearish_close and wick_range_ok and wick_body_ok
+        except Exception:
+            matched = False
+
+        self._short_top_test_rejection_cache[key] = (now_ts, bool(matched))
+        return bool(matched)
 
     def _register_instant_sl_event(
         self,

@@ -177,6 +177,25 @@ class Settings(BaseModel):
     paper_trade_instant_sl_guard_cooldown_minutes: int = int(
         os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_COOLDOWN_MINUTES", "90")
     )
+    paper_trade_instant_sl_guard_short_top_test_bypass_enabled: bool = os.getenv(
+        "PAPER_TRADE_INSTANT_SL_GUARD_SHORT_TOP_TEST_BYPASS_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_instant_sl_guard_short_top_test_lookback_candles: int = int(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_TOP_TEST_LOOKBACK_CANDLES", "20")
+    )
+    paper_trade_instant_sl_guard_short_top_test_tolerance_pct: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_TOP_TEST_TOLERANCE_PCT", "0.001")
+    )
+    paper_trade_instant_sl_guard_short_rejection_min_upper_wick_ratio: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_REJECTION_MIN_UPPER_WICK_RATIO", "0.35")
+    )
+    paper_trade_instant_sl_guard_short_rejection_min_wick_body_ratio: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_REJECTION_MIN_WICK_BODY_RATIO", "1.2")
+    )
+    paper_trade_instant_sl_guard_short_top_test_cache_sec: float = float(
+        os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_TOP_TEST_CACHE_SEC", "8")
+    )
     paper_trade_instant_sl_global_guard_enabled: bool = os.getenv(
         "PAPER_TRADE_INSTANT_SL_GLOBAL_GUARD_ENABLED",
         "true",
