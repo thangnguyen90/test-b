@@ -359,6 +359,26 @@ class MySQLTradeRepository:
                 scope_len = int((cur.fetchone() or {}).get("max_len") or 0)
                 if 0 < scope_len < 96:
                     cur.execute("ALTER TABLE trade_hourly_profiles MODIFY COLUMN scope VARCHAR(96) NOT NULL")
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS market_event_windows (
+                        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                        title VARCHAR(255) NOT NULL,
+                        category VARCHAR(64) NOT NULL DEFAULT 'macro',
+                        impact_level VARCHAR(16) NOT NULL DEFAULT 'HIGH',
+                        starts_at DATETIME(6) NOT NULL,
+                        ends_at DATETIME(6) NOT NULL,
+                        expected_volatility_pct DOUBLE NULL,
+                        source_url VARCHAR(512) NULL,
+                        note TEXT NULL,
+                        is_active TINYINT(1) NOT NULL DEFAULT 1,
+                        created_at DATETIME(6) NOT NULL,
+                        updated_at DATETIME(6) NOT NULL,
+                        INDEX idx_event_time (starts_at, ends_at),
+                        INDEX idx_event_active_time (is_active, starts_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                    """
+                )
 
     def create_open_trade(self, payload: dict[str, Any]) -> int:
         now = _now_vn()
@@ -1207,3 +1227,222 @@ class MySQLTradeRepository:
                 }
             )
         return out
+
+
+    @staticmethod
+    def _to_vn_naive(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(_VN_TZ).replace(tzinfo=None)
+        return value
+
+    def get_market_event_window(self, event_id: int) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM market_event_windows
+                    WHERE id=%s
+                    LIMIT 1
+                    """,
+                    (int(event_id),),
+                )
+                return cur.fetchone()
+
+    def list_market_event_windows(
+        self,
+        *,
+        starts_from: datetime | None = None,
+        ends_to: datetime | None = None,
+        active_only: bool = False,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 2000))
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        if starts_from is not None:
+            where_clauses.append("ends_at >= %s")
+            params.append(self._to_vn_naive(starts_from))
+        if ends_to is not None:
+            where_clauses.append("starts_at <= %s")
+            params.append(self._to_vn_naive(ends_to))
+        if active_only:
+            where_clauses.append("is_active=1")
+
+        query = "SELECT * FROM market_event_windows"
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+        query += f" ORDER BY starts_at ASC LIMIT {safe_limit}"
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, tuple(params))
+                return list(cur.fetchall() or [])
+
+    def create_market_event_window(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        now = _now_vn()
+        starts_at = self._to_vn_naive(payload.get("starts_at"))
+        ends_at = self._to_vn_naive(payload.get("ends_at"))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO market_event_windows (
+                        title, category, impact_level, starts_at, ends_at,
+                        expected_volatility_pct, source_url, note, is_active,
+                        created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        payload.get("title"),
+                        payload.get("category", "macro"),
+                        payload.get("impact_level", "HIGH"),
+                        starts_at,
+                        ends_at,
+                        payload.get("expected_volatility_pct"),
+                        payload.get("source_url"),
+                        payload.get("note"),
+                        1 if bool(payload.get("is_active", True)) else 0,
+                        now,
+                        now,
+                    ),
+                )
+                event_id = int(cur.lastrowid)
+        return self.get_market_event_window(event_id)
+
+    def update_market_event_window(self, event_id: int, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if not payload:
+            return self.get_market_event_window(event_id)
+        field_map = {
+            "title": "title",
+            "category": "category",
+            "impact_level": "impact_level",
+            "starts_at": "starts_at",
+            "ends_at": "ends_at",
+            "expected_volatility_pct": "expected_volatility_pct",
+            "source_url": "source_url",
+            "note": "note",
+            "is_active": "is_active",
+        }
+        updates: list[str] = []
+        values: list[Any] = []
+        for key, column in field_map.items():
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if key in {"starts_at", "ends_at"}:
+                value = self._to_vn_naive(value)
+            if key == "is_active" and value is not None:
+                value = 1 if bool(value) else 0
+            updates.append(f"{column}=%s")
+            values.append(value)
+        if not updates:
+            return self.get_market_event_window(event_id)
+
+        updates.append("updated_at=%s")
+        values.append(_now_vn())
+        values.append(int(event_id))
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE market_event_windows SET {', '.join(updates)} WHERE id=%s",
+                    tuple(values),
+                )
+        return self.get_market_event_window(event_id)
+
+    def disable_market_event_window(self, event_id: int) -> dict[str, Any] | None:
+        return self.update_market_event_window(int(event_id), {"is_active": False})
+
+    def upsert_market_event_window(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        now = _now_vn()
+        title = str(payload.get("title") or "").strip()
+        starts_at = self._to_vn_naive(payload.get("starts_at"))
+        ends_at = self._to_vn_naive(payload.get("ends_at"))
+        if not title or starts_at is None or ends_at is None or ends_at <= starts_at:
+            return None, False
+
+        source_url = str(payload.get("source_url") or "").strip() or None
+        source_key = source_url or ""
+        category = str(payload.get("category") or "macro").strip().lower()
+        impact_level = str(payload.get("impact_level") or "HIGH").strip().upper()
+        expected_volatility_pct = payload.get("expected_volatility_pct")
+        note = payload.get("note")
+        is_active = 1 if bool(payload.get("is_active", True)) else 0
+
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM market_event_windows
+                    WHERE title=%s AND starts_at=%s AND COALESCE(source_url, '')=%s
+                    LIMIT 1
+                    """,
+                    (title, starts_at, source_key),
+                )
+                existing = cur.fetchone() or {}
+                existing_id = int(existing.get("id") or 0)
+
+                if existing_id > 0:
+                    cur.execute(
+                        """
+                        UPDATE market_event_windows
+                        SET
+                            title=%s,
+                            category=%s,
+                            impact_level=%s,
+                            starts_at=%s,
+                            ends_at=%s,
+                            expected_volatility_pct=%s,
+                            source_url=%s,
+                            note=%s,
+                            is_active=%s,
+                            updated_at=%s
+                        WHERE id=%s
+                        """,
+                        (
+                            title,
+                            category,
+                            impact_level,
+                            starts_at,
+                            ends_at,
+                            expected_volatility_pct,
+                            source_url,
+                            note,
+                            is_active,
+                            now,
+                            existing_id,
+                        ),
+                    )
+                    event_id = existing_id
+                    created = False
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO market_event_windows (
+                            title, category, impact_level, starts_at, ends_at,
+                            expected_volatility_pct, source_url, note, is_active,
+                            created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            title,
+                            category,
+                            impact_level,
+                            starts_at,
+                            ends_at,
+                            expected_volatility_pct,
+                            source_url,
+                            note,
+                            is_active,
+                            now,
+                            now,
+                        ),
+                    )
+                    event_id = int(cur.lastrowid)
+                    created = True
+
+        return self.get_market_event_window(event_id), created

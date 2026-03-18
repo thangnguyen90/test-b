@@ -3,10 +3,20 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import math
+import xml.etree.ElementTree as ET
+
+import httpx
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
+from app.models.event_windows import (
+    MarketEventWindow,
+    MarketEventWindowCreateRequest,
+    MarketEventImportResponse,
+    MarketEventWindowListResponse,
+    MarketEventWindowUpdateRequest,
+)
 from app.models.paper_trades import (
     PaperManualCloseRequest,
     PaperTradeDailySummary,
@@ -60,6 +70,11 @@ class PaperTradeAPI:
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
         self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
+        self.router.add_api_route("/event-windows", self.list_event_windows, methods=["GET"], response_model=MarketEventWindowListResponse)
+        self.router.add_api_route("/event-windows", self.create_event_window, methods=["POST"], response_model=MarketEventWindow)
+        self.router.add_api_route("/event-windows/import", self.import_event_windows, methods=["POST"], response_model=MarketEventImportResponse)
+        self.router.add_api_route("/event-windows/{event_id}", self.update_event_window, methods=["PATCH"], response_model=MarketEventWindow)
+        self.router.add_api_route("/event-windows/{event_id}", self.disable_event_window, methods=["DELETE"], response_model=MarketEventWindow)
         self.router.add_api_route("/market-open", self.market_open, methods=["POST"], response_model=PaperTrade)
         self.router.add_api_route("/close/{trade_id}", self.manual_close, methods=["POST"], response_model=PaperTrade)
 
@@ -369,6 +384,381 @@ class PaperTradeAPI:
             current_hour_vn=current_hour_vn,
             weekday_vn=(int(weekday_vn) if weekday_vn is not None else None),
             trend_key=safe_trend,
+            items=items,
+        )
+
+    @staticmethod
+    def _now_vn_naive() -> datetime:
+        return datetime.now(timezone(timedelta(hours=7))).replace(tzinfo=None)
+
+    @staticmethod
+    def _to_vn_naive(value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is not None:
+            return value.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+        return value
+
+    @classmethod
+    def _map_event_window(cls, row: dict, now_vn: datetime | None = None) -> MarketEventWindow:
+        starts_at = _parse_dt(row.get("starts_at")) or datetime.utcnow()
+        ends_at = _parse_dt(row.get("ends_at")) or starts_at
+        if starts_at.tzinfo is not None:
+            starts_at = starts_at.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+        if ends_at.tzinfo is not None:
+            ends_at = ends_at.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+
+        now_naive = now_vn or cls._now_vn_naive()
+        phase = "PAST"
+        minutes_to_start: int | None = None
+        minutes_to_end: int | None = None
+        if now_naive < starts_at:
+            phase = "UPCOMING"
+            minutes_to_start = max(0, int(math.ceil((starts_at - now_naive).total_seconds() / 60.0)))
+        elif starts_at <= now_naive <= ends_at:
+            phase = "ONGOING"
+            minutes_to_end = max(0, int(math.ceil((ends_at - now_naive).total_seconds() / 60.0)))
+
+        return MarketEventWindow(
+            id=int(row.get("id") or 0),
+            title=str(row.get("title") or ""),
+            category=str(row.get("category") or "macro"),
+            impact_level=str(row.get("impact_level") or "HIGH"),
+            starts_at=starts_at,
+            ends_at=ends_at,
+            expected_volatility_pct=float(row["expected_volatility_pct"]) if row.get("expected_volatility_pct") is not None else None,
+            source_url=str(row["source_url"]) if row.get("source_url") is not None else None,
+            note=str(row["note"]) if row.get("note") is not None else None,
+            is_active=bool(int(row.get("is_active") or 0)),
+            created_at=_parse_dt(row.get("created_at")) or datetime.utcnow(),
+            updated_at=_parse_dt(row.get("updated_at")) or datetime.utcnow(),
+            phase=phase,
+            minutes_to_start=minutes_to_start,
+            minutes_to_end=minutes_to_end,
+        )
+
+    def list_event_windows(
+        self,
+        phase: str = Query(default="upcoming"),
+        days_ahead: int = Query(default=7, ge=1, le=365),
+        active_only: bool = Query(default=True),
+        limit: int = Query(default=200, ge=1, le=2000),
+    ) -> MarketEventWindowListResponse:
+        repo = self._require_repo()
+        now_vn = self._now_vn_naive()
+        phase_key = str(phase or "upcoming").strip().upper()
+        if phase_key not in {"ALL", "UPCOMING", "ONGOING", "PAST"}:
+            raise HTTPException(status_code=422, detail="phase must be one of: all, upcoming, ongoing, past")
+
+        starts_from: datetime | None = None
+        ends_to: datetime | None = None
+        if phase_key == "UPCOMING":
+            starts_from = now_vn
+            ends_to = now_vn + timedelta(days=int(days_ahead))
+        elif phase_key == "ONGOING":
+            starts_from = now_vn
+            ends_to = now_vn
+        elif phase_key == "PAST":
+            ends_to = now_vn
+
+        rows = repo.list_market_event_windows(
+            starts_from=starts_from,
+            ends_to=ends_to,
+            active_only=bool(active_only),
+            limit=int(limit),
+        )
+        items = [self._map_event_window(row, now_vn=now_vn) for row in rows]
+        if phase_key != "ALL":
+            items = [item for item in items if item.phase == phase_key]
+
+        return MarketEventWindowListResponse(
+            server_time_vn=now_vn,
+            phase=phase_key,
+            count=len(items),
+            items=items,
+        )
+
+    def create_event_window(self, req: MarketEventWindowCreateRequest) -> MarketEventWindow:
+        repo = self._require_repo()
+        starts_at = self._to_vn_naive(req.starts_at)
+        ends_at = self._to_vn_naive(req.ends_at)
+        if starts_at is None or ends_at is None or ends_at <= starts_at:
+            raise HTTPException(status_code=422, detail="ends_at must be greater than starts_at")
+
+        payload = req.dict()
+        payload["starts_at"] = starts_at
+        payload["ends_at"] = ends_at
+        payload["impact_level"] = str(payload.get("impact_level") or "HIGH").upper()
+        payload["category"] = str(payload.get("category") or "macro").strip().lower()
+        row = repo.create_market_event_window(payload)
+        if row is None:
+            raise HTTPException(status_code=500, detail="Cannot create event window")
+        return self._map_event_window(row, now_vn=self._now_vn_naive())
+
+    def update_event_window(self, event_id: int, req: MarketEventWindowUpdateRequest) -> MarketEventWindow:
+        repo = self._require_repo()
+        current = repo.get_market_event_window(event_id)
+        if current is None:
+            raise HTTPException(status_code=404, detail=f"Event window {event_id} not found")
+
+        payload = req.dict(exclude_none=True)
+        if "impact_level" in payload:
+            payload["impact_level"] = str(payload.get("impact_level") or "HIGH").upper()
+        if "category" in payload:
+            payload["category"] = str(payload.get("category") or "macro").strip().lower()
+
+        cur_start = self._to_vn_naive(_parse_dt(current.get("starts_at")))
+        cur_end = self._to_vn_naive(_parse_dt(current.get("ends_at")))
+        next_start = self._to_vn_naive(payload.get("starts_at")) if "starts_at" in payload else cur_start
+        next_end = self._to_vn_naive(payload.get("ends_at")) if "ends_at" in payload else cur_end
+        if next_start is None or next_end is None or next_end <= next_start:
+            raise HTTPException(status_code=422, detail="ends_at must be greater than starts_at")
+
+        payload["starts_at"] = next_start
+        payload["ends_at"] = next_end
+
+        row = repo.update_market_event_window(event_id, payload)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Event window {event_id} not found")
+        return self._map_event_window(row, now_vn=self._now_vn_naive())
+
+    def disable_event_window(self, event_id: int) -> MarketEventWindow:
+        repo = self._require_repo()
+        row = repo.disable_market_event_window(event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Event window {event_id} not found")
+        return self._map_event_window(row, now_vn=self._now_vn_naive())
+
+    @staticmethod
+    def _normalize_impact_level(raw: str | None) -> str:
+        text = str(raw or "").strip().upper()
+        if "CRITICAL" in text:
+            return "CRITICAL"
+        if "HIGH" in text:
+            return "HIGH"
+        if "MEDIUM" in text:
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
+    def _impact_rank(level: str) -> int:
+        key = str(level or "LOW").strip().upper()
+        order = {
+            "LOW": 1,
+            "MEDIUM": 2,
+            "HIGH": 3,
+            "CRITICAL": 4,
+        }
+        return int(order.get(key, 1))
+
+    @classmethod
+    def _build_forexfactory_window(
+        cls,
+        date_text: str,
+        time_text: str,
+        impact_level: str,
+    ) -> tuple[datetime, datetime] | None:
+        raw_date = str(date_text or "").strip()
+        raw_time = str(time_text or "").strip().lower()
+        if not raw_date:
+            return None
+
+        try:
+            day = datetime.strptime(raw_date, "%m-%d-%Y").date()
+        except Exception:
+            return None
+
+        vn_tz = timezone(timedelta(hours=7))
+        all_day_time = raw_time in {"", "all day", "day", "tentative"} or "day" in raw_time
+
+        if all_day_time:
+            start_utc = datetime(day.year, day.month, day.day, 0, 0, tzinfo=timezone.utc)
+            end_utc = start_utc + timedelta(hours=24)
+            start_vn = start_utc.astimezone(vn_tz).replace(tzinfo=None)
+            end_vn = end_utc.astimezone(vn_tz).replace(tzinfo=None)
+            return start_vn, end_vn
+
+        normalized = raw_time.replace(" ", "").upper()
+        parsed_time = None
+        for fmt in ("%I:%M%p", "%I%p", "%H:%M"):
+            try:
+                parsed_time = datetime.strptime(normalized, fmt).time()
+                break
+            except Exception:
+                continue
+        if parsed_time is None:
+            return None
+
+        event_utc = datetime(
+            day.year,
+            day.month,
+            day.day,
+            parsed_time.hour,
+            parsed_time.minute,
+            tzinfo=timezone.utc,
+        )
+        impact = cls._normalize_impact_level(impact_level)
+        lead_minutes = {
+            "LOW": 5,
+            "MEDIUM": 10,
+            "HIGH": 20,
+            "CRITICAL": 30,
+        }.get(impact, 10)
+        lag_minutes = {
+            "LOW": 30,
+            "MEDIUM": 60,
+            "HIGH": 120,
+            "CRITICAL": 180,
+        }.get(impact, 60)
+
+        starts_at = (event_utc - timedelta(minutes=lead_minutes)).astimezone(vn_tz).replace(tzinfo=None)
+        ends_at = (event_utc + timedelta(minutes=lag_minutes)).astimezone(vn_tz).replace(tzinfo=None)
+        if ends_at <= starts_at:
+            ends_at = starts_at + timedelta(minutes=30)
+        return starts_at, ends_at
+
+    @staticmethod
+    def _xml_text(node: ET.Element, tag: str) -> str:
+        child = node.find(tag)
+        if child is None or child.text is None:
+            return ""
+        return str(child.text).strip()
+
+    async def _fetch_forexfactory_events(self, feed_url: str) -> list[dict[str, str]]:
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            response = await client.get(feed_url)
+            response.raise_for_status()
+
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise HTTPException(status_code=502, detail=f"Cannot parse event feed XML: {exc}") from exc
+
+        items: list[dict[str, str]] = []
+        for event_node in root.findall(".//event"):
+            items.append(
+                {
+                    "title": self._xml_text(event_node, "title"),
+                    "country": self._xml_text(event_node, "country"),
+                    "date": self._xml_text(event_node, "date"),
+                    "time": self._xml_text(event_node, "time"),
+                    "impact": self._xml_text(event_node, "impact"),
+                    "forecast": self._xml_text(event_node, "forecast"),
+                    "previous": self._xml_text(event_node, "previous"),
+                    "url": self._xml_text(event_node, "url"),
+                }
+            )
+        return items
+
+    async def import_event_windows(
+        self,
+        source: str = Query(default="forexfactory"),
+        min_impact: str = Query(default="MEDIUM"),
+        days_back: int = Query(default=1, ge=0, le=30),
+        days_ahead: int = Query(default=14, ge=1, le=60),
+        limit: int = Query(default=300, ge=10, le=2000),
+        feed_url: str | None = Query(default=None),
+    ) -> MarketEventImportResponse:
+        repo = self._require_repo()
+        source_key = str(source or "forexfactory").strip().lower()
+        if source_key != "forexfactory":
+            raise HTTPException(status_code=422, detail="Only source=forexfactory is supported for now")
+
+        min_impact_key = self._normalize_impact_level(min_impact)
+        now_vn = self._now_vn_naive()
+        from_dt = now_vn - timedelta(days=int(days_back))
+        to_dt = now_vn + timedelta(days=int(days_ahead))
+        source_feed_url = str(feed_url or "https://nfs.faireconomy.media/ff_calendar_thisweek.xml").strip()
+
+        try:
+            feed_items = await self._fetch_forexfactory_events(source_feed_url)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Cannot fetch event feed: {exc}") from exc
+
+        inserted = 0
+        updated = 0
+        skipped = 0
+        impact_volatility = {
+            "LOW": 0.8,
+            "MEDIUM": 1.2,
+            "HIGH": 2.0,
+            "CRITICAL": 3.0,
+        }
+
+        for event in feed_items[: int(limit)]:
+            impact = self._normalize_impact_level(event.get("impact"))
+            if self._impact_rank(impact) < self._impact_rank(min_impact_key):
+                skipped += 1
+                continue
+
+            window = self._build_forexfactory_window(
+                date_text=str(event.get("date") or ""),
+                time_text=str(event.get("time") or ""),
+                impact_level=impact,
+            )
+            if window is None:
+                skipped += 1
+                continue
+
+            starts_at, ends_at = window
+            if ends_at < from_dt or starts_at > to_dt:
+                skipped += 1
+                continue
+
+            country = str(event.get("country") or "").strip().upper()
+            title_raw = str(event.get("title") or "").strip()
+            if not title_raw:
+                skipped += 1
+                continue
+            title = f"[{country}] {title_raw}" if country else title_raw
+
+            notes: list[str] = ["Imported from ForexFactory weekly feed"]
+            time_text = str(event.get("time") or "").strip()
+            if time_text:
+                notes.append(f"Raw time: {time_text} UTC")
+            forecast = str(event.get("forecast") or "").strip()
+            previous = str(event.get("previous") or "").strip()
+            if forecast:
+                notes.append(f"Forecast: {forecast}")
+            if previous:
+                notes.append(f"Previous: {previous}")
+
+            payload = {
+                "title": title,
+                "category": "macro_news",
+                "impact_level": impact,
+                "starts_at": starts_at,
+                "ends_at": ends_at,
+                "expected_volatility_pct": impact_volatility.get(impact),
+                "source_url": str(event.get("url") or "").strip() or source_feed_url,
+                "note": " | ".join(notes),
+                "is_active": True,
+            }
+            row, created = repo.upsert_market_event_window(payload)
+            if row is None:
+                skipped += 1
+                continue
+            if created:
+                inserted += 1
+            else:
+                updated += 1
+
+        rows = repo.list_market_event_windows(
+            starts_from=from_dt,
+            ends_to=to_dt,
+            active_only=True,
+            limit=min(int(limit), 500),
+        )
+        items = [self._map_event_window(row, now_vn=now_vn) for row in rows]
+
+        return MarketEventImportResponse(
+            source="FOREXFACTORY",
+            imported_at_vn=now_vn,
+            total_in_feed=len(feed_items),
+            inserted=inserted,
+            updated=updated,
+            skipped=skipped,
+            count=len(items),
             items=items,
         )
 

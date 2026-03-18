@@ -251,6 +251,42 @@ type HourlyWindowResponse = {
   items: HourlyWindowRow[]
 }
 
+type MarketEventWindowItem = {
+  id: number
+  title: string
+  category: string
+  impact_level: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' | string
+  starts_at: string
+  ends_at: string
+  expected_volatility_pct?: number | null
+  source_url?: string | null
+  note?: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+  phase: 'UPCOMING' | 'ONGOING' | 'PAST' | string
+  minutes_to_start?: number | null
+  minutes_to_end?: number | null
+}
+
+type MarketEventWindowListResponse = {
+  server_time_vn: string
+  phase: string
+  count: number
+  items: MarketEventWindowItem[]
+}
+
+type MarketEventImportResponse = {
+  source: string
+  imported_at_vn: string
+  total_in_feed: number
+  inserted: number
+  updated: number
+  skipped: number
+  count: number
+  items: MarketEventWindowItem[]
+}
+
 type VolatilityItem = {
   symbol: string
   move_pct: number
@@ -442,6 +478,19 @@ const TREND_FILTER_OPTIONS: Array<{ value: 'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL';
   { value: 'SHORT', label: 'BTC SHORT' },
   { value: 'NEUTRAL', label: 'BTC NEUTRAL' },
 ]
+
+const EVENT_PHASE_OPTIONS: Array<{ value: 'UPCOMING' | 'ONGOING' | 'ALL'; label: string }> = [
+  { value: 'UPCOMING', label: 'Upcoming' },
+  { value: 'ONGOING', label: 'Ongoing' },
+  { value: 'ALL', label: 'All' },
+]
+
+const EVENT_IMPACT_PRIORITY: Record<string, number> = {
+  LOW: 1,
+  MEDIUM: 2,
+  HIGH: 3,
+  CRITICAL: 4,
+}
 
 const PALETTES: Palette[] = [
   {
@@ -986,6 +1035,13 @@ function App() {
   const [hourlyWindowMeta, setHourlyWindowMeta] = useState<Omit<HourlyWindowResponse, 'items'> | null>(null)
   const [hourlyWeekdayFilter, setHourlyWeekdayFilter] = useState<'ALL' | number>('ALL')
   const [hourlyTrendFilter, setHourlyTrendFilter] = useState<'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'>('ALL')
+  const [eventWindows, setEventWindows] = useState<MarketEventWindowItem[]>([])
+  const [eventPhase, setEventPhase] = useState<'UPCOMING' | 'ONGOING' | 'ALL'>('UPCOMING')
+  const [eventServerTime, setEventServerTime] = useState<string | null>(null)
+  const [eventLastImportAt, setEventLastImportAt] = useState<string | null>(null)
+  const [eventImportSummary, setEventImportSummary] = useState<string>('')
+  const [isLoadingEventWindows, setIsLoadingEventWindows] = useState(false)
+  const [isImportingEventWindows, setIsImportingEventWindows] = useState(false)
   const [paperLivePrices, setPaperLivePrices] = useState<Record<string, number>>({})
   const [paperLivePriceTime, setPaperLivePriceTime] = useState<Record<string, string>>({})
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
@@ -1158,6 +1214,19 @@ function App() {
     })
     return rows
   }, [highWinSignals])
+  const sortedEventWindows = useMemo(() => {
+    const rows = [...eventWindows]
+    rows.sort((a, b) => {
+      const rankA = EVENT_IMPACT_PRIORITY[String(a.impact_level || '').toUpperCase()] ?? 0
+      const rankB = EVENT_IMPACT_PRIORITY[String(b.impact_level || '').toUpperCase()] ?? 0
+      if (rankA !== rankB) return rankB - rankA
+      const timeA = Date.parse(a.starts_at)
+      const timeB = Date.parse(b.starts_at)
+      if (!Number.isNaN(timeA) && !Number.isNaN(timeB) && timeA !== timeB) return timeA - timeB
+      return a.title.localeCompare(b.title)
+    })
+    return rows
+  }, [eventWindows])
   const highWinWsSymbols = useMemo(() => {
     const set = new Set<string>()
     for (const row of highWinSignals) {
@@ -1705,6 +1774,60 @@ function App() {
     })
   }
 
+  async function fetchEventWindows(
+    phase: 'UPCOMING' | 'ONGOING' | 'ALL' = eventPhase,
+    options: { silent?: boolean; daysAhead?: number } = {},
+  ) {
+    const silent = options.silent === true
+    if (!silent) setIsLoadingEventWindows(true)
+    try {
+      const params = new URLSearchParams({
+        phase: phase.toLowerCase(),
+        days_ahead: String(options.daysAhead ?? 14),
+        active_only: 'true',
+        limit: '120',
+      })
+      const response = await fetch(`${API_BASE}/api/v1/paper-trades/event-windows?${params.toString()}`)
+      if (!response.ok) throw new Error('Event windows API unavailable')
+      const payload = await response.json() as MarketEventWindowListResponse
+      setEventWindows(payload.items ?? [])
+      setEventServerTime(payload.server_time_vn ?? null)
+    } finally {
+      if (!silent) setIsLoadingEventWindows(false)
+    }
+  }
+
+  async function importEventWindowsFromFeed() {
+    setIsImportingEventWindows(true)
+    try {
+      const params = new URLSearchParams({
+        source: 'forexfactory',
+        min_impact: 'MEDIUM',
+        days_back: '1',
+        days_ahead: '14',
+        limit: '300',
+      })
+      const response = await fetch(
+        `${API_BASE}/api/v1/paper-trades/event-windows/import?${params.toString()}`,
+        { method: 'POST' },
+      )
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(`Import event feed failed: ${text}`)
+      }
+      const payload = await response.json() as MarketEventImportResponse
+      setEventWindows(payload.items ?? [])
+      setEventServerTime(payload.imported_at_vn ?? null)
+      setEventLastImportAt(payload.imported_at_vn ?? null)
+      setEventImportSummary(
+        `${payload.inserted} new, ${payload.updated} updated, ${payload.skipped} skipped / ${payload.total_in_feed} feed`,
+      )
+      await fetchEventWindows(eventPhase, { silent: true })
+    } finally {
+      setIsImportingEventWindows(false)
+    }
+  }
+
   async function fetchTopVolatility(days: 1 | 3 | 5 | 7 = volDays) {
     const response = await fetch(`${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`)
     if (!response.ok) throw new Error('Cannot fetch top volatility')
@@ -2194,6 +2317,20 @@ function App() {
       window.clearInterval(timer)
     }
   }, [])
+
+  useEffect(() => {
+    fetchEventWindows(eventPhase).catch(() => {
+      // Keep previous event windows on request failure.
+    })
+    const timer = window.setInterval(() => {
+      fetchEventWindows(eventPhase, { silent: true }).catch(() => {
+        // Keep previous event windows on periodic refresh failure.
+      })
+    }, 60000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [eventPhase])
 
   useEffect(() => {
     if (highWinWsSymbols.length === 0) {
@@ -3374,6 +3511,121 @@ function App() {
                     </td>
                   </tr>
                 )})}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>Market Event Windows (News)</h2>
+          <div className="scan-actions">
+            <span className="badge neutral">Items: {sortedEventWindows.length}</span>
+            <span className="badge neutral">Phase: {eventPhase}</span>
+            <button
+              type="button"
+              className="btn-inline btn-secondary"
+              onClick={() => {
+                fetchEventWindows(eventPhase).catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unknown error')
+                })
+              }}
+              disabled={isLoadingEventWindows || isImportingEventWindows}
+            >
+              {isLoadingEventWindows ? 'Refreshing...' : 'Refresh'}
+            </button>
+            <button
+              type="button"
+              className="btn-inline"
+              onClick={() => {
+                importEventWindowsFromFeed().catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unknown error')
+                })
+              }}
+              disabled={isImportingEventWindows}
+            >
+              {isImportingEventWindows ? 'Importing...' : 'Import Feed'}
+            </button>
+          </div>
+        </header>
+        <div className="content">
+          <div className="tab-row">
+            {EVENT_PHASE_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`tab-btn ${eventPhase === option.value ? 'tab-btn-active' : ''}`}
+                onClick={() => setEventPhase(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <p>
+            <strong>Server Time:</strong> {formatVnTimestamp(eventServerTime)} |{' '}
+            <strong>Last Import:</strong> {formatVnTimestamp(eventLastImportAt)}
+          </p>
+          {eventImportSummary ? (
+            <p><strong>Import Summary:</strong> {eventImportSummary}</p>
+          ) : null}
+        </div>
+        <div className="content table-wrap">
+          {sortedEventWindows.length === 0 ? (
+            <p>No event windows available for selected phase.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Start (VN)</th>
+                  <th>End (VN)</th>
+                  <th>Impact</th>
+                  <th>Title</th>
+                  <th>Category</th>
+                  <th>Phase</th>
+                  <th>Timing</th>
+                  <th>Expected Vol%</th>
+                  <th>Source</th>
+                  <th>Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedEventWindows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{formatVnTimestamp(row.starts_at)}</td>
+                    <td>{formatVnTimestamp(row.ends_at)}</td>
+                    <td>
+                      <span className={`badge ${row.impact_level === 'HIGH' || row.impact_level === 'CRITICAL' ? 'warn' : 'neutral'}`}>
+                        {row.impact_level}
+                      </span>
+                    </td>
+                    <td>{row.title}</td>
+                    <td>{row.category}</td>
+                    <td>
+                      <span className={`badge ${row.phase === 'ONGOING' ? 'success' : row.phase === 'UPCOMING' ? 'warn' : 'neutral'}`}>
+                        {row.phase}
+                      </span>
+                    </td>
+                    <td>
+                      {row.phase === 'UPCOMING'
+                        ? (typeof row.minutes_to_start === 'number' ? `${row.minutes_to_start}m to start` : '-')
+                        : row.phase === 'ONGOING'
+                          ? (typeof row.minutes_to_end === 'number' ? `${row.minutes_to_end}m left` : '-')
+                          : '-'}
+                    </td>
+                    <td>{typeof row.expected_volatility_pct === 'number' ? `${row.expected_volatility_pct.toFixed(2)}%` : '-'}</td>
+                    <td>
+                      {row.source_url ? (
+                        <a href={row.source_url} target="_blank" rel="noreferrer">Link</a>
+                      ) : '-'}
+                    </td>
+                    <td title={row.note ?? ''}>
+                      {row.note
+                        ? (row.note.length > 100 ? `${row.note.slice(0, 100)}...` : row.note)
+                        : '-'}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           )}

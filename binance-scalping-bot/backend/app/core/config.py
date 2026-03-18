@@ -117,6 +117,19 @@ class Settings(BaseModel):
     paper_trade_max_tp_pct: float = float(os.getenv("PAPER_TRADE_MAX_TP_PCT", "15"))
     paper_trade_min_rr: float = float(os.getenv("PAPER_TRADE_MIN_RR", "1.5"))
     paper_trade_max_risk_pct: float = float(os.getenv("PAPER_TRADE_MAX_RISK_PCT", "12"))
+    paper_trade_max_margin_loss_pct: float = float(os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_PCT", "10.5"))
+    paper_trade_max_margin_loss_high_atr_pct: float = float(
+        os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_HIGH_ATR_PCT", "12.5")
+    )
+    paper_trade_max_margin_loss_high_atr_threshold_pct: float = float(
+        os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_HIGH_ATR_THRESHOLD_PCT", "1.5")
+    )
+    paper_trade_max_margin_loss_aligned_regime_bonus_pct: float = float(
+        os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_ALIGNED_REGIME_BONUS_PCT", "1.0")
+    )
+    paper_trade_max_margin_loss_countertrend_penalty_pct: float = float(
+        os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_COUNTERTREND_PENALTY_PCT", "1.0")
+    )
     paper_trade_max_hold_minutes: int = int(os.getenv("PAPER_TRADE_MAX_HOLD_MINUTES", "120"))
     paper_trade_disable_sl: bool = os.getenv("PAPER_TRADE_DISABLE_SL", "false").lower() == "true"
     paper_trade_move_sl_to_entry_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT", "15"))
@@ -129,6 +142,16 @@ class Settings(BaseModel):
     paper_trade_btc_filter_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_MIN_CONFIDENCE", "0.55"))
     paper_trade_btc_filter_block_countertrend: bool = os.getenv("PAPER_TRADE_BTC_FILTER_BLOCK_COUNTERTREND", "true").lower() == "true"
     paper_trade_btc_filter_countertrend_min_win: float = float(os.getenv("PAPER_TRADE_BTC_FILTER_COUNTERTREND_MIN_WIN", "0.9"))
+    paper_trade_btc_filter_block_nonfollow_countertrend: bool = os.getenv(
+        "PAPER_TRADE_BTC_FILTER_BLOCK_NONFOLLOW_COUNTERTREND",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_filter_nonfollow_countertrend_min_confidence: float = float(
+        os.getenv("PAPER_TRADE_BTC_FILTER_NONFOLLOW_COUNTERTREND_MIN_CONFIDENCE", "0.70")
+    )
+    paper_trade_btc_filter_nonfollow_countertrend_min_win: float = float(
+        os.getenv("PAPER_TRADE_BTC_FILTER_NONFOLLOW_COUNTERTREND_MIN_WIN", "0.88")
+    )
     paper_trade_btc_trend_hour_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_TREND_HOUR_LOCK_ENABLED", "true").lower() == "true"
     paper_trade_btc_trend_hour_lock_min_confidence: float = float(
         os.getenv("PAPER_TRADE_BTC_TREND_HOUR_LOCK_MIN_CONFIDENCE", "0.60")
@@ -148,9 +171,18 @@ class Settings(BaseModel):
     paper_trade_btc_shock_up_require_pullback: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK", "true").lower() == "true"
     paper_trade_btc_shock_pullback_ema_period: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD", "21"))
     paper_trade_btc_shock_pullback_tolerance_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT", "0.0015"))
-    paper_trade_btc_reversal_profit_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED", "true").lower() == "true"
+    paper_trade_btc_reversal_profit_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED", "false").lower() == "true"
     paper_trade_btc_reversal_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT", "0.8"))
     paper_trade_btc_reversal_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE", "0.55"))
+    paper_trade_btc_reversal_min_profit_pct: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_MIN_PROFIT_PCT", "0.1"))
+    paper_trade_btc_reversal_loss_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_ENABLED", "false").lower() == "true"
+    paper_trade_btc_reversal_loss_exit_days_vn: str = os.getenv(
+        "PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_DAYS_VN",
+        "MON,TUE,WED,THU,FRI,SAT,SUN",
+    )
+    paper_trade_btc_reversal_loss_exit_min_loss_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_MIN_LOSS_PCT", "0.1")
+    )
     paper_trade_btc_profit_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED", "true").lower() == "true"
     paper_trade_btc_profit_lock_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE", "0.6"))
     paper_trade_btc_follow_min_corr: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_CORR", "0.45"))
@@ -259,3 +291,4 @@ class Settings(BaseModel):
     ml_feedback_severe_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_WEIGHT_MULTIPLIER", "8.0"))
 
 settings = Settings()
+
