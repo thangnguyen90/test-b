@@ -726,6 +726,8 @@ class PaperTradingEngine:
                         "entry_price": entry,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
+                        "reference_win_symbol": getattr(candles_signal, "reference_win_symbol", None),
+                        "reference_win_at": getattr(candles_signal, "reference_win_at", None),
                         "quantity": quantity,
                         "margin_usdt": margin_usdt,
                         "leverage": leverage,

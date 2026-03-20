@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from random import random
+import time
 from typing import Any
 
 import joblib
@@ -39,6 +40,7 @@ class MLCandlesPredictor(MLPredictor):
         self.entry_profiles: dict[str, dict[str, float | int | str]] = {}
         self.last_profile_count: int = 0
         self.last_profile_samples: int = 0
+        self._recent_win_reference_cache: dict[str, tuple[float, dict[str, str | None] | None]] = {}
         super().__init__(model_path=model_path, **kwargs)
 
     def _load_model_if_exists(self) -> None:
@@ -165,15 +167,19 @@ class MLCandlesPredictor(MLPredictor):
         profile = self._resolve_profile(row=row, side=side) if row is not None else None
         if not profile:
             fallback_signal = self._to_signal(symbol, side, win_prob, entry_price, atr)
-            return self._sanitize_signal(
-                symbol=symbol,
+            return self._attach_reference_win(
+                self._sanitize_signal(
+                    symbol=symbol,
+                    side=side,
+                    win_prob=fallback_signal.win_probability,
+                    entry=fallback_signal.predicted_entry_price,
+                    stop_loss=fallback_signal.stop_loss,
+                    take_profit=fallback_signal.take_profit,
+                    mark_price=mark,
+                    atr=atr,
+                ),
+                profile=None,
                 side=side,
-                win_prob=fallback_signal.win_probability,
-                entry=fallback_signal.predicted_entry_price,
-                stop_loss=fallback_signal.stop_loss,
-                take_profit=fallback_signal.take_profit,
-                mark_price=mark,
-                atr=atr,
             )
 
         entry_offset_atr = float(profile.get("entry_offset_atr") or 0.0)
@@ -187,15 +193,19 @@ class MLCandlesPredictor(MLPredictor):
 
         sl_distance = atr * max(0.75, 1.7 - (win_prob * 0.55))
         stop_loss = entry - sl_distance if side == "LONG" else entry + sl_distance
-        return self._sanitize_signal(
-            symbol=symbol,
+        return self._attach_reference_win(
+            self._sanitize_signal(
+                symbol=symbol,
+                side=side,
+                win_prob=win_prob,
+                entry=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                mark_price=mark,
+                atr=atr,
+            ),
+            profile=profile,
             side=side,
-            win_prob=win_prob,
-            entry=entry,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            mark_price=mark,
-            atr=atr,
         )
 
     def _resolve_entry_anchor(self, *, mark_price: float, row_close: float) -> float:
@@ -390,6 +400,8 @@ class MLCandlesPredictor(MLPredictor):
                                 "wins": 0,
                                 "losses": 0,
                                 "score_sum": 0.0,
+                                "latest_win_symbol": "",
+                                "latest_win_at": "",
                             },
                         )
                         outcome = self._simulate_profile_candidate(
@@ -405,6 +417,11 @@ class MLCandlesPredictor(MLPredictor):
                             stats["fills"] = int(stats["fills"]) + 1
                         if outcome["result"] == 1:
                             stats["wins"] = int(stats["wins"]) + 1
+                            self._update_latest_win_reference(
+                                stats=stats,
+                                symbol=symbol,
+                                row_timestamp=row.get("timestamp"),
+                            )
                         elif outcome["result"] == 0:
                             stats["losses"] = int(stats["losses"]) + 1
                         stats["score_sum"] = float(stats["score_sum"]) + float(outcome["score"])
@@ -444,6 +461,8 @@ class MLCandlesPredictor(MLPredictor):
                         "fill_rate": round(fill_rate, 4),
                         "win_rate": round(win_rate, 4),
                         "score": round(objective, 4),
+                        "latest_win_symbol": str(stats.get("latest_win_symbol") or ""),
+                        "latest_win_at": str(stats.get("latest_win_at") or ""),
                     }
 
             if best_profile is not None:
@@ -516,6 +535,93 @@ class MLCandlesPredictor(MLPredictor):
                 float(item.get("win_rate") or 0.0),
             ),
         )
+
+    def _attach_reference_win(
+        self,
+        signal: SignalResult,
+        *,
+        profile: dict[str, float | int | str] | None,
+        side: str,
+    ) -> SignalResult:
+        reference_symbol = str((profile or {}).get("latest_win_symbol") or "").strip() or None
+        reference_at = str((profile or {}).get("latest_win_at") or "").strip() or None
+        if reference_symbol:
+            signal.reference_win_symbol = reference_symbol
+            signal.reference_win_at = reference_at
+            return signal
+
+        fallback = self._latest_profitable_reference(side=side)
+        if fallback:
+            signal.reference_win_symbol = fallback.get("symbol")
+            signal.reference_win_at = fallback.get("closed_at")
+        return signal
+
+    def _latest_profitable_reference(self, *, side: str) -> dict[str, str | None] | None:
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"} or not settings.mysql_enabled:
+            return None
+
+        now_ts = time.time()
+        cached = self._recent_win_reference_cache.get(side_key)
+        if cached and now_ts < cached[0]:
+            return cached[1]
+
+        payload: dict[str, str | None] | None = None
+        try:
+            repo = MySQLTradeRepository(
+                host=settings.mysql_host,
+                port=settings.mysql_port,
+                user=settings.mysql_user,
+                password=settings.mysql_password,
+                database=self.repo_database,
+            )
+            row = repo.latest_profitable_trade_reference(
+                side=side_key,
+                entry_type_prefix="ML_CANDLES",
+            )
+            if row:
+                payload = {
+                    "symbol": str(row.get("symbol") or "") or None,
+                    "closed_at": str(
+                        row.get("closed_at")
+                        or row.get("updated_at")
+                        or row.get("opened_at")
+                        or ""
+                    ) or None,
+                }
+        except Exception:
+            payload = None
+
+        self._recent_win_reference_cache[side_key] = (now_ts + 60.0, payload)
+        return payload
+
+    @staticmethod
+    def _update_latest_win_reference(
+        *,
+        stats: dict[str, float | int | str],
+        symbol: str,
+        row_timestamp: object,
+    ) -> None:
+        latest_ts = MLCandlesPredictor._coerce_reference_timestamp(stats.get("latest_win_at"))
+        current_ts = MLCandlesPredictor._coerce_reference_timestamp(row_timestamp)
+        if current_ts is None:
+            return
+        if latest_ts is not None and current_ts < latest_ts:
+            return
+        stats["latest_win_symbol"] = str(symbol)
+        stats["latest_win_at"] = current_ts.isoformat()
+
+    @staticmethod
+    def _coerce_reference_timestamp(value: object) -> pd.Timestamp | None:
+        if value is None:
+            return None
+        try:
+            ts = pd.Timestamp(value)
+        except Exception:
+            return None
+        if pd.isna(ts):
+            return None
+        return ts
 
     def _profile_bucket_from_row(self, *, row: pd.Series, side: str) -> str:
         close_m5 = float(row.get("close_m5") or 0.0)

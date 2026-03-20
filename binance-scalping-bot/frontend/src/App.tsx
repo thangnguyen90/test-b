@@ -122,6 +122,8 @@ type ScanSignalItem = {
   can_enter?: boolean
   blocked_reason?: string
   btc_following?: boolean | null
+  reference_win_symbol?: string | null
+  reference_win_at?: string | null
   liq_zone_price?: number
   liq_zone_value?: number
   ml_candles?: {
@@ -129,6 +131,8 @@ type ScanSignalItem = {
     win_probability: number
     predicted_entry_price: number
     take_profit: number
+    reference_win_symbol?: string | null
+    reference_win_at?: string | null
     aligned?: boolean
   } | null
   baseline_ml?: {
@@ -136,6 +140,8 @@ type ScanSignalItem = {
     win_probability: number
     predicted_entry_price: number
     take_profit: number
+    reference_win_symbol?: string | null
+    reference_win_at?: string | null
     aligned?: boolean
   } | null
 }
@@ -171,6 +177,8 @@ type PaperTrade = {
   closed_at?: string | null
   close_price?: number | null
   close_reason?: string | null
+  reference_win_symbol?: string | null
+  reference_win_at?: string | null
   pnl?: number | null
   pnl_pct?: number | null
   commission_usdt?: number | null
@@ -446,6 +454,8 @@ type PaperMarketOpenRequest = {
   entry_price?: number
   take_profit: number
   stop_loss: number
+  reference_win_symbol?: string
+  reference_win_at?: string
 }
 
 type PaperManualCloseRequest = {
@@ -2601,6 +2611,8 @@ function App() {
             effective_win_probability: item.effective_win_probability,
             repo_scope: PAPER_REPO_CANDLES,
             entry_type: 'ML_CANDLES_TEST',
+            reference_win_symbol: item.reference_win_symbol ?? undefined,
+            reference_win_at: item.reference_win_at ?? undefined,
             take_profit: item.take_profit,
             stop_loss: item.stop_loss,
           })
@@ -3404,6 +3416,12 @@ function App() {
                             </span>
                             <span className="signal-model-meta">E {item.predicted_entry_price}</span>
                             <span className="signal-model-meta">TP {item.take_profit}</span>
+                            {item.reference_win_symbol ? (
+                              <span className="signal-model-meta">
+                                Ref win: {item.reference_win_symbol}
+                                {item.reference_win_at ? ` @ ${formatVnTimestamp(item.reference_win_at)}` : ''}
+                              </span>
+                            ) : null}
                           </div>
                         </td>
                         <td>
@@ -3414,6 +3432,12 @@ function App() {
                               </span>
                               <span className="signal-model-meta">E {item.baseline_ml.predicted_entry_price}</span>
                               <span className="signal-model-meta">TP {item.baseline_ml.take_profit}</span>
+                              {item.baseline_ml.reference_win_symbol ? (
+                                <span className="signal-model-meta">
+                                  Ref win: {item.baseline_ml.reference_win_symbol}
+                                  {item.baseline_ml.reference_win_at ? ` @ ${formatVnTimestamp(item.baseline_ml.reference_win_at)}` : ''}
+                                </span>
+                              ) : null}
                             </div>
                           ) : '-'}
                         </td>
@@ -3436,14 +3460,16 @@ function App() {
                               openPaperMarketOrder({
                                 symbol: item.symbol,
                                 side: item.side,
-                                signal_win_probability: item.win_probability,
-                                effective_win_probability: item.effective_win_probability,
-                                repo_scope: PAPER_REPO_CANDLES,
-                                entry_type: 'ML_CANDLES_TEST',
-                                entry_price: item.predicted_entry_price,
-                                take_profit: item.take_profit,
-                                stop_loss: item.stop_loss,
-                              }).then(() => {
+                              signal_win_probability: item.win_probability,
+                              effective_win_probability: item.effective_win_probability,
+                              repo_scope: PAPER_REPO_CANDLES,
+                              entry_type: 'ML_CANDLES_TEST',
+                              entry_price: item.predicted_entry_price,
+                              reference_win_symbol: item.reference_win_symbol ?? undefined,
+                              reference_win_at: item.reference_win_at ?? undefined,
+                              take_profit: item.take_profit,
+                              stop_loss: item.stop_loss,
+                            }).then(() => {
                                 fetchMlCompareHistory().catch(() => {
                                   // no-op
                                 })
@@ -3480,6 +3506,7 @@ function App() {
                     <th>MFE%</th>
                     <th>Type</th>
                     <th>Model</th>
+                    <th>Ref Win</th>
                     <th>Side</th>
                     <th>Margin</th>
                     <th>Entry</th>
@@ -3543,6 +3570,16 @@ function App() {
                         </td>
                         <td><span className="badge neutral">{row.entry_type ?? '-'}</span></td>
                         <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
+                        <td>
+                          {row.reference_win_symbol ? (
+                            <div className="signal-model-stack">
+                              <span className="signal-model-meta">{row.reference_win_symbol}</span>
+                              {row.reference_win_at ? (
+                                <span className="signal-model-meta">{formatVnTimestamp(row.reference_win_at)}</span>
+                              ) : null}
+                            </div>
+                          ) : '-'}
+                        </td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                         <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
                         <td>{row.entry_price}</td>
@@ -3569,6 +3606,7 @@ function App() {
                     <th>Model</th>
                     <th>Symbol</th>
                     <th>Side</th>
+                    <th>Ref Win</th>
                     <th>Entry</th>
                     <th>Close</th>
                     <th>PnL</th>
@@ -3593,6 +3631,16 @@ function App() {
                         <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
+                        <td>
+                          {row.reference_win_symbol ? (
+                            <div className="signal-model-stack">
+                              <span className="signal-model-meta">{row.reference_win_symbol}</span>
+                              {row.reference_win_at ? (
+                                <span className="signal-model-meta">{formatVnTimestamp(row.reference_win_at)}</span>
+                              ) : null}
+                            </div>
+                          ) : '-'}
+                        </td>
                         <td>{row.entry_price}</td>
                         <td>{row.close_price ?? '-'}</td>
                         <td>

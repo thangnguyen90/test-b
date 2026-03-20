@@ -26,6 +26,8 @@ class PaperTrade(BaseModel):
     closed_at: Optional[datetime] = None
     close_price: Optional[float] = None
     close_reason: Optional[str] = None
+    reference_win_symbol: Optional[str] = None
+    reference_win_at: Optional[datetime] = None
     pnl: Optional[float] = None
     pnl_pct: Optional[float] = None
     commission_usdt: Optional[float] = None
@@ -136,6 +138,8 @@ class PaperMarketOpenRequest(BaseModel):
     entry_price: Optional[float] = Field(default=None, gt=0)
     take_profit: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
+    reference_win_symbol: Optional[str] = Field(default=None, max_length=64)
+    reference_win_at: Optional[datetime] = None
     order_usdt: Optional[float] = Field(default=None, gt=0)
     margin_usdt: Optional[float] = Field(default=None, gt=0)
     quantity: Optional[float] = Field(default=None, gt=0)

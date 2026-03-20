@@ -347,6 +347,8 @@ def _build_compare_signal_payload(
         "win_probability": compare_signal.win_probability,
         "predicted_entry_price": compare_signal.predicted_entry_price,
         "take_profit": compare_signal.take_profit,
+        "reference_win_symbol": getattr(compare_signal, "reference_win_symbol", None),
+        "reference_win_at": getattr(compare_signal, "reference_win_at", None),
         "aligned": compare_signal.side == str(target_side or "").upper(),
     }
 
@@ -399,6 +401,8 @@ def _build_scan_match(
         "btc_following": btc_following,
         "liq_zone_price": liq_zone_price,
         "liq_zone_value": liq_zone_value,
+        "reference_win_symbol": getattr(signal, "reference_win_symbol", None),
+        "reference_win_at": getattr(signal, "reference_win_at", None),
     }
     if compare_field:
         payload[compare_field] = compare_payload
@@ -583,6 +587,8 @@ def get_latest_signal(
             "win_probability": candle_result.win_probability,
             "predicted_entry_price": candle_result.predicted_entry_price,
             "take_profit": candle_result.take_profit,
+            "reference_win_symbol": getattr(candle_result, "reference_win_symbol", None),
+            "reference_win_at": getattr(candle_result, "reference_win_at", None),
             "aligned": candle_result.side == result.side,
         }
     except Exception:
@@ -619,6 +625,8 @@ def get_latest_candles_signal(
         "predicted_entry_price": result.predicted_entry_price,
         "stop_loss": result.stop_loss,
         "take_profit": result.take_profit,
+        "reference_win_symbol": getattr(result, "reference_win_symbol", None),
+        "reference_win_at": getattr(result, "reference_win_at", None),
         "baseline_ml": baseline_ml_payload,
     }
 

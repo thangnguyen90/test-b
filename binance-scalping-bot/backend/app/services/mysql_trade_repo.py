@@ -88,6 +88,8 @@ class MySQLTradeRepository:
                         closed_at DATETIME(6) NULL,
                         close_price DOUBLE NULL,
                         close_reason VARCHAR(32) NULL,
+                        reference_win_symbol VARCHAR(64) NULL,
+                        reference_win_at DATETIME(6) NULL,
                         mae_pct DOUBLE NULL,
                         mfe_pct DOUBLE NULL,
                         feature_snapshot_json LONGTEXT NULL,
@@ -135,6 +137,32 @@ class MySQLTradeRepository:
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute("ALTER TABLE paper_trades ADD COLUMN close_reason VARCHAR(32) NULL AFTER close_price")
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='reference_win_symbol'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN reference_win_symbol VARCHAR(64) NULL AFTER close_reason"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='reference_win_at'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN reference_win_at DATETIME(6) NULL AFTER reference_win_symbol"
+                    )
                 cur.execute(
                     """
                     SELECT COUNT(*) AS cnt
@@ -391,6 +419,8 @@ class MySQLTradeRepository:
                         closed_at DATETIME(6) NULL,
                         close_price DOUBLE NULL,
                         close_reason VARCHAR(32) NULL,
+                        reference_win_symbol VARCHAR(64) NULL,
+                        reference_win_at DATETIME(6) NULL,
                         mae_pct DOUBLE NULL,
                         mfe_pct DOUBLE NULL,
                         feature_snapshot_json LONGTEXT NULL,
@@ -408,13 +438,39 @@ class MySQLTradeRepository:
                 )
                 cur.execute(
                     """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades_ml_candles' AND COLUMN_NAME='reference_win_symbol'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades_ml_candles ADD COLUMN reference_win_symbol VARCHAR(64) NULL AFTER close_reason"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades_ml_candles' AND COLUMN_NAME='reference_win_at'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades_ml_candles ADD COLUMN reference_win_at DATETIME(6) NULL AFTER reference_win_symbol"
+                    )
+                cur.execute(
+                    """
                     INSERT INTO paper_trades_ml_candles (
                         source_trade_id, symbol, side, btc_following, entry_type,
                         signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss,
                         liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
                         quantity, margin_usdt, leverage, status,
-                        opened_at, closed_at, close_price, close_reason,
+                        opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
                         pnl, commission_usdt, result, created_at, updated_at
                     )
@@ -424,7 +480,7 @@ class MySQLTradeRepository:
                         entry_price, take_profit, stop_loss,
                         liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
                         quantity, margin_usdt, leverage, status,
-                        opened_at, closed_at, close_price, close_reason,
+                        opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
                         pnl, commission_usdt, result, created_at, updated_at
                     FROM paper_trades
@@ -451,6 +507,8 @@ class MySQLTradeRepository:
                         closed_at=VALUES(closed_at),
                         close_price=VALUES(close_price),
                         close_reason=VALUES(close_reason),
+                        reference_win_symbol=VALUES(reference_win_symbol),
+                        reference_win_at=VALUES(reference_win_at),
                         mae_pct=VALUES(mae_pct),
                         mfe_pct=VALUES(mfe_pct),
                         feature_snapshot_json=VALUES(feature_snapshot_json),
@@ -462,113 +520,97 @@ class MySQLTradeRepository:
                         updated_at=VALUES(updated_at)
                     """
                 )
+                cur.execute("DROP TRIGGER IF EXISTS trg_paper_trades_ml_candles_ai")
                 cur.execute(
                     """
-                    SELECT COUNT(*) AS cnt
-                    FROM information_schema.TRIGGERS
-                    WHERE TRIGGER_SCHEMA=%s AND TRIGGER_NAME='trg_paper_trades_ml_candles_ai'
-                    """,
-                    (self.database,),
-                )
-                trig_ai_exists = int((cur.fetchone() or {}).get("cnt") or 0) > 0
-                if not trig_ai_exists:
-                    cur.execute(
-                        """
-                        CREATE TRIGGER trg_paper_trades_ml_candles_ai
-                        AFTER INSERT ON paper_trades
-                        FOR EACH ROW
-                        INSERT INTO paper_trades_ml_candles (
-                            source_trade_id, symbol, side, btc_following, entry_type,
-                            signal_win_probability, effective_win_probability,
-                            entry_price, take_profit, stop_loss,
-                            liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
-                            quantity, margin_usdt, leverage, status,
-                            opened_at, closed_at, close_price, close_reason,
-                            mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
-                            pnl, commission_usdt, result, created_at, updated_at
-                        )
-                        SELECT
-                            NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
-                            NEW.signal_win_probability, NEW.effective_win_probability,
-                            NEW.entry_price, NEW.take_profit, NEW.stop_loss,
-                            NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
-                            NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
-                            NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason,
-                            NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
-                            NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
-                        FROM DUAL
-                        WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
-                        """
+                    CREATE TRIGGER trg_paper_trades_ml_candles_ai
+                    AFTER INSERT ON paper_trades
+                    FOR EACH ROW
+                    INSERT INTO paper_trades_ml_candles (
+                        source_trade_id, symbol, side, btc_following, entry_type,
+                        signal_win_probability, effective_win_probability,
+                        entry_price, take_profit, stop_loss,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        quantity, margin_usdt, leverage, status,
+                        opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
+                        mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                        pnl, commission_usdt, result, created_at, updated_at
                     )
+                    SELECT
+                        NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
+                        NEW.signal_win_probability, NEW.effective_win_probability,
+                        NEW.entry_price, NEW.take_profit, NEW.stop_loss,
+                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                        NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
+                        NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason, NEW.reference_win_symbol, NEW.reference_win_at,
+                        NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
+                        NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
+                    FROM DUAL
+                    WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
+                    """
+                )
+                cur.execute("DROP TRIGGER IF EXISTS trg_paper_trades_ml_candles_au")
                 cur.execute(
                     """
-                    SELECT COUNT(*) AS cnt
-                    FROM information_schema.TRIGGERS
-                    WHERE TRIGGER_SCHEMA=%s AND TRIGGER_NAME='trg_paper_trades_ml_candles_au'
-                    """,
-                    (self.database,),
-                )
-                trig_au_exists = int((cur.fetchone() or {}).get("cnt") or 0) > 0
-                if not trig_au_exists:
-                    cur.execute(
-                        """
-                        CREATE TRIGGER trg_paper_trades_ml_candles_au
-                        AFTER UPDATE ON paper_trades
-                        FOR EACH ROW
-                        INSERT INTO paper_trades_ml_candles (
-                            source_trade_id, symbol, side, btc_following, entry_type,
-                            signal_win_probability, effective_win_probability,
-                            entry_price, take_profit, stop_loss,
-                            liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
-                            quantity, margin_usdt, leverage, status,
-                            opened_at, closed_at, close_price, close_reason,
-                            mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
-                            pnl, commission_usdt, result, created_at, updated_at
-                        )
-                        SELECT
-                            NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
-                            NEW.signal_win_probability, NEW.effective_win_probability,
-                            NEW.entry_price, NEW.take_profit, NEW.stop_loss,
-                            NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
-                            NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
-                            NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason,
-                            NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
-                            NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
-                        FROM DUAL
-                        WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
-                        ON DUPLICATE KEY UPDATE
-                            symbol=VALUES(symbol),
-                            side=VALUES(side),
-                            btc_following=VALUES(btc_following),
-                            entry_type=VALUES(entry_type),
-                            signal_win_probability=VALUES(signal_win_probability),
-                            effective_win_probability=VALUES(effective_win_probability),
-                            entry_price=VALUES(entry_price),
-                            take_profit=VALUES(take_profit),
-                            stop_loss=VALUES(stop_loss),
-                            liq_ema99_15m=VALUES(liq_ema99_15m),
-                            liq_ema99_1h=VALUES(liq_ema99_1h),
-                            liq_zone_price=VALUES(liq_zone_price),
-                            liq_zone_score=VALUES(liq_zone_score),
-                            quantity=VALUES(quantity),
-                            margin_usdt=VALUES(margin_usdt),
-                            leverage=VALUES(leverage),
-                            status=VALUES(status),
-                            opened_at=VALUES(opened_at),
-                            closed_at=VALUES(closed_at),
-                            close_price=VALUES(close_price),
-                            close_reason=VALUES(close_reason),
-                            mae_pct=VALUES(mae_pct),
-                            mfe_pct=VALUES(mfe_pct),
-                            feature_snapshot_json=VALUES(feature_snapshot_json),
-                            feature_captured_at=VALUES(feature_captured_at),
-                            pnl=VALUES(pnl),
-                            commission_usdt=VALUES(commission_usdt),
-                            result=VALUES(result),
-                            created_at=VALUES(created_at),
-                            updated_at=VALUES(updated_at)
-                        """
+                    CREATE TRIGGER trg_paper_trades_ml_candles_au
+                    AFTER UPDATE ON paper_trades
+                    FOR EACH ROW
+                    INSERT INTO paper_trades_ml_candles (
+                        source_trade_id, symbol, side, btc_following, entry_type,
+                        signal_win_probability, effective_win_probability,
+                        entry_price, take_profit, stop_loss,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        quantity, margin_usdt, leverage, status,
+                        opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
+                        mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                        pnl, commission_usdt, result, created_at, updated_at
                     )
+                    SELECT
+                        NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
+                        NEW.signal_win_probability, NEW.effective_win_probability,
+                        NEW.entry_price, NEW.take_profit, NEW.stop_loss,
+                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                        NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
+                        NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason, NEW.reference_win_symbol, NEW.reference_win_at,
+                        NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
+                        NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
+                    FROM DUAL
+                    WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
+                    ON DUPLICATE KEY UPDATE
+                        symbol=VALUES(symbol),
+                        side=VALUES(side),
+                        btc_following=VALUES(btc_following),
+                        entry_type=VALUES(entry_type),
+                        signal_win_probability=VALUES(signal_win_probability),
+                        effective_win_probability=VALUES(effective_win_probability),
+                        entry_price=VALUES(entry_price),
+                        take_profit=VALUES(take_profit),
+                        stop_loss=VALUES(stop_loss),
+                        liq_ema99_15m=VALUES(liq_ema99_15m),
+                        liq_ema99_1h=VALUES(liq_ema99_1h),
+                        liq_zone_price=VALUES(liq_zone_price),
+                        liq_zone_score=VALUES(liq_zone_score),
+                        quantity=VALUES(quantity),
+                        margin_usdt=VALUES(margin_usdt),
+                        leverage=VALUES(leverage),
+                        status=VALUES(status),
+                        opened_at=VALUES(opened_at),
+                        closed_at=VALUES(closed_at),
+                        close_price=VALUES(close_price),
+                        close_reason=VALUES(close_reason),
+                        reference_win_symbol=VALUES(reference_win_symbol),
+                        reference_win_at=VALUES(reference_win_at),
+                        mae_pct=VALUES(mae_pct),
+                        mfe_pct=VALUES(mfe_pct),
+                        feature_snapshot_json=VALUES(feature_snapshot_json),
+                        feature_captured_at=VALUES(feature_captured_at),
+                        pnl=VALUES(pnl),
+                        commission_usdt=VALUES(commission_usdt),
+                        result=VALUES(result),
+                        created_at=VALUES(created_at),
+                        updated_at=VALUES(updated_at)
+                    """
+                )
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS trade_hourly_profiles (
@@ -643,10 +685,10 @@ class MySQLTradeRepository:
                     INSERT INTO paper_trades (
                         symbol, side, btc_following, entry_type, signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
-                        quantity, margin_usdt, leverage, mae_pct, mfe_pct,
+                        quantity, margin_usdt, leverage, reference_win_symbol, reference_win_at, mae_pct, mfe_pct,
                         feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -665,6 +707,8 @@ class MySQLTradeRepository:
                         payload["quantity"],
                         payload.get("margin_usdt"),
                         payload["leverage"],
+                        payload.get("reference_win_symbol"),
+                        payload.get("reference_win_at"),
                         payload.get("mae_pct", 0.0),
                         payload.get("mfe_pct", 0.0),
                         feature_snapshot_json,
@@ -900,6 +944,50 @@ class MySQLTradeRepository:
                     (side_key,),
                 )
                 return list(cur.fetchall() or [])
+
+    def latest_profitable_trade_reference(
+        self,
+        *,
+        side: str | None = None,
+        entry_type_prefix: str | None = None,
+    ) -> dict[str, Any] | None:
+        clauses = ["status='CLOSED'"]
+        params: list[Any] = []
+
+        side_key = str(side or "").upper()
+        if side_key in {"LONG", "SHORT"}:
+            clauses.append("side=%s")
+            params.append(side_key)
+
+        prefix = str(entry_type_prefix or "").strip().upper()
+        if prefix:
+            clauses.append("UPPER(entry_type) LIKE %s")
+            params.append(f"{prefix}%")
+
+        clauses.append(
+            "("
+            "COALESCE(result, 0)=1 "
+            "OR COALESCE(pnl, 0) > 0 "
+            "OR UPPER(COALESCE(close_reason, '')) IN ('TP', 'TIMEOUT_PROFIT')"
+            ")"
+        )
+
+        where_sql = " AND ".join(clauses)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        id, symbol, side, entry_type, pnl, close_reason,
+                        closed_at, updated_at, opened_at
+                    FROM paper_trades
+                    WHERE {where_sql}
+                    ORDER BY COALESCE(closed_at, updated_at, opened_at) DESC, id DESC
+                    LIMIT 1
+                    """,
+                    tuple(params),
+                )
+                return cur.fetchone()
 
     def stats(self) -> dict[str, Any]:
         with self._conn() as conn:
