@@ -386,6 +386,7 @@ type SortDirection = 'asc' | 'desc'
 type ModelViewFilter = 'ALL' | 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
 type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
+type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 
 type CompareBucket = {
   label: string
@@ -1097,6 +1098,9 @@ function App() {
   const [mlCandlesSignals, setMlCandlesSignals] = useState<ScanSignalItem[]>([])
   const [mlCandlesScannedCount, setMlCandlesScannedCount] = useState(0)
   const [mlCompareHistory, setMlCompareHistory] = useState<PaperTrade[]>([])
+  const [mlComparePage, setMlComparePage] = useState(1)
+  const [mlComparePageSize, setMlComparePageSize] = useState(20)
+  const [mlCompareModelFilter, setMlCompareModelFilter] = useState<MlCompareModelFilter>('ALL')
   const [historyPage, setHistoryPage] = useState(1)
   const [historyPageSize, setHistoryPageSize] = useState(30)
   const [historyTotalItems, setHistoryTotalItems] = useState(0)
@@ -1541,6 +1545,31 @@ function App() {
       }),
     [mlCompareHistory],
   )
+  const mlCompareFilterCounts = useMemo(() => {
+    const counts: Record<MlCompareModelFilter, number> = {
+      ALL: recentMlCompareHistory.length,
+      ML: 0,
+      ML_CANDLES_BG: 0,
+      ML_CANDLES_TEST: 0,
+    }
+    for (const row of recentMlCompareHistory) {
+      const model = tradeMlCandlesCompareLabel(row.entry_type)
+      counts[model] += 1
+    }
+    return counts
+  }, [recentMlCompareHistory])
+  const filteredMlCompareHistory = useMemo(() => {
+    if (mlCompareModelFilter === 'ALL') return recentMlCompareHistory
+    return recentMlCompareHistory.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCompareModelFilter)
+  }, [recentMlCompareHistory, mlCompareModelFilter])
+  const mlCompareMaxPage = useMemo(
+    () => Math.max(1, Math.ceil(filteredMlCompareHistory.length / mlComparePageSize)),
+    [filteredMlCompareHistory.length, mlComparePageSize],
+  )
+  const pagedMlCompareHistory = useMemo(() => {
+    const start = (mlComparePage - 1) * mlComparePageSize
+    return filteredMlCompareHistory.slice(start, start + mlComparePageSize)
+  }, [filteredMlCompareHistory, mlComparePage, mlComparePageSize])
   const openTradeKeySet = useMemo(() => {
     const set = new Set<string>()
     for (const row of paperOpenTrades) {
@@ -1563,6 +1592,10 @@ function App() {
     () => Math.max(1, Math.ceil((historyTotalItems || 0) / historyPageSize)),
     [historyTotalItems, historyPageSize],
   )
+
+  useEffect(() => {
+    setMlComparePage((prev) => Math.min(prev, mlCompareMaxPage))
+  }, [mlCompareMaxPage])
 
   function toggleVolSort(key: keyof VolatilityItem) {
     setVolSort((prev) => {
@@ -3595,8 +3628,87 @@ function App() {
           </div>
 
           <h3 className="section-title">Recent ML vs ML Candles Compare</h3>
+          <div className="history-header">
+            <div className="scan-actions">
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareModelFilter === 'ALL' ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareModelFilter('ALL')
+                  setMlComparePage(1)
+                }}
+              >
+                ALL ({mlCompareFilterCounts.ALL})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareModelFilter === 'ML' ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareModelFilter('ML')
+                  setMlComparePage(1)
+                }}
+              >
+                ML ({mlCompareFilterCounts.ML})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareModelFilter === 'ML_CANDLES_BG' ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareModelFilter('ML_CANDLES_BG')
+                  setMlComparePage(1)
+                }}
+              >
+                CANDLES_BG ({mlCompareFilterCounts.ML_CANDLES_BG})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareModelFilter === 'ML_CANDLES_TEST' ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareModelFilter('ML_CANDLES_TEST')
+                  setMlComparePage(1)
+                }}
+              >
+                CANDLES_TEST ({mlCompareFilterCounts.ML_CANDLES_TEST})
+              </button>
+            </div>
+            <div className="scan-actions">
+              <span className="badge neutral">Page {mlComparePage}/{mlCompareMaxPage}</span>
+              <span className="badge neutral">Rows: {filteredMlCompareHistory.length}</span>
+              <select
+                className="select-control history-size-select"
+                value={mlComparePageSize}
+                onChange={(event) => {
+                  const nextSize = Number(event.target.value)
+                  if (!Number.isFinite(nextSize) || nextSize <= 0) return
+                  setMlComparePage(1)
+                  setMlComparePageSize(nextSize)
+                }}
+              >
+                <option value={10}>10 / page</option>
+                <option value={20}>20 / page</option>
+                <option value={50}>50 / page</option>
+                <option value={100}>100 / page</option>
+              </select>
+              <button
+                type="button"
+                className="btn-inline btn-secondary"
+                disabled={mlComparePage <= 1}
+                onClick={() => setMlComparePage((p) => Math.max(1, p - 1))}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                className="btn-inline btn-secondary"
+                disabled={mlComparePage >= mlCompareMaxPage}
+                onClick={() => setMlComparePage((p) => Math.min(mlCompareMaxPage, p + 1))}
+              >
+                Next
+              </button>
+            </div>
+          </div>
           <div className="content table-wrap">
-            {recentMlCompareHistory.length === 0 ? (
+            {filteredMlCompareHistory.length === 0 ? (
               <p>No compare history yet.</p>
             ) : (
               <table>
@@ -3616,7 +3728,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recentMlCompareHistory.map((row) => {
+                  {pagedMlCompareHistory.map((row) => {
                     const modelLabel = tradeMlCandlesCompareLabel(row.entry_type)
                     const pnlPct = resolveClosedPnlPct(row)
                     const rowClassName = typeof row.pnl === 'number'
