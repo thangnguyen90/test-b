@@ -29,6 +29,10 @@ class Settings(BaseModel):
         "ML_MODEL_PATH",
         str(BASE_DIR / "backend_data" / "rf_model.joblib"),
     )
+    ml_candles_model_path: str = os.getenv(
+        "ML_CANDLES_MODEL_PATH",
+        str(BASE_DIR / "backend_data" / "ml_candles_model.joblib"),
+    )
     ml_test_model_path: str = os.getenv(
         "ML_TEST_MODEL_PATH",
         str(BASE_DIR / "backend_data" / "rf_model_test.joblib"),
@@ -66,6 +70,8 @@ class Settings(BaseModel):
     auto_train_horizon: int = int(os.getenv("AUTO_TRAIN_HORIZON", "4"))
     auto_train_rr_ratio: float = float(os.getenv("AUTO_TRAIN_RR_RATIO", "1.5"))
     ml_use_liquidation_features: bool = os.getenv("ML_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
+    ml_candles_use_liquidation_features: bool = os.getenv("ML_CANDLES_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
+    ml_candles_profile_min_samples: int = int(os.getenv("ML_CANDLES_PROFILE_MIN_SAMPLES", "18"))
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
@@ -86,7 +92,11 @@ class Settings(BaseModel):
     mysql_port: int = int(os.getenv("MYSQL_PORT", "3306"))
     mysql_user: str = os.getenv("MYSQL_USER", "root")
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
-    mysql_database: str = os.getenv("MYSQL_DATABASE", "trading_bot")
+    mysql_candle_database: str = os.getenv(
+        "MYSQL_CANDLE_DATABASE",
+        os.getenv("MYSQL_DATABASE", "trading_bot_candle"),
+    )
+    mysql_database: str = os.getenv("MYSQL_DATABASE", mysql_candle_database)
 
     paper_trade_min_win_probability: float = float(os.getenv("PAPER_TRADE_MIN_WIN", "0.75"))
     paper_trade_quantity: float = float(os.getenv("PAPER_TRADE_QUANTITY", "0.01"))
@@ -193,6 +203,10 @@ class Settings(BaseModel):
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
+    paper_trade_candles_bg_enabled: bool = os.getenv("PAPER_TRADE_CANDLES_BG_ENABLED", "true").lower() == "true"
+    paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
+    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "80"))
+    paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
@@ -291,4 +305,3 @@ class Settings(BaseModel):
     ml_feedback_severe_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_WEIGHT_MULTIPLIER", "8.0"))
 
 settings = Settings()
-

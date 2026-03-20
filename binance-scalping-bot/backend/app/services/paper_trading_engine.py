@@ -30,6 +30,7 @@ class PaperTradingEngine:
         repo: MySQLTradeRepository,
         predictor: MLPredictor,
         predictor_test: MLPredictor | None = None,
+        predictor_candles: MLPredictor | None = None,
         liquid_predictor: LiquidationMLPredictor | None = None,
         price_stream: Any | None = None,
         min_win_probability: float = 0.75,
@@ -111,6 +112,11 @@ class PaperTradingEngine:
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
         test_ml_max_orders_per_cycle: int = 2,
+        candles_bg_enabled: bool = False,
+        candles_bg_min_win_probability: float = 0.75,
+        candles_bg_max_symbols: int = 80,
+        candles_bg_max_orders_per_cycle: int = 2,
+        candles_bg_entry_type: str = "ML_CANDLES_BG",
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
@@ -156,6 +162,7 @@ class PaperTradingEngine:
         self.repo = repo
         self.predictor = predictor
         self.predictor_test = predictor_test
+        self.predictor_candles = predictor_candles
         self.liquid_predictor = liquid_predictor
         self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
@@ -251,6 +258,11 @@ class PaperTradingEngine:
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
         self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
+        self.candles_bg_enabled = bool(candles_bg_enabled)
+        self.candles_bg_min_win_probability = max(0.0, min(float(candles_bg_min_win_probability), 1.0))
+        self.candles_bg_max_symbols = max(10, min(200, int(candles_bg_max_symbols)))
+        self.candles_bg_max_orders_per_cycle = max(1, min(20, int(candles_bg_max_orders_per_cycle)))
+        self.candles_bg_entry_type = str(candles_bg_entry_type or "ML_CANDLES_BG").strip().upper() or "ML_CANDLES_BG"
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
@@ -375,6 +387,12 @@ class PaperTradingEngine:
             print(f"[paper-engine] scan failed, continue with open-trade management only: {type(exc).__name__}: {exc}")
         open_trades = self.repo.list_open_trades()
         open_trades_by_symbol = self._index_open_trades_by_symbol(open_trades)
+        candles_entry_type = self.candles_bg_entry_type
+        candles_open_trades = [
+            row for row in open_trades
+            if str(row.get("entry_type") or "").strip().upper() == candles_entry_type
+        ]
+        candles_open_trades_by_symbol = self._index_open_trades_by_symbol(candles_open_trades)
         closed_trade_ids: set[int] = set()
         test_symbols: list[str] = []
         if self.test_ml_enabled and self.predictor_test is not None:
@@ -384,12 +402,21 @@ class PaperTradingEngine:
                 test_symbols = [str(item.get("symbol")) for item in signals if item.get("symbol")]
             if len(test_symbols) > self.test_ml_max_symbols:
                 test_symbols = test_symbols[: self.test_ml_max_symbols]
+        candles_symbols: list[str] = []
+        if self.candles_bg_enabled and self.predictor_candles is not None:
+            candles_symbols = await asyncio.to_thread(get_cached_symbols_snapshot, self.candles_bg_max_symbols)
+            if not candles_symbols:
+                candles_symbols = [str(item.get("symbol")) for item in signals if item.get("symbol")]
+            if len(candles_symbols) > self.candles_bg_max_symbols:
+                candles_symbols = candles_symbols[: self.candles_bg_max_symbols]
         top_vol_symbols: list[str] = []
         if self.liquid_enabled and self.liquid_predictor is not None:
             top_vol_symbols = await asyncio.to_thread(self._load_top_volatility_symbols)
 
         price_symbols = {str(item.get("symbol")) for item in signals if item.get("symbol")}
         for symbol in test_symbols:
+            price_symbols.add(symbol)
+        for symbol in candles_symbols:
             price_symbols.add(symbol)
         for symbol in top_vol_symbols:
             price_symbols.add(symbol)
@@ -717,6 +744,184 @@ class PaperTradingEngine:
                 )
                 opened_test_orders += 1
 
+        # 1aa) Background ML Candles model: independent order stream for comparison.
+        if (not open_paused) and (not entry_hard_blocked) and self.candles_bg_enabled and self.predictor_candles is not None:
+            opened_candles_orders = 0
+            for symbol in candles_symbols:
+                if opened_candles_orders >= self.candles_bg_max_orders_per_cycle:
+                    break
+                market_price = stream_prices.get(symbol)
+                if market_price is None and self.entry_require_fresh_stream_price:
+                    continue
+                if market_price is None:
+                    market_price = market_prices.get(symbol)
+                if market_price is None:
+                    market_price = await asyncio.to_thread(self._resolve_market_price, symbol)
+                if market_price is None:
+                    continue
+
+                try:
+                    candles_signal = await asyncio.to_thread(
+                        self.predictor_candles.predict,
+                        symbol,
+                        float(market_price),
+                    )
+                except Exception:
+                    continue
+
+                raw_prob = float(candles_signal.win_probability)
+                if raw_prob < self.candles_bg_min_win_probability:
+                    continue
+                side = str(candles_signal.side)
+                skip_btc_guards = self._skip_btc_guards_for_entry_type(candles_entry_type)
+                effective_prob = self._apply_hourly_profile_to_probability(
+                    effective_prob=raw_prob,
+                    side=side,
+                    entry_type=candles_entry_type,
+                    btc_guard=btc_guard,
+                )
+                can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
+                    side=side,
+                    entry_type=candles_entry_type,
+                    base_min_win=self.candles_bg_min_win_probability,
+                    btc_guard=btc_guard,
+                )
+                if not can_open_now:
+                    continue
+                if not skip_btc_guards:
+                    required_min_win = self._apply_bullish_short_nonfollow_min_win_bonus(
+                        required_min_win=required_min_win,
+                        side=side,
+                        symbol=symbol,
+                        btc_guard=btc_guard,
+                    )
+                if effective_prob < required_min_win:
+                    continue
+                if not self._pass_short_sl_streak_guard(side=side):
+                    continue
+                if not skip_btc_guards:
+                    if not self._pass_bullish_short_nonfollow_ratio_guard(
+                        side=side,
+                        symbol=symbol,
+                        btc_guard=btc_guard,
+                        open_trades_by_symbol=candles_open_trades_by_symbol,
+                    ):
+                        continue
+                if self._has_conflicting_open_trade(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=candles_entry_type,
+                    force_entry_type_scope=True,
+                ):
+                    continue
+                if self._is_reentry_cooldown_active(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=candles_entry_type,
+                    force_entry_type_scope=True,
+                ):
+                    continue
+                if not self._pass_instant_sl_guard(symbol=symbol, side=side):
+                    continue
+
+                entry = float(candles_signal.predicted_entry_price)
+                tp = float(candles_signal.take_profit)
+                sl = float(candles_signal.stop_loss)
+                if entry <= 0 or tp <= 0 or sl <= 0:
+                    continue
+
+                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
+                if not touched:
+                    continue
+                if not skip_btc_guards:
+                    if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                        continue
+                if not self._handle_opposite_signal_on_touch(
+                    symbol=symbol,
+                    target_side=side,
+                    market_price=float(market_price),
+                    open_trades_by_symbol=candles_open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                ):
+                    continue
+
+                atr_value = await self._resolve_symbol_atr(symbol)
+                atr_for_pct = float(atr_value) if atr_value is not None else 0.0
+                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
+                normalized_tp, normalized_sl = normalize_tp_sl(
+                    side=side,
+                    entry_price=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    min_sl_pct=max(
+                        self.min_sl_pct,
+                        calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
+                    ),
+                    sl_extra_buffer_pct=self.sl_extra_buffer_pct,
+                    atr_value=atr_value,
+                    sl_atr_multiplier=self.sl_atr_multiplier,
+                    min_rr=self.min_rr,
+                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    leverage=leverage,
+                    max_margin_loss_pct=self._resolve_max_margin_loss_pct(symbol=symbol, side=side, atr_pct=atr_pct, btc_guard=btc_guard),
+                )
+
+                risk_pct = calc_estimated_margin_ratio_pct(
+                    leverage=leverage,
+                    maint_margin_rate=self.maint_margin_rate,
+                )
+                if risk_pct > self._resolve_symbol_max_risk_pct(symbol):
+                    continue
+
+                quantity = calc_quantity_from_order_usdt(
+                    entry_price=entry,
+                    order_usdt=self.order_usdt,
+                    fallback_quantity=self.quantity,
+                )
+                margin_usdt = self.margin_usdt
+                if margin_usdt <= 0:
+                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                btc_following = self._resolve_btc_following_flag(symbol)
+
+                trade_id = self.repo.create_open_trade(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "btc_following": btc_following,
+                        "entry_type": candles_entry_type,
+                        "signal_win_probability": raw_prob,
+                        "effective_win_probability": effective_prob,
+                        "entry_price": entry,
+                        "take_profit": normalized_tp,
+                        "stop_loss": normalized_sl,
+                        "quantity": quantity,
+                        "margin_usdt": margin_usdt,
+                        "leverage": leverage,
+                        "mae_pct": 0.0,
+                        "mfe_pct": 0.0,
+                        "feature_snapshot": feature_snapshot,
+                    }
+                )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
+                )
+                self._cache_open_trade_row(
+                    open_trades_by_symbol=candles_open_trades_by_symbol,
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    quantity=quantity,
+                )
+                opened_candles_orders += 1
+
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
         if (not open_paused) and (not entry_hard_blocked) and self.liquid_enabled and self.liquid_predictor is not None:
             for symbol in top_vol_symbols:
@@ -887,6 +1092,8 @@ class PaperTradingEngine:
                     continue
                 symbol = str(trade["symbol"])
                 side = str(trade["side"])
+                entry_type = str(trade.get("entry_type") or "LIMIT")
+                skip_btc_guards = self._skip_btc_guards_for_entry_type(entry_type)
                 price = market_prices.get(symbol)
                 if price is None:
                     stream_price = await self._resolve_stream_price(symbol)
@@ -928,86 +1135,90 @@ class PaperTradingEngine:
                             sl = locked_sl
 
                 # Close losing counter-trend positions on BTC 1H reversal (day-toggle capable).
-                if self._should_force_close_loss_on_btc_reversal(
-                    side=side,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    btc_guard=btc_guard,
-                ):
-                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                    net_pnl = pnl - commission
-                    self.repo.close_trade(
-                        trade_id=int(trade["id"]),
-                        close_price=price,
-                        pnl=net_pnl,
-                        result=0,
-                        close_reason="BTC_1H_REVERSAL_LOSS_EXIT",
-                        commission_usdt=commission,
-                    )
-                    continue
+                if not skip_btc_guards:
+                    if self._should_force_close_loss_on_btc_reversal(
+                        side=side,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        btc_guard=btc_guard,
+                    ):
+                        commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                        net_pnl = pnl - commission
+                        self.repo.close_trade(
+                            trade_id=int(trade["id"]),
+                            close_price=price,
+                            pnl=net_pnl,
+                            result=0,
+                            close_reason="BTC_1H_REVERSAL_LOSS_EXIT",
+                            commission_usdt=commission,
+                        )
+                        continue
 
                 # Close profitable counter-trend positions when BTC 1H reversal is detected.
-                if self._should_force_close_profit_on_btc_reversal(
-                    symbol=symbol,
-                    side=side,
-                    pnl=pnl,
-                    pnl_pct=pnl_pct,
-                    btc_guard=btc_guard,
-                ):
-                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                    net_pnl = pnl - commission
-                    reversal_reason = (
-                        "BTC_1H_REVERSAL_PROFIT_EXIT"
-                        if self._is_countertrend_on_btc_1h_reversal(side=side, btc_guard=btc_guard)
-                        else "BTC_REVERSAL_PROFIT_EXIT"
-                    )
-                    self.repo.close_trade(
-                        trade_id=int(trade["id"]),
-                        close_price=price,
-                        pnl=net_pnl,
-                        result=1,
-                        close_reason=reversal_reason,
-                        commission_usdt=commission,
-                    )
-                    continue
+                if not skip_btc_guards:
+                    if self._should_force_close_profit_on_btc_reversal(
+                        symbol=symbol,
+                        side=side,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        btc_guard=btc_guard,
+                    ):
+                        commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                        net_pnl = pnl - commission
+                        reversal_reason = (
+                            "BTC_1H_REVERSAL_PROFIT_EXIT"
+                            if self._is_countertrend_on_btc_1h_reversal(side=side, btc_guard=btc_guard)
+                            else "BTC_REVERSAL_PROFIT_EXIT"
+                        )
+                        self.repo.close_trade(
+                            trade_id=int(trade["id"]),
+                            close_price=price,
+                            pnl=net_pnl,
+                            result=1,
+                            close_reason=reversal_reason,
+                            commission_usdt=commission,
+                        )
+                        continue
 
                 # Lock profit when BTC trend flips against this position for BTC-following symbols only.
-                if self._should_close_profit_on_btc_trend(
-                    symbol=symbol,
-                    side=side,
-                    pnl=pnl,
-                    btc_guard=btc_guard,
-                ):
-                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                    net_pnl = pnl - commission
-                    self.repo.close_trade(
-                        trade_id=int(trade["id"]),
-                        close_price=price,
-                        pnl=net_pnl,
-                        result=1,
-                        close_reason="BTC_TREND_PROFIT_LOCK",
-                        commission_usdt=commission,
-                    )
-                    continue
+                if not skip_btc_guards:
+                    if self._should_close_profit_on_btc_trend(
+                        symbol=symbol,
+                        side=side,
+                        pnl=pnl,
+                        btc_guard=btc_guard,
+                    ):
+                        commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                        net_pnl = pnl - commission
+                        self.repo.close_trade(
+                            trade_id=int(trade["id"]),
+                            close_price=price,
+                            pnl=net_pnl,
+                            result=1,
+                            close_reason="BTC_TREND_PROFIT_LOCK",
+                            commission_usdt=commission,
+                        )
+                        continue
 
                 # Close any counter-trend open trade when BTC filter has high confidence.
-                if self._should_force_close_countertrend_on_btc_filter(
-                    symbol=symbol,
-                    side=side,
-                    pnl=pnl,
-                    btc_guard=btc_guard,
-                ):
-                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                    net_pnl = pnl - commission
-                    self.repo.close_trade(
-                        trade_id=int(trade["id"]),
-                        close_price=price,
-                        pnl=net_pnl,
-                        result=1,
-                        close_reason="BTC_TREND_COUNTER_EXIT",
-                        commission_usdt=commission,
-                    )
-                    continue
+                if not skip_btc_guards:
+                    if self._should_force_close_countertrend_on_btc_filter(
+                        symbol=symbol,
+                        side=side,
+                        pnl=pnl,
+                        btc_guard=btc_guard,
+                    ):
+                        commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
+                        net_pnl = pnl - commission
+                        self.repo.close_trade(
+                            trade_id=int(trade["id"]),
+                            close_price=price,
+                            pnl=net_pnl,
+                            result=1,
+                            close_reason="BTC_TREND_COUNTER_EXIT",
+                            commission_usdt=commission,
+                        )
+                        continue
 
                 # SL has higher priority than TP per user requirement.
                 sl_hit = False
@@ -1139,12 +1350,26 @@ class PaperTradingEngine:
         except Exception:
             return None
 
-    def _has_conflicting_open_trade(self, *, symbol: str, side: str, entry_type: str) -> bool:
-        if self.single_position_per_symbol_side:
+    def _has_conflicting_open_trade(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        force_entry_type_scope: bool = False,
+    ) -> bool:
+        if self.single_position_per_symbol_side and not force_entry_type_scope:
             return self.repo.has_open_trade(symbol=symbol, side=side)
         return self.repo.has_open_trade(symbol=symbol, side=side, entry_type=entry_type)
 
-    def _is_reentry_cooldown_active(self, *, symbol: str, side: str, entry_type: str) -> bool:
+    def _is_reentry_cooldown_active(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        force_entry_type_scope: bool = False,
+    ) -> bool:
         if (
             self.reentry_cooldown_minutes <= 0
             and self.reentry_after_sl_cooldown_minutes <= 0
@@ -1155,7 +1380,7 @@ class PaperTradingEngine:
         latest = self.repo.latest_trade(
             symbol=symbol,
             side=side,
-            entry_type=None if self.single_position_per_symbol_side else entry_type,
+            entry_type=None if (self.single_position_per_symbol_side and not force_entry_type_scope) else entry_type,
         )
         if not latest:
             return False
@@ -1447,6 +1672,11 @@ class PaperTradingEngine:
         total_open, short_open = self._count_open_positions_by_side(open_trades_by_symbol)
         projected_short_ratio = (short_open + 1) / max(1, total_open + 1)
         return projected_short_ratio <= self.bullish_short_nonfollow_max_open_ratio
+
+    @staticmethod
+    def _skip_btc_guards_for_entry_type(entry_type: str | None) -> bool:
+        normalized_entry_type = str(entry_type or "").strip().upper()
+        return normalized_entry_type.startswith("ML_CANDLES")
 
     def _apply_bullish_short_nonfollow_min_win_bonus(
         self,

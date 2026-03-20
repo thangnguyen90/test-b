@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
-from app.deps import get_paper_trade_runtime, ml_predictor
+from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor
 from app.services.binance_client import BinanceFuturesClient
 from app.services.risk_manager import calc_estimated_margin_ratio_pct
 
@@ -92,6 +92,8 @@ def _evaluate_paper_entry_gate(
     take_profit: float,
     stop_loss: float,
     market_price: float,
+    entry_type: str = "LIMIT",
+    force_entry_type_scope: bool = False,
 ) -> tuple[bool, str, float, bool | None]:
     try:
         repo, engine = get_paper_trade_runtime()
@@ -120,13 +122,30 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
 
+        normalized_entry_type = str(entry_type or "LIMIT").strip().upper() or "LIMIT"
+        skip_btc_guards = normalized_entry_type.startswith("ML_CANDLES")
+
         try:
-            if repo.has_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
+            if bool(
+                engine._has_conflicting_open_trade(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=normalized_entry_type,
+                    force_entry_type_scope=force_entry_type_scope,
+                )
+            ):
                 return False, "Duplicate", raw_win_probability, None
         except Exception:
             return False, "Repo unavailable", raw_win_probability, None
         try:
-            if bool(engine._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT")):
+            if bool(
+                engine._is_reentry_cooldown_active(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=normalized_entry_type,
+                    force_entry_type_scope=force_entry_type_scope,
+                )
+            ):
                 return False, "Reentry cooldown", raw_win_probability, None
         except Exception:
             pass
@@ -142,9 +161,12 @@ def _evaluate_paper_entry_gate(
         for row in open_rows:
             row_symbol = str(row.get("symbol") or "")
             row_side = str(row.get("side") or "").upper()
+            row_entry_type = str(row.get("entry_type") or "").strip().upper()
             if row_symbol != symbol:
                 continue
             if row_side not in {"LONG", "SHORT"}:
+                continue
+            if force_entry_type_scope and row_entry_type != normalized_entry_type:
                 continue
             if row_side == target_side:
                 continue
@@ -192,10 +214,11 @@ def _evaluate_paper_entry_gate(
             return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, None
 
         btc_guard: dict = {}
-        try:
-            btc_guard = engine._resolve_btc_trend_guard()
-        except Exception:
-            btc_guard = {}
+        if not skip_btc_guards:
+            try:
+                btc_guard = engine._resolve_btc_trend_guard()
+            except Exception:
+                btc_guard = {}
 
         btc_following: bool | None
         try:
@@ -203,31 +226,32 @@ def _evaluate_paper_entry_gate(
         except Exception:
             btc_following = None
 
-        try:
-            trend_hour_lock_reason = engine._btc_trend_hour_lock_reason(
-                symbol=symbol,
-                side=side,
-                btc_guard=btc_guard,
-            )
-            if trend_hour_lock_reason:
-                return False, str(trend_hour_lock_reason), effective_probability, btc_following
-        except Exception:
-            pass
-
-        try:
-            required_min_win = float(min_win)
-            required_min_win = float(
-                engine._apply_bullish_short_nonfollow_min_win_bonus(
-                    required_min_win=required_min_win,
-                    side=side,
+        if not skip_btc_guards:
+            try:
+                trend_hour_lock_reason = engine._btc_trend_hour_lock_reason(
                     symbol=symbol,
+                    side=side,
                     btc_guard=btc_guard,
                 )
-            )
-            if effective_probability < required_min_win:
-                return False, f"EffectiveWin<{required_min_win * 100:.1f}%", effective_probability, btc_following
-        except Exception:
-            pass
+                if trend_hour_lock_reason:
+                    return False, str(trend_hour_lock_reason), effective_probability, btc_following
+            except Exception:
+                pass
+
+            try:
+                required_min_win = float(min_win)
+                required_min_win = float(
+                    engine._apply_bullish_short_nonfollow_min_win_bonus(
+                        required_min_win=required_min_win,
+                        side=side,
+                        symbol=symbol,
+                        btc_guard=btc_guard,
+                    )
+                )
+                if effective_probability < required_min_win:
+                    return False, f"EffectiveWin<{required_min_win * 100:.1f}%", effective_probability, btc_following
+            except Exception:
+                pass
 
         try:
             if not bool(engine._pass_short_sl_streak_guard(side=side)):
@@ -235,51 +259,52 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
 
-        try:
-            open_index = engine._index_open_trades_by_symbol(open_rows)
-            if not bool(
-                engine._pass_bullish_short_nonfollow_ratio_guard(
-                    side=side,
-                    symbol=symbol,
-                    btc_guard=btc_guard,
-                    open_trades_by_symbol=open_index,
-                )
-            ):
-                return False, "Short ratio guard", effective_probability, btc_following
-        except Exception:
-            pass
+        if not skip_btc_guards:
+            try:
+                open_index = engine._index_open_trades_by_symbol(open_rows)
+                if not bool(
+                    engine._pass_bullish_short_nonfollow_ratio_guard(
+                        side=side,
+                        symbol=symbol,
+                        btc_guard=btc_guard,
+                        open_trades_by_symbol=open_index,
+                    )
+                ):
+                    return False, "Short ratio guard", effective_probability, btc_following
+            except Exception:
+                pass
 
-        try:
-            pass_btc_filter = bool(
-                engine._pass_btc_filter(
-                    symbol=symbol,
-                    side=side,
-                    effective_prob=effective_probability,
-                    btc_guard=btc_guard,
+            try:
+                pass_btc_filter = bool(
+                    engine._pass_btc_filter(
+                        symbol=symbol,
+                        side=side,
+                        effective_prob=effective_probability,
+                        btc_guard=btc_guard,
+                    )
                 )
-            )
-        except Exception:
-            pass_btc_filter = True
-        if not pass_btc_filter:
-            follows_btc = bool(btc_following)
-            shock_direction = str((btc_guard or {}).get("shock_direction") or "FLAT").upper()
-            if follows_btc and str(side).upper() == "LONG" and shock_direction == "UP":
-                return False, "BTC up-shock long block", effective_probability, btc_following
-            if follows_btc and str(side).upper() == "SHORT" and shock_direction == "DOWN":
-                return False, "BTC down-shock short block", effective_probability, btc_following
+            except Exception:
+                pass_btc_filter = True
+            if not pass_btc_filter:
+                follows_btc = bool(btc_following)
+                shock_direction = str((btc_guard or {}).get("shock_direction") or "FLAT").upper()
+                if follows_btc and str(side).upper() == "LONG" and shock_direction == "UP":
+                    return False, "BTC up-shock long block", effective_probability, btc_following
+                if follows_btc and str(side).upper() == "SHORT" and shock_direction == "DOWN":
+                    return False, "BTC down-shock short block", effective_probability, btc_following
 
-            trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
-            confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
-            min_conf = float(getattr(engine, "btc_filter_min_confidence", 0.0))
-            block_countertrend = bool(getattr(engine, "btc_filter_block_countertrend", False))
-            if (
-                block_countertrend
-                and trend_side in {"LONG", "SHORT"}
-                and str(side).upper() != trend_side
-                and confidence >= min_conf
-            ):
-                return False, f"BTC trend {trend_side}", effective_probability, btc_following
-            return False, "BTC filter", effective_probability, btc_following
+                trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+                confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
+                min_conf = float(getattr(engine, "btc_filter_min_confidence", 0.0))
+                block_countertrend = bool(getattr(engine, "btc_filter_block_countertrend", False))
+                if (
+                    block_countertrend
+                    and trend_side in {"LONG", "SHORT"}
+                    and str(side).upper() != trend_side
+                    and confidence >= min_conf
+                ):
+                    return False, f"BTC trend {trend_side}", effective_probability, btc_following
+                return False, "BTC filter", effective_probability, btc_following
 
         try:
             touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
@@ -304,6 +329,80 @@ def _evaluate_paper_entry_gate(
         return True, "-", effective_probability, btc_following
     except Exception:
         return False, "Precheck unavailable", raw_win_probability, None
+
+
+def _build_compare_signal_payload(
+    *,
+    symbol: str,
+    mark_price: float,
+    predictor,
+    target_side: str | None = None,
+) -> dict | None:
+    try:
+        compare_signal = predictor.predict(symbol=symbol, mark_price=mark_price)
+    except Exception:
+        return None
+    return {
+        "side": compare_signal.side,
+        "win_probability": compare_signal.win_probability,
+        "predicted_entry_price": compare_signal.predicted_entry_price,
+        "take_profit": compare_signal.take_profit,
+        "aligned": compare_signal.side == str(target_side or "").upper(),
+    }
+
+
+def _build_scan_match(
+    *,
+    signal,
+    signal_source: str,
+    last_price: float,
+    ticker: dict,
+    compare_field: str | None = None,
+    compare_payload: dict | None = None,
+    gate_entry_type: str = "LIMIT",
+    force_entry_type_scope: bool = False,
+) -> dict:
+    liq_zone_price, liq_zone_value = _estimate_liq_zone(
+        last_price=last_price,
+        side=signal.side,
+        ticker=ticker if isinstance(ticker, dict) else {},
+    )
+    try:
+        can_enter, blocked_reason, effective_win_probability, btc_following = _evaluate_paper_entry_gate(
+            symbol=signal.symbol,
+            side=signal.side,
+            raw_win_probability=float(signal.win_probability),
+            entry=float(signal.predicted_entry_price),
+            take_profit=float(signal.take_profit),
+            stop_loss=float(signal.stop_loss),
+            market_price=float(last_price),
+            entry_type=gate_entry_type,
+            force_entry_type_scope=force_entry_type_scope,
+        )
+    except Exception:
+        can_enter = False
+        blocked_reason = "Precheck unavailable"
+        effective_win_probability = float(signal.win_probability)
+        btc_following = None
+    payload = {
+        "symbol": signal.symbol,
+        "side": signal.side,
+        "signal_source": signal_source,
+        "win_probability": signal.win_probability,
+        "effective_win_probability": effective_win_probability,
+        "predicted_entry_price": signal.predicted_entry_price,
+        "stop_loss": signal.stop_loss,
+        "take_profit": signal.take_profit,
+        "mark_price": last_price,
+        "can_enter": can_enter,
+        "blocked_reason": blocked_reason,
+        "btc_following": btc_following,
+        "liq_zone_price": liq_zone_price,
+        "liq_zone_value": liq_zone_value,
+    }
+    if compare_field:
+        payload[compare_field] = compare_payload
+    return payload
 
 
 def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
@@ -365,43 +464,22 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
             continue
 
         if signal.win_probability >= min_win:
-            liq_zone_price, liq_zone_value = _estimate_liq_zone(
-                last_price=last_price,
-                side=signal.side,
-                ticker=ticker if isinstance(ticker, dict) else {},
+            ml_candles_payload = _build_compare_signal_payload(
+                symbol=symbol,
+                mark_price=float(last_price),
+                predictor=ml_candles_predictor,
+                target_side=signal.side,
             )
-            try:
-                can_enter, blocked_reason, effective_win_probability, btc_following = _evaluate_paper_entry_gate(
-                    symbol=signal.symbol,
-                    side=signal.side,
-                    raw_win_probability=float(signal.win_probability),
-                    entry=float(signal.predicted_entry_price),
-                    take_profit=float(signal.take_profit),
-                    stop_loss=float(signal.stop_loss),
-                    market_price=float(last_price),
-                )
-            except Exception:
-                can_enter = False
-                blocked_reason = "Precheck unavailable"
-                effective_win_probability = float(signal.win_probability)
-                btc_following = None
             matches.append(
-                {
-                    "symbol": signal.symbol,
-                    "side": signal.side,
-                    "signal_source": "ML",
-                    "win_probability": signal.win_probability,
-                    "effective_win_probability": effective_win_probability,
-                    "predicted_entry_price": signal.predicted_entry_price,
-                    "stop_loss": signal.stop_loss,
-                    "take_profit": signal.take_profit,
-                    "mark_price": last_price,
-                    "can_enter": can_enter,
-                    "blocked_reason": blocked_reason,
-                    "btc_following": btc_following,
-                    "liq_zone_price": liq_zone_price,
-                    "liq_zone_value": liq_zone_value,
-                }
+                _build_scan_match(
+                    signal=signal,
+                    signal_source="ML",
+                    last_price=float(last_price),
+                    ticker=ticker if isinstance(ticker, dict) else {},
+                    compare_field="ml_candles",
+                    compare_payload=ml_candles_payload,
+                    gate_entry_type="LIMIT",
+                )
             )
 
     matches.sort(key=lambda item: item["win_probability"], reverse=True)
@@ -417,9 +495,79 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
     return payload
 
 
+def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
+    if symbols:
+        scan_symbols = symbols[:max_symbols]
+    else:
+        try:
+            scan_symbols = _get_usdt_swap_symbols(max_symbols=max_symbols)
+        except Exception:
+            scan_symbols = _SYMBOLS_CACHE["symbols"][:max_symbols] if _SYMBOLS_CACHE["symbols"] else []
+
+    matches: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
+    except Exception:
+        tickers_map = {}
+
+    for symbol in scan_symbols:
+        try:
+            ticker = tickers_map.get(symbol, {}) if isinstance(tickers_map, dict) else {}
+            last_price = _safe_float(ticker.get("last"))
+            if last_price is None:
+                last_price = _safe_float(ticker.get("close"))
+            if last_price is None:
+                bid = _safe_float(ticker.get("bid"))
+                ask = _safe_float(ticker.get("ask"))
+                if bid is not None and ask is not None:
+                    last_price = (bid + ask) / 2
+            if last_price is None:
+                continue
+
+            signal = ml_candles_predictor.predict(symbol=symbol, mark_price=last_price)
+        except Exception:
+            continue
+
+        if signal.win_probability >= min_win:
+            baseline_ml_payload = _build_compare_signal_payload(
+                symbol=symbol,
+                mark_price=float(last_price),
+                predictor=ml_predictor,
+                target_side=signal.side,
+            )
+            matches.append(
+                _build_scan_match(
+                    signal=signal,
+                    signal_source="ML_CANDLES",
+                    last_price=float(last_price),
+                    ticker=ticker if isinstance(ticker, dict) else {},
+                    compare_field="baseline_ml",
+                    compare_payload=baseline_ml_payload,
+                    gate_entry_type="ML_CANDLES_TEST",
+                    force_entry_type_scope=True,
+                )
+            )
+
+    matches.sort(key=lambda item: item["win_probability"], reverse=True)
+    return {
+        "min_win": min_win,
+        "scanned": len(scan_symbols),
+        "count": len(matches),
+        "signals": matches,
+        "source": "live",
+        "timestamp": now_iso,
+    }
+
+
 def get_scan_snapshot(min_win: float = 0.7, max_symbols: int = 80, symbols: str | None = None) -> dict:
     parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     return _scan_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
+
+
+def get_candles_scan_snapshot(min_win: float = 0.7, max_symbols: int = 80, symbols: str | None = None) -> dict:
+    parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    return _scan_candles_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
 
 
 @router.get("/latest")
@@ -428,6 +576,17 @@ def get_latest_signal(
     mark_price: float = Query(default=100.0, gt=0),
 ) -> dict:
     result = ml_predictor.predict(symbol=symbol, mark_price=mark_price)
+    try:
+        candle_result = ml_candles_predictor.predict(symbol=symbol, mark_price=mark_price)
+        ml_candles_payload: dict | None = {
+            "side": candle_result.side,
+            "win_probability": candle_result.win_probability,
+            "predicted_entry_price": candle_result.predicted_entry_price,
+            "take_profit": candle_result.take_profit,
+            "aligned": candle_result.side == result.side,
+        }
+    except Exception:
+        ml_candles_payload = None
     return {
         "symbol": result.symbol,
         "side": result.side,
@@ -436,6 +595,31 @@ def get_latest_signal(
         "predicted_entry_price": result.predicted_entry_price,
         "stop_loss": result.stop_loss,
         "take_profit": result.take_profit,
+        "ml_candles": ml_candles_payload,
+    }
+
+
+@router.get("/candles/latest")
+def get_latest_candles_signal(
+    symbol: str = Query(default="BTC/USDT"),
+    mark_price: float = Query(default=100.0, gt=0),
+) -> dict:
+    result = ml_candles_predictor.predict(symbol=symbol, mark_price=mark_price)
+    baseline_ml_payload = _build_compare_signal_payload(
+        symbol=symbol,
+        mark_price=mark_price,
+        predictor=ml_predictor,
+        target_side=result.side,
+    )
+    return {
+        "symbol": result.symbol,
+        "side": result.side,
+        "signal_source": "ML_CANDLES",
+        "win_probability": result.win_probability,
+        "predicted_entry_price": result.predicted_entry_price,
+        "stop_loss": result.stop_loss,
+        "take_profit": result.take_profit,
+        "baseline_ml": baseline_ml_payload,
     }
 
 
@@ -446,3 +630,12 @@ def scan_signals(
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
+
+
+@router.get("/candles/scan")
+def scan_candles_signals(
+    min_win: float = Query(default=0.7, ge=0.0, le=1.0),
+    max_symbols: int = Query(default=80, ge=1, le=200),
+    symbols: str | None = Query(default=None),
+) -> dict:
+    return get_candles_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)

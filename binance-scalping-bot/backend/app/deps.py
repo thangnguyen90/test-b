@@ -4,12 +4,19 @@ from app.core.config import settings
 from app.services.auto_trainer import AutoTrainer
 from app.services.binance_price_stream import BinancePriceStream
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
+from app.services.ml_candles_predictor import MLCandlesPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.order_manager import OrderManager
 from app.services.ws_manager import WSManager
 
 order_manager = OrderManager(settings.sqlite_db_path)
 ml_predictor = MLPredictor(model_path=settings.ml_model_path)
+ml_candles_predictor = MLCandlesPredictor(
+    model_path=settings.ml_candles_model_path,
+    repo_database=settings.mysql_candle_database,
+    profile_min_samples=settings.ml_candles_profile_min_samples,
+    use_liquidation_features=settings.ml_candles_use_liquidation_features,
+)
 ml_test_predictor = MLPredictor(
     model_path=settings.ml_test_model_path,
     use_liquidation_features=settings.ml_test_use_liquidation_features,

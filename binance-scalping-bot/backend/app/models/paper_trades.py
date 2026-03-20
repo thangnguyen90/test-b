@@ -131,6 +131,8 @@ class PaperMarketOpenRequest(BaseModel):
     side: str = Field(pattern="^(LONG|SHORT)$")
     signal_win_probability: float = Field(ge=0, le=1)
     effective_win_probability: Optional[float] = Field(default=None, ge=0, le=1)
+    repo_scope: Optional[str] = Field(default=None, pattern="^(main|candles|auto)$")
+    entry_type: Optional[str] = Field(default=None, pattern="^[A-Z_]+$")
     entry_price: Optional[float] = Field(default=None, gt=0)
     take_profit: float = Field(gt=0)
     stop_loss: float = Field(gt=0)

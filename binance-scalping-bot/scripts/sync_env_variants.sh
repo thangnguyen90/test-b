@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_ENV="$ROOT_DIR/backend/.env"
 MAC_ENV="$ROOT_DIR/backend/.mac.env"
 WINDOW_ENV="$ROOT_DIR/backend/.window.env"
+WINDOW_NEV="$ROOT_DIR/backend/.window.nev"
 
 if [[ ! -f "$BASE_ENV" ]]; then
   echo "Missing base env: $BASE_ENV"
@@ -13,6 +14,7 @@ fi
 
 cp "$BASE_ENV" "$MAC_ENV"
 cp "$BASE_ENV" "$WINDOW_ENV"
+cp "$BASE_ENV" "$WINDOW_NEV"
 
 # macOS paths
 perl -0pi -e \
@@ -34,8 +36,10 @@ perl -0pi -e \
    s|^#\s*MYSQL_USER=.*\r?\n||mg;
    s|^MYSQL_USER=.*$|MYSQL_USER=navicat|m;
    s|^(MYSQL_USER=navicat)$|$1\n# MYSQL_USER=root|m;' \
-  "$WINDOW_ENV"
+  "$WINDOW_ENV" \
+  "$WINDOW_NEV"
 
 echo "Updated:"
 echo "  - $MAC_ENV"
 echo "  - $WINDOW_ENV"
+echo "  - $WINDOW_NEV"

@@ -13,7 +13,7 @@
 
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot/backend
-cp .env.example .env
+cp .mac.env .env
 /Users/thang/Desktop/TEST/binance-scalping-bot/.venv/bin/pip install -r requirements.txt
 ```
 
@@ -26,22 +26,37 @@ npm install
 
 ## 3) Chạy project
 
-### Chạy Backend (terminal 1)
+### Start nhanh Backend (terminal 1)
 
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot/backend
-/Users/thang/Desktop/TEST/binance-scalping-bot/.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+/Users/thang/Desktop/TEST/binance-scalping-bot/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-### Chạy Frontend (terminal 2)
+### Start nhanh Frontend (terminal 2)
 
 ```bash
 cd /Users/thang/Desktop/TEST/binance-scalping-bot/frontend
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5199
 ```
 
-- Frontend: `http://127.0.0.1:5173`
+- Frontend: `http://127.0.0.1:5199`
 - Backend API docs: `http://127.0.0.1:8000/docs`
+
+### Ghi chú env
+
+- macOS dev: dùng `backend/.mac.env` làm nguồn chính, copy sang `backend/.env`
+- Khi thêm env mới, nhớ thêm đồng thời vào:
+  - `backend/.mac.env`
+  - `backend/.window.env`
+  - `backend/.window.nev`
+
+### Lệnh restart backend
+
+```bash
+cd /Users/thang/Desktop/TEST/binance-scalping-bot
+bash scripts/backend_service.sh restart-force
+```
 
 ## 4) Train model ML (RandomForest)
 

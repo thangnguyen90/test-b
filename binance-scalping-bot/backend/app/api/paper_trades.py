@@ -59,6 +59,7 @@ class PaperTradeAPI:
     def __init__(self) -> None:
         self.router = APIRouter(prefix="/api/v1/paper-trades", tags=["paper-trades"])
         self.repo: MySQLTradeRepository | None = None
+        self.candle_repo: MySQLTradeRepository | None = None
         self.price_stream = None
         self.major_symbol_resolver = None
         self.btc_follow_resolver = None
@@ -80,6 +81,9 @@ class PaperTradeAPI:
 
     def bind_repo(self, repo: MySQLTradeRepository | None) -> None:
         self.repo = repo
+
+    def bind_candle_repo(self, repo: MySQLTradeRepository | None) -> None:
+        self.candle_repo = repo
 
     def bind_price_stream(self, price_stream: object | None) -> None:
         self.price_stream = price_stream
@@ -113,10 +117,36 @@ class PaperTradeAPI:
             return max(float(settings.paper_trade_max_risk_pct), float(settings.paper_trade_major_max_risk_pct))
         return float(settings.paper_trade_max_risk_pct)
 
-    def _require_repo(self) -> MySQLTradeRepository:
+    @staticmethod
+    def _normalize_repo_scope(value: str | None) -> str:
+        scope = str(value or "main").strip().lower()
+        if scope not in {"main", "candles", "auto"}:
+            return "main"
+        return scope
+
+    def _resolve_repo(
+        self,
+        *,
+        repo_scope: str | None = None,
+        entry_type: str | None = None,
+    ) -> MySQLTradeRepository:
+        scope = self._normalize_repo_scope(repo_scope)
+        normalized_entry_type = str(entry_type or "").strip().upper()
+        if scope == "auto":
+            scope = "candles" if normalized_entry_type == "ML_CANDLES_TEST" else "main"
+        elif scope == "main" and normalized_entry_type == "ML_CANDLES_TEST":
+            scope = "candles"
+
+        if scope == "candles":
+            if self.candle_repo is None:
+                raise HTTPException(status_code=503, detail="Paper trading candle DB is not configured")
+            return self.candle_repo
         if self.repo is None:
             raise HTTPException(status_code=503, detail="Paper trading DB is not configured")
         return self.repo
+
+    def _require_repo(self) -> MySQLTradeRepository:
+        return self._resolve_repo(repo_scope="main")
 
     def _resolve_btc_follow_map(self, rows: list[dict]) -> dict[str, bool | None]:
         if not rows:
@@ -250,8 +280,11 @@ class PaperTradeAPI:
             result=int(row["result"]) if row.get("result") is not None else None,
         )
 
-    def get_open(self) -> PaperTradeListResponse:
-        repo = self._require_repo()
+    def get_open(
+        self,
+        repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
+    ) -> PaperTradeListResponse:
+        repo = self._resolve_repo(repo_scope=repo_scope)
         rows = repo.list_open_trades()
         btc_follow_map = self._resolve_btc_follow_map(rows)
         return PaperTradeListResponse(
@@ -263,8 +296,9 @@ class PaperTradeAPI:
         limit: int = Query(default=200, ge=1, le=2000),
         page: int | None = Query(default=None, ge=1),
         page_size: int | None = Query(default=None, ge=1, le=200),
+        repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
     ) -> PaperTradeListResponse:
-        repo = self._require_repo()
+        repo = self._resolve_repo(repo_scope=repo_scope)
         if page is None and page_size is None:
             rows = repo.list_recent_trades(limit=limit)
             btc_follow_map = self._resolve_btc_follow_map(rows)
@@ -285,8 +319,11 @@ class PaperTradeAPI:
             total_pages=total_pages,
         )
 
-    def get_stats(self) -> PaperTradeStatsResponse:
-        repo = self._require_repo()
+    def get_stats(
+        self,
+        repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
+    ) -> PaperTradeStatsResponse:
+        repo = self._resolve_repo(repo_scope=repo_scope)
         payload = repo.stats()
         payload["order_usdt"] = settings.paper_trade_order_usdt
         payload["margin_usdt"] = settings.paper_trade_margin_usdt if settings.paper_trade_margin_usdt > 0 else (
@@ -763,7 +800,7 @@ class PaperTradeAPI:
         )
 
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
-        repo = self._require_repo()
+        repo = self._resolve_repo(repo_scope=req.repo_scope, entry_type=req.entry_type)
         if repo.has_open_trade(symbol=req.symbol, side=req.side):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
 
@@ -847,13 +884,14 @@ class PaperTradeAPI:
                 btc_following = bool(self.btc_follow_resolver(req.symbol))
             except Exception:
                 btc_following = None
+        entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
 
         trade_id = repo.create_open_trade(
             {
                 "symbol": req.symbol,
                 "side": req.side,
                 "btc_following": btc_following,
-                "entry_type": "MARKET",
+                "entry_type": entry_type,
                 "signal_win_probability": req.signal_win_probability,
                 "effective_win_probability": req.effective_win_probability or req.signal_win_probability,
                 "entry_price": float(market_price),
@@ -870,8 +908,13 @@ class PaperTradeAPI:
             raise HTTPException(status_code=500, detail=f"Cannot read created trade {trade_id}")
         return self._map_trade(rows[0])
 
-    async def manual_close(self, trade_id: int, req: PaperManualCloseRequest) -> PaperTrade:
-        repo = self._require_repo()
+    async def manual_close(
+        self,
+        trade_id: int,
+        req: PaperManualCloseRequest,
+        repo_scope: str = Query(default="main", pattern="^(main|candles|auto)$"),
+    ) -> PaperTrade:
+        repo = self._resolve_repo(repo_scope=repo_scope)
         open_rows = repo.list_open_trades()
         row = next((item for item in open_rows if int(item.get("id") or 0) == int(trade_id)), None)
         if row is None:

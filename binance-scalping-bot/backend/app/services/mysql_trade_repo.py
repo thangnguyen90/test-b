@@ -22,6 +22,7 @@ class MySQLTradeRepository:
         self.user = user
         self.password = password
         self.database = database
+        self._ensure_database()
         self._init_schema()
 
     def _conn(self) -> pymysql.connections.Connection:
@@ -36,6 +37,29 @@ class MySQLTradeRepository:
             autocommit=True,
         )
 
+    def _server_conn(self) -> pymysql.connections.Connection:
+        return pymysql.connect(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+        )
+
+    @staticmethod
+    def _quote_identifier(value: str) -> str:
+        return "`" + str(value).replace("`", "``") + "`"
+
+    def _ensure_database(self) -> None:
+        with self._server_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"CREATE DATABASE IF NOT EXISTS {self._quote_identifier(self.database)} "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
+
     def _init_schema(self) -> None:
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -46,7 +70,7 @@ class MySQLTradeRepository:
                         symbol VARCHAR(64) NOT NULL,
                         side VARCHAR(10) NOT NULL,
                         btc_following TINYINT NULL,
-                        entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT',
+                        entry_type VARCHAR(32) NOT NULL DEFAULT 'LIMIT',
                         signal_win_probability DOUBLE NOT NULL,
                         effective_win_probability DOUBLE NOT NULL,
                         entry_price DOUBLE NOT NULL,
@@ -122,8 +146,22 @@ class MySQLTradeRepository:
                 row = cur.fetchone() or {}
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute(
-                        "ALTER TABLE paper_trades ADD COLUMN entry_type VARCHAR(12) NOT NULL DEFAULT 'LIMIT' AFTER side"
+                        "ALTER TABLE paper_trades ADD COLUMN entry_type VARCHAR(32) NOT NULL DEFAULT 'LIMIT' AFTER side"
                     )
+                else:
+                    cur.execute(
+                        """
+                        SELECT COALESCE(CHARACTER_MAXIMUM_LENGTH, 0) AS max_len
+                        FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='entry_type'
+                        """,
+                        (self.database,),
+                    )
+                    length_row = cur.fetchone() or {}
+                    if int(length_row.get("max_len") or 0) < 32:
+                        cur.execute(
+                            "ALTER TABLE paper_trades MODIFY COLUMN entry_type VARCHAR(32) NOT NULL DEFAULT 'LIMIT'"
+                        )
                 cur.execute(
                     """
                     SELECT COUNT(*) AS cnt
@@ -327,6 +365,209 @@ class MySQLTradeRepository:
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute(
                         "ALTER TABLE paper_trades ADD COLUMN commission_usdt DOUBLE NULL AFTER pnl"
+                    )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS paper_trades_ml_candles (
+                        source_trade_id BIGINT PRIMARY KEY,
+                        symbol VARCHAR(64) NOT NULL,
+                        side VARCHAR(10) NOT NULL,
+                        btc_following TINYINT NULL,
+                        entry_type VARCHAR(32) NOT NULL,
+                        signal_win_probability DOUBLE NOT NULL,
+                        effective_win_probability DOUBLE NOT NULL,
+                        entry_price DOUBLE NOT NULL,
+                        take_profit DOUBLE NOT NULL,
+                        stop_loss DOUBLE NOT NULL,
+                        liq_ema99_15m DOUBLE NULL,
+                        liq_ema99_1h DOUBLE NULL,
+                        liq_zone_price DOUBLE NULL,
+                        liq_zone_score DOUBLE NULL,
+                        quantity DOUBLE NOT NULL,
+                        margin_usdt DOUBLE NULL,
+                        leverage INT NOT NULL,
+                        status VARCHAR(20) NOT NULL,
+                        opened_at DATETIME(6) NOT NULL,
+                        closed_at DATETIME(6) NULL,
+                        close_price DOUBLE NULL,
+                        close_reason VARCHAR(32) NULL,
+                        mae_pct DOUBLE NULL,
+                        mfe_pct DOUBLE NULL,
+                        feature_snapshot_json LONGTEXT NULL,
+                        feature_captured_at DATETIME(6) NULL,
+                        pnl DOUBLE NULL,
+                        commission_usdt DOUBLE NULL,
+                        result TINYINT NULL,
+                        created_at DATETIME(6) NOT NULL,
+                        updated_at DATETIME(6) NOT NULL,
+                        INDEX idx_candles_symbol_status(symbol, status),
+                        INDEX idx_candles_status_opened(status, opened_at),
+                        INDEX idx_candles_entry_type(entry_type, status)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO paper_trades_ml_candles (
+                        source_trade_id, symbol, side, btc_following, entry_type,
+                        signal_win_probability, effective_win_probability,
+                        entry_price, take_profit, stop_loss,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        quantity, margin_usdt, leverage, status,
+                        opened_at, closed_at, close_price, close_reason,
+                        mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                        pnl, commission_usdt, result, created_at, updated_at
+                    )
+                    SELECT
+                        id, symbol, side, btc_following, entry_type,
+                        signal_win_probability, effective_win_probability,
+                        entry_price, take_profit, stop_loss,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        quantity, margin_usdt, leverage, status,
+                        opened_at, closed_at, close_price, close_reason,
+                        mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                        pnl, commission_usdt, result, created_at, updated_at
+                    FROM paper_trades
+                    WHERE entry_type LIKE 'ML_CANDLES%%'
+                    ON DUPLICATE KEY UPDATE
+                        symbol=VALUES(symbol),
+                        side=VALUES(side),
+                        btc_following=VALUES(btc_following),
+                        entry_type=VALUES(entry_type),
+                        signal_win_probability=VALUES(signal_win_probability),
+                        effective_win_probability=VALUES(effective_win_probability),
+                        entry_price=VALUES(entry_price),
+                        take_profit=VALUES(take_profit),
+                        stop_loss=VALUES(stop_loss),
+                        liq_ema99_15m=VALUES(liq_ema99_15m),
+                        liq_ema99_1h=VALUES(liq_ema99_1h),
+                        liq_zone_price=VALUES(liq_zone_price),
+                        liq_zone_score=VALUES(liq_zone_score),
+                        quantity=VALUES(quantity),
+                        margin_usdt=VALUES(margin_usdt),
+                        leverage=VALUES(leverage),
+                        status=VALUES(status),
+                        opened_at=VALUES(opened_at),
+                        closed_at=VALUES(closed_at),
+                        close_price=VALUES(close_price),
+                        close_reason=VALUES(close_reason),
+                        mae_pct=VALUES(mae_pct),
+                        mfe_pct=VALUES(mfe_pct),
+                        feature_snapshot_json=VALUES(feature_snapshot_json),
+                        feature_captured_at=VALUES(feature_captured_at),
+                        pnl=VALUES(pnl),
+                        commission_usdt=VALUES(commission_usdt),
+                        result=VALUES(result),
+                        created_at=VALUES(created_at),
+                        updated_at=VALUES(updated_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.TRIGGERS
+                    WHERE TRIGGER_SCHEMA=%s AND TRIGGER_NAME='trg_paper_trades_ml_candles_ai'
+                    """,
+                    (self.database,),
+                )
+                trig_ai_exists = int((cur.fetchone() or {}).get("cnt") or 0) > 0
+                if not trig_ai_exists:
+                    cur.execute(
+                        """
+                        CREATE TRIGGER trg_paper_trades_ml_candles_ai
+                        AFTER INSERT ON paper_trades
+                        FOR EACH ROW
+                        INSERT INTO paper_trades_ml_candles (
+                            source_trade_id, symbol, side, btc_following, entry_type,
+                            signal_win_probability, effective_win_probability,
+                            entry_price, take_profit, stop_loss,
+                            liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                            quantity, margin_usdt, leverage, status,
+                            opened_at, closed_at, close_price, close_reason,
+                            mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                            pnl, commission_usdt, result, created_at, updated_at
+                        )
+                        SELECT
+                            NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
+                            NEW.signal_win_probability, NEW.effective_win_probability,
+                            NEW.entry_price, NEW.take_profit, NEW.stop_loss,
+                            NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                            NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
+                            NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason,
+                            NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
+                            NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
+                        FROM DUAL
+                        WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
+                        """
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.TRIGGERS
+                    WHERE TRIGGER_SCHEMA=%s AND TRIGGER_NAME='trg_paper_trades_ml_candles_au'
+                    """,
+                    (self.database,),
+                )
+                trig_au_exists = int((cur.fetchone() or {}).get("cnt") or 0) > 0
+                if not trig_au_exists:
+                    cur.execute(
+                        """
+                        CREATE TRIGGER trg_paper_trades_ml_candles_au
+                        AFTER UPDATE ON paper_trades
+                        FOR EACH ROW
+                        INSERT INTO paper_trades_ml_candles (
+                            source_trade_id, symbol, side, btc_following, entry_type,
+                            signal_win_probability, effective_win_probability,
+                            entry_price, take_profit, stop_loss,
+                            liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                            quantity, margin_usdt, leverage, status,
+                            opened_at, closed_at, close_price, close_reason,
+                            mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
+                            pnl, commission_usdt, result, created_at, updated_at
+                        )
+                        SELECT
+                            NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
+                            NEW.signal_win_probability, NEW.effective_win_probability,
+                            NEW.entry_price, NEW.take_profit, NEW.stop_loss,
+                            NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                            NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
+                            NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason,
+                            NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
+                            NEW.pnl, NEW.commission_usdt, NEW.result, NEW.created_at, NEW.updated_at
+                        FROM DUAL
+                        WHERE NEW.entry_type LIKE 'ML_CANDLES%%'
+                        ON DUPLICATE KEY UPDATE
+                            symbol=VALUES(symbol),
+                            side=VALUES(side),
+                            btc_following=VALUES(btc_following),
+                            entry_type=VALUES(entry_type),
+                            signal_win_probability=VALUES(signal_win_probability),
+                            effective_win_probability=VALUES(effective_win_probability),
+                            entry_price=VALUES(entry_price),
+                            take_profit=VALUES(take_profit),
+                            stop_loss=VALUES(stop_loss),
+                            liq_ema99_15m=VALUES(liq_ema99_15m),
+                            liq_ema99_1h=VALUES(liq_ema99_1h),
+                            liq_zone_price=VALUES(liq_zone_price),
+                            liq_zone_score=VALUES(liq_zone_score),
+                            quantity=VALUES(quantity),
+                            margin_usdt=VALUES(margin_usdt),
+                            leverage=VALUES(leverage),
+                            status=VALUES(status),
+                            opened_at=VALUES(opened_at),
+                            closed_at=VALUES(closed_at),
+                            close_price=VALUES(close_price),
+                            close_reason=VALUES(close_reason),
+                            mae_pct=VALUES(mae_pct),
+                            mfe_pct=VALUES(mfe_pct),
+                            feature_snapshot_json=VALUES(feature_snapshot_json),
+                            feature_captured_at=VALUES(feature_captured_at),
+                            pnl=VALUES(pnl),
+                            commission_usdt=VALUES(commission_usdt),
+                            result=VALUES(result),
+                            created_at=VALUES(created_at),
+                            updated_at=VALUES(updated_at)
+                        """
                     )
                 cur.execute(
                     """

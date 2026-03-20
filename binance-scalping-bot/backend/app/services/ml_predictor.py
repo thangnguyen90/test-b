@@ -36,6 +36,8 @@ class SignalResult:
     predicted_entry_price: float
     stop_loss: float
     take_profit: float
+    reference_win_symbol: str | None = None
+    reference_win_at: str | None = None
 
 
 class MLPredictor:

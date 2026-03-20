@@ -493,6 +493,17 @@ button:hover:not(:disabled) {
   align-items: center;
 }
 
+.signal-model-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.signal-model-meta {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -532,6 +543,14 @@ td {
 
 .row-short td {
   background: rgba(196, 61, 61, 0.07);
+}
+
+.row-profit td {
+  background: rgba(30, 122, 76, 0.1);
+}
+
+.row-loss td {
+  background: rgba(196, 61, 61, 0.08);
 }
 
 .pill-long,

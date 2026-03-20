@@ -18,6 +18,7 @@ from app.deps import (
     auto_trainer,
     bind_paper_trade_runtime,
     liquid_ml_predictor,
+    ml_candles_predictor,
     ml_predictor,
     ml_test_predictor,
     price_stream,
@@ -29,11 +30,13 @@ from app.services.paper_trading_engine import PaperTradingEngine
 
 app = FastAPI(title=settings.app_name)
 paper_trade_repo: MySQLTradeRepository | None = None
+paper_trade_candle_repo: MySQLTradeRepository | None = None
 paper_trade_engine: PaperTradingEngine | None = None
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,30 +52,36 @@ app.include_router(paper_trades_router)
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    global paper_trade_repo, paper_trade_engine
+    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
     paper_trade_api.bind_btc_follow_resolver(None)
     bind_paper_trade_runtime(None, None)
+    paper_trade_api.bind_candle_repo(None)
     if settings.mysql_enabled:
         try:
+            primary_database = settings.mysql_candle_database or settings.mysql_database
             paper_trade_repo = MySQLTradeRepository(
                 host=settings.mysql_host,
                 port=settings.mysql_port,
                 user=settings.mysql_user,
                 password=settings.mysql_password,
-                database=settings.mysql_database,
+                database=primary_database,
             )
+            # All models now share a single trading DB (trading_bot_candle).
+            paper_trade_candle_repo = paper_trade_repo
             try:
                 paper_trade_repo.refresh_hourly_profiles(lookback_days=settings.paper_trade_hourly_profile_lookback_days)
             except Exception:
                 pass
             paper_trade_api.bind_repo(paper_trade_repo)
+            paper_trade_api.bind_candle_repo(paper_trade_candle_repo)
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
                 predictor=ml_predictor,
                 predictor_test=ml_test_predictor,
+                predictor_candles=ml_candles_predictor,
                 liquid_predictor=liquid_ml_predictor,
                 price_stream=price_stream,
                 min_win_probability=settings.paper_trade_min_win_probability,
@@ -154,6 +163,11 @@ async def on_startup() -> None:
                 test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
                 test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,
                 test_ml_max_orders_per_cycle=settings.paper_trade_test_ml_max_orders_per_cycle,
+                candles_bg_enabled=settings.paper_trade_candles_bg_enabled,
+                candles_bg_min_win_probability=settings.paper_trade_candles_bg_min_win,
+                candles_bg_max_symbols=settings.paper_trade_candles_bg_max_symbols,
+                candles_bg_max_orders_per_cycle=settings.paper_trade_candles_bg_max_orders_per_cycle,
+                candles_bg_entry_type="ML_CANDLES_BG",
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
                 reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
                 reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,

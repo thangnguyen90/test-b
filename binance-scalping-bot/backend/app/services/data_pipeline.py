@@ -240,21 +240,7 @@ class DataPipeline:
         horizon: int = 4,
         rr_ratio: float = 1.5,
     ) -> PreparedData:
-        raw_m5 = self.client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=limit)
-        raw_h1 = self.client.fetch_ohlcv(symbol=symbol, timeframe="1h", limit=max(300, limit // 12))
-
-        m5 = self._enrich(self._to_df(raw_m5), "m5")
-        h1 = self._enrich(self._to_df(raw_h1), "h1")
-
-        merged = pd.merge_asof(
-            m5.sort_values("timestamp"),
-            h1.sort_values("timestamp"),
-            on="timestamp",
-            direction="backward",
-            suffixes=("", "_h1dup"),
-        )
-
-        merged["setup_side"] = self._side_from_setup(merged)
+        merged = self.build_symbol_frame(symbol=symbol, limit=limit)
         labels = [self._label_row(merged, idx, horizon=horizon, rr_ratio=rr_ratio) for idx in range(len(merged))]
         merged["target"] = labels
 
@@ -300,7 +286,7 @@ class DataPipeline:
         labels = pd.concat(label_frames, ignore_index=True)
         return PreparedData(features=features, labels=labels)
 
-    def build_latest_feature_row(self, symbol: str, limit: int = 300) -> pd.Series | None:
+    def build_symbol_frame(self, symbol: str, limit: int = 1000) -> pd.DataFrame:
         raw_m5 = self.client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=limit)
         raw_h1 = self.client.fetch_ohlcv(symbol=symbol, timeframe="1h", limit=max(300, limit // 12))
         m5 = self._enrich(self._to_df(raw_m5), "m5")
@@ -313,6 +299,11 @@ class DataPipeline:
             direction="backward",
             suffixes=("", "_h1dup"),
         )
+        merged["setup_side"] = self._side_from_setup(merged)
+        return merged
+
+    def build_latest_feature_row(self, symbol: str, limit: int = 300) -> pd.Series | None:
+        merged = self.build_symbol_frame(symbol=symbol, limit=limit)
         merged["setup_side"] = self._side_from_setup(merged).fillna(1.0)
 
         clean = merged.dropna(subset=FEATURE_COLUMNS).copy()
