@@ -507,6 +507,12 @@ const VN_DATETIME_FORMATTER = new Intl.DateTimeFormat('en-GB', {
   second: '2-digit',
   hour12: false,
 })
+const VN_DATE_FORMATTER = new Intl.DateTimeFormat('en-CA', {
+  timeZone: VN_TIMEZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
 
 const WEEKDAY_FILTER_OPTIONS: Array<{ value: 'ALL' | number; label: string }> = [
   { value: 'ALL', label: 'All Days' },
@@ -744,6 +750,17 @@ function formatVnTimestamp(value?: string | null): string {
     parts.find((item) => item.type === type)?.value ?? ''
 
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`
+}
+
+function formatVnDateOnly(value?: string | null): string | null {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return VN_DATE_FORMATTER.format(date)
+}
+
+function currentVnDateString(): string {
+  return VN_DATE_FORMATTER.format(new Date())
 }
 
 function formatWeekdayFilterLabel(value?: number | null): string {
@@ -1098,6 +1115,7 @@ function App() {
   const [mlCandlesSignals, setMlCandlesSignals] = useState<ScanSignalItem[]>([])
   const [mlCandlesScannedCount, setMlCandlesScannedCount] = useState(0)
   const [mlCompareHistory, setMlCompareHistory] = useState<PaperTrade[]>([])
+  const [mlCompareDate, setMlCompareDate] = useState<string>(currentVnDateString)
   const [mlComparePage, setMlComparePage] = useState(1)
   const [mlComparePageSize, setMlComparePageSize] = useState(20)
   const [mlCompareModelFilter, setMlCompareModelFilter] = useState<MlCompareModelFilter>('ALL')
@@ -1491,10 +1509,22 @@ function App() {
     return { open, closed }
   }, [paperOpenTrades, paperHistory])
   const mlCompareBuckets = useMemo(() => {
-    const buildBucket = (label: string, target: MlCandlesCompareTarget): CompareBucket => {
+    const buildBucket = (
+      label: string,
+      target: MlCandlesCompareTarget,
+      selectedDate?: string,
+    ): CompareBucket => {
       const openSource = target === 'ML' ? paperOpenTrades : mlCandlesOpenTradesDb
-      const openRows = openSource.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === target)
-      const closedRows = mlCompareHistory.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === target)
+      const openRows = openSource.filter((row) => {
+        if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
+        if (!selectedDate) return true
+        return formatVnDateOnly(row.opened_at) === selectedDate
+      })
+      const closedRows = mlCompareHistory.filter((row) => {
+        if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
+        if (!selectedDate) return true
+        return formatVnDateOnly(row.opened_at) === selectedDate
+      })
       const wins = closedRows.filter((row) => row.result === 1).length
       const losses = closedRows.filter((row) => row.result === 0).length
       const closedPnl = closedRows.reduce((sum, row) => sum + (typeof row.pnl === 'number' ? row.pnl : 0), 0)
@@ -1526,6 +1556,51 @@ function App() {
       buildBucket('ML Candles Test', 'ML_CANDLES_TEST'),
     ]
   }, [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices])
+  const mlCompareDailyBuckets = useMemo(
+    () => [
+      ...(['ML', 'ML_CANDLES_BG', 'ML_CANDLES_TEST'] as MlCandlesCompareTarget[]).map((target) => {
+        const label = target === 'ML'
+          ? 'ML'
+          : target === 'ML_CANDLES_BG'
+            ? 'ML Candles BG'
+            : 'ML Candles Test'
+        const openSource = target === 'ML' ? paperOpenTrades : mlCandlesOpenTradesDb
+        const openRows = openSource.filter((row) => {
+          if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
+          return formatVnDateOnly(row.opened_at) === mlCompareDate
+        })
+        const closedRows = mlCompareHistory.filter((row) => {
+          if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
+          return formatVnDateOnly(row.opened_at) === mlCompareDate
+        })
+        const wins = closedRows.filter((row) => row.result === 1).length
+        const losses = closedRows.filter((row) => row.result === 0).length
+        const closedPnl = closedRows.reduce((sum, row) => sum + (typeof row.pnl === 'number' ? row.pnl : 0), 0)
+        const floatingPnl = openRows.reduce((sum, row) => {
+          const mark = resolveLivePrice(row.symbol)
+          const upnlPct = calcUnrealizedPnlPct(row, mark)
+          const marginUsdt = typeof row.margin_usdt === 'number'
+            ? row.margin_usdt
+            : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+          if (typeof upnlPct !== 'number' || typeof marginUsdt !== 'number') return sum
+          return sum + (marginUsdt * upnlPct / 100)
+        }, 0)
+        return {
+          label,
+          open: openRows.length,
+          closed: closedRows.length,
+          wins,
+          losses,
+          winRate: closedRows.length > 0 ? wins / closedRows.length : 0,
+          closedPnl,
+          floatingPnl,
+          netPnlNow: closedPnl + floatingPnl,
+          avgClosedPnl: closedRows.length > 0 ? closedPnl / closedRows.length : 0,
+        }
+      }),
+    ],
+    [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices, mlCompareDate],
+  )
   const mlCandlesOpenTrades = useMemo(
     () => mlCandlesOpenTradesDb.filter((row) => tradeMlCandlesVariant(row.entry_type) != null),
     [mlCandlesOpenTradesDb],
@@ -3384,6 +3459,55 @@ function App() {
             {mlCompareBuckets.map((bucket) => (
               <div key={bucket.label} className="stats-item">
                 <strong>{bucket.label}</strong>
+                <div>Open: {bucket.open}</div>
+                <div>Closed: {bucket.closed}</div>
+                <div>Win/Loss: {bucket.wins}/{bucket.losses}</div>
+                <div>Win Rate: {(bucket.winRate * 100).toFixed(2)}%</div>
+                <div>
+                  Closed PnL:{' '}
+                  <span className={bucket.closedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                    {`${bucket.closedPnl >= 0 ? '+' : ''}${bucket.closedPnl.toFixed(4)} USDT`}
+                  </span>
+                </div>
+                <div>
+                  Floating PnL:{' '}
+                  <span className={bucket.floatingPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                    {`${bucket.floatingPnl >= 0 ? '+' : ''}${bucket.floatingPnl.toFixed(4)} USDT`}
+                  </span>
+                </div>
+                <div>
+                  Net Now:{' '}
+                  <span className={bucket.netPnlNow >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                    {`${bucket.netPnlNow >= 0 ? '+' : ''}${bucket.netPnlNow.toFixed(4)} USDT`}
+                  </span>
+                </div>
+                <div>
+                  Avg Closed PnL:{' '}
+                  <span className={bucket.avgClosedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                    {`${bucket.avgClosedPnl >= 0 ? '+' : ''}${bucket.avgClosedPnl.toFixed(4)} USDT`}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="history-header">
+            <h3 className="section-title">Daily Compare Stats</h3>
+            <div className="scan-actions">
+              <span className="badge neutral">Opened Date (VN)</span>
+              <input
+                type="date"
+                className="select-control history-size-select"
+                value={mlCompareDate}
+                onChange={(event) => setMlCompareDate(event.target.value || currentVnDateString())}
+              />
+            </div>
+          </div>
+          <div className="stats-grid">
+            {mlCompareDailyBuckets.map((bucket) => (
+              <div key={`${bucket.label}-${mlCompareDate}`} className="stats-item">
+                <strong>{bucket.label}</strong>
+                <div>Date: {mlCompareDate}</div>
                 <div>Open: {bucket.open}</div>
                 <div>Closed: {bucket.closed}</div>
                 <div>Win/Loss: {bucket.wins}/{bucket.losses}</div>
