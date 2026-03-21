@@ -22,3 +22,9 @@ bash scripts/backend_service.sh restart-force
 cd /Users/thang/Desktop/TEST/binance-scalping-bot/frontend
 pkill -f "vite --host 127.0.0.1 --port 5199" || true
 npm run dev -- --host 127.0.0.1 --port 5199
+
+
+http://127.0.0.1:5199/?view=paper
+http://127.0.0.1:5199/?view=daily
+http://127.0.0.1:5199/?view=ml-candles-signals
+http://127.0.0.1:5199/?view=ml-candles-compare

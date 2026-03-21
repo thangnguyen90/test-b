@@ -387,6 +387,7 @@ type ModelViewFilter = 'ALL' | 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST
 type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
+type MlCandlesScreenView = 'signals' | 'compare'
 
 type CompareBucket = {
   label: string
@@ -466,7 +467,7 @@ type PaperManualCloseRequest = {
 const API_BASE = 'http://127.0.0.1:8000'
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
-const ML_CANDLES_DISPLAY_MIN_WIN = 0.6
+const ML_CANDLES_DISPLAY_MIN_WIN = 0.7
 const ML_CANDLES_ENTRY_MIN_WIN = 0.75
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const PAPER_REPO_MAIN = 'main' as const
@@ -1109,6 +1110,7 @@ function App() {
   const [showPaperScreen, setShowPaperScreen] = useState(false)
   const [showDailyScreen, setShowDailyScreen] = useState(false)
   const [showMlCandlesScreen, setShowMlCandlesScreen] = useState(false)
+  const [mlCandlesScreenView, setMlCandlesScreenView] = useState<MlCandlesScreenView>('signals')
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
@@ -1342,12 +1344,14 @@ function App() {
       if (!row?.symbol) continue
       set.add(row.symbol)
     }
-    for (const row of mlCandlesSignals) {
-      if (!row?.symbol) continue
-      set.add(row.symbol)
+    if (showMlCandlesScreen && mlCandlesScreenView === 'signals') {
+      for (const row of mlCandlesSignals) {
+        if (!row?.symbol) continue
+        set.add(row.symbol)
+      }
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b))
-  }, [highWinSignals, mlCandlesSignals])
+  }, [highWinSignals, mlCandlesSignals, showMlCandlesScreen, mlCandlesScreenView])
   const sortedPaperHistory = useMemo(() => {
     const rows = [...paperHistory]
     const { key, direction } = historySort
@@ -2388,7 +2392,6 @@ function App() {
           fetchPendingOrders(),
           fetchSignal(selectedCoin, chartBasePrice),
           fetchHighWinSignals(),
-          fetchMlCandlesSignals(),
           fetchKlines(selectedCoin),
         ])
         await fetchFuturesSymbols().catch(() => {
@@ -2495,32 +2498,38 @@ function App() {
   useEffect(() => {
     if (!showMlCandlesScreen) return
 
-    fetchMlCandlesTradingStats().catch((err) => {
-      setError(err instanceof Error ? err.message : 'Unknown error')
-    })
-    fetchMlCompareHistory().catch((err) => {
-      setError(err instanceof Error ? err.message : 'Unknown error')
-    })
-    fetchMlCandlesSignals().catch(() => {
-      // Keep previous comparison signals if refresh fails.
-    })
+    if (mlCandlesScreenView === 'signals') {
+      fetchMlCandlesSignals().catch(() => {
+        // Keep previous signals if refresh fails.
+      })
+    } else {
+      fetchMlCandlesTradingStats().catch((err) => {
+        setError(err instanceof Error ? err.message : 'Unknown error')
+      })
+      fetchMlCompareHistory().catch((err) => {
+        setError(err instanceof Error ? err.message : 'Unknown error')
+      })
+    }
 
     const timer = window.setInterval(() => {
-      fetchMlCandlesTradingStats().catch(() => {
-        // Keep previous ML candles trading data on transient failures.
-      })
-      fetchMlCompareHistory().catch(() => {
-        // Keep previous compare history on transient failures.
-      })
-      fetchMlCandlesSignals().catch(() => {
-        // Keep previous compare signals on transient failures.
-      })
+      if (mlCandlesScreenView === 'signals') {
+        fetchMlCandlesSignals().catch(() => {
+          // Keep previous signals on transient failures.
+        })
+      } else {
+        fetchMlCandlesTradingStats().catch(() => {
+          // Keep previous ML candles trading data on transient failures.
+        })
+        fetchMlCompareHistory().catch(() => {
+          // Keep previous compare history on transient failures.
+        })
+      }
     }, 12000)
 
     return () => {
       window.clearInterval(timer)
     }
-  }, [showMlCandlesScreen])
+  }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
     if (!showDailyScreen) return
@@ -2552,7 +2561,7 @@ function App() {
 
   useEffect(() => {
     const trackedOpenTrades = showMlCandlesScreen ? mlCandlesOpenTradesDb : paperOpenTrades
-    if ((!showPaperScreen && !showMlCandlesScreen) || trackedOpenTrades.length === 0) return
+    if ((!showPaperScreen && !(showMlCandlesScreen && mlCandlesScreenView === 'compare')) || trackedOpenTrades.length === 0) return
 
     let mounted = true
     const symbols = Array.from(new Set(trackedOpenTrades.map((row) => row.symbol)))
@@ -2644,7 +2653,7 @@ function App() {
       stopFallback()
       ws?.close()
     }
-  }, [showPaperScreen, showMlCandlesScreen, paperOpenTrades, mlCandlesOpenTradesDb])
+  }, [showPaperScreen, showMlCandlesScreen, mlCandlesScreenView, paperOpenTrades, mlCandlesOpenTradesDb])
 
   useEffect(() => {
     fetchTopVolatility(volDays).catch(() => {
@@ -2716,7 +2725,7 @@ function App() {
   }, [autoLiqMarketEnabled, sortedLiqOverview, isOpeningMarketOrder])
 
   useEffect(() => {
-    if (!showMlCandlesScreen) return
+    if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
     if (isOpeningMarketOrder) return
 
     const now = Date.now()
@@ -2764,6 +2773,7 @@ function App() {
     })
   }, [
     showMlCandlesScreen,
+    mlCandlesScreenView,
     sortedMlCandlesSignals,
     mlCandlesOpenTradeKeySet,
     highWinLivePrices,
@@ -2785,6 +2795,7 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
     fetchMlCandlesSignals().catch(() => {
       // Initial fetch.
     })
@@ -2796,7 +2807,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
     fetchEventWindows(eventPhase).catch(() => {
@@ -3052,12 +3063,27 @@ function App() {
             type="button"
             className="btn-secondary"
             onClick={() => {
-              setShowMlCandlesScreen((v) => !v)
+              const nextOpen = !(showMlCandlesScreen && mlCandlesScreenView === 'signals')
+              setMlCandlesScreenView('signals')
+              setShowMlCandlesScreen(nextOpen)
               setShowPaperScreen(false)
               setShowDailyScreen(false)
             }}
           >
-            {showMlCandlesScreen ? 'Back To Main Screen' : 'Open ML Candles Lab'}
+            {showMlCandlesScreen && mlCandlesScreenView === 'signals' ? 'Back To Main Screen' : 'Open ML Candles Signals'}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              const nextOpen = !(showMlCandlesScreen && mlCandlesScreenView === 'compare')
+              setMlCandlesScreenView('compare')
+              setShowMlCandlesScreen(nextOpen)
+              setShowPaperScreen(false)
+              setShowDailyScreen(false)
+            }}
+          >
+            {showMlCandlesScreen && mlCandlesScreenView === 'compare' ? 'Back To Main Screen' : 'Open ML Candles Compare'}
           </button>
         </div>
       </section>
@@ -3456,35 +3482,68 @@ function App() {
       {showMlCandlesScreen ? (
         <section className="card">
           <header className="card-header">
-            <h2>ML Candles Lab</h2>
+            <h2>{mlCandlesScreenView === 'signals' ? 'ML Candles Signals' : 'ML Candles Compare'}</h2>
             <div className="scan-actions">
-              <span className="badge neutral">DB Total: {mlCandlesStats?.total_trades ?? 0}</span>
-              <span className="badge neutral">Signals: {sortedMlCandlesSignals.length}</span>
-              <span className="badge neutral">Scanned: {mlCandlesScannedCount}</span>
-              <span className="badge neutral">Display: {(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%+</span>
-              <span className="badge neutral">Entry: {(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%+</span>
-              <span className={`badge ${paperPriceWsStatus === 'live' ? 'success' : 'warn'}`}>Compare Live</span>
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesScreenView === 'signals' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesScreenView('signals')}
+              >
+                Signals
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesScreenView === 'compare' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesScreenView('compare')}
+              >
+                Compare
+              </button>
+              {mlCandlesScreenView === 'signals' ? (
+                <>
+                  <span className="badge neutral">Signals: {sortedMlCandlesSignals.length}</span>
+                  <span className="badge neutral">Scanned: {mlCandlesScannedCount}</span>
+                  <span className="badge neutral">Display: {(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%+</span>
+                  <span className="badge neutral">Entry: {(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%+</span>
+                  <span className={`badge ${signalsWsStatus === 'live' ? 'success' : signalsWsStatus === 'connecting' ? 'warn' : 'neutral'}`}>
+                    {signalsWsStatus === 'live' ? 'WS Live' : signalsWsStatus === 'connecting' ? 'WS Connecting' : 'REST Fallback'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="badge neutral">DB Total: {mlCandlesStats?.total_trades ?? 0}</span>
+                  <span className={`badge ${paperPriceWsStatus === 'live' ? 'success' : 'warn'}`}>Compare Live</span>
+                </>
+              )}
             </div>
           </header>
           <div className="content">
-            <p>
-              `ML Candles` khac cot tham khao o bang chinh: page nay cho phep mo lenh test rieng voi
-              `entry_type=ML_CANDLES_TEST`, dong thoi tach rieng de so sanh voi nhom auto nen
-              `entry_type=ML_CANDLES_BG` va nhom `ML` cu.
-              Du lieu test cua page nay doc/ghi tu DB rieng `trading_bot_candle`, trong khi nhom `ML`
-              goc van nam o `trading_bot`.
-              Bang nay hien tu {`${(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%`}
-              {' '}de quan sat som, nhung dieu kien vao lenh thuc te van bi gate boi
-              {' '}{`${(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%`} va cac bo loc risk/BTC/duplicate.
-            </p>
-            {!backendEngineHealthy ? (
-              <div className="warning-banner">
-                Backend/engine dang offline hoac mat heartbeat.
-                {' '}uPnL hien tai chi la mark-to-market tren UI, SL/TP cua `ML_CANDLES_TEST` va `ML_CANDLES_BG`
-                {' '}co the khong duoc xu ly cho den khi backend song lai.
-              </div>
-            ) : null}
+            {mlCandlesScreenView === 'signals' ? (
+              <p>
+                Man nay chi hien cac `ML Candles` tu {`${(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%`}
+                {' '}tro len de giam render tren browser. Dieu kien vao lenh thuc te van bi gate boi
+                {' '}{`${(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%`} va cac bo loc risk/duplicate.
+              </p>
+            ) : (
+              <>
+                <p>
+                  `ML Candles` khac cot tham khao o bang chinh: page nay cho phep mo lenh test rieng voi
+                  `entry_type=ML_CANDLES_TEST`, dong thoi tach rieng de so sanh voi nhom auto nen
+                  `entry_type=ML_CANDLES_BG` va nhom `ML` cu.
+                  Du lieu test cua page nay doc/ghi tu DB rieng `trading_bot_candle`, trong khi nhom `ML`
+                  goc van nam o `trading_bot`.
+                </p>
+                {!backendEngineHealthy ? (
+                  <div className="warning-banner">
+                    Backend/engine dang offline hoac mat heartbeat.
+                    {' '}uPnL hien tai chi la mark-to-market tren UI, SL/TP cua `ML_CANDLES_TEST` va `ML_CANDLES_BG`
+                    {' '}co the khong duoc xu ly cho den khi backend song lai.
+                  </div>
+                ) : null}
+              </>
+            )}
           </div>
+          {mlCandlesScreenView === 'compare' ? (
+            <>
           <div className="stats-grid">
             {mlCompareBuckets.map((bucket) => (
               <div key={bucket.label} className="stats-item">
@@ -3569,11 +3628,15 @@ function App() {
               </div>
             ))}
           </div>
+            </>
+          ) : null}
 
+          {mlCandlesScreenView === 'signals' ? (
+          <>
           <h3 className="section-title">ML Candles High Win Signals</h3>
           <div className="content table-wrap">
             {sortedMlCandlesSignals.length === 0 ? (
-              <p>No ml-candles signal currently above 60%.</p>
+              <p>No ml-candles signal currently above 70%.</p>
             ) : (
               <table>
                 <thead>
@@ -3675,6 +3738,9 @@ function App() {
               </table>
             )}
           </div>
+          </>
+          ) : (
+          <>
 
           <h3 className="section-title">Open ML Candles Test Trades</h3>
           <div className="content table-wrap">
@@ -3938,6 +4004,8 @@ function App() {
               </table>
             )}
           </div>
+          </>
+          )}
         </section>
       ) : null}
 
