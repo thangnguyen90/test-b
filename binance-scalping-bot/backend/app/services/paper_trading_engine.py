@@ -468,6 +468,19 @@ class PaperTradingEngine:
                 if market_price is None:
                     continue
 
+                if self.predictor_candles is None:
+                    continue
+                try:
+                    candles_compare_signal = await asyncio.to_thread(
+                        self.predictor_candles.predict,
+                        symbol,
+                        float(market_price),
+                    )
+                except Exception:
+                    continue
+                if str(candles_compare_signal.side or "").upper() != str(side or "").upper():
+                    continue
+
                 # Blend model signal with realized historical accuracy for this symbol.
                 hist_acc = self.repo.symbol_accuracy(symbol=symbol, lookback=300)
                 effective_prob = (raw_prob * 0.8 + hist_acc * 0.2) if hist_acc is not None else raw_prob
@@ -781,6 +794,13 @@ class PaperTradingEngine:
                     side=side,
                     entry_type=candles_entry_type,
                     btc_guard=btc_guard,
+                )
+                effective_prob, _ = self._apply_recent_symbol_behavior_penalty(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=candles_entry_type,
+                    effective_prob=effective_prob,
+                    force_entry_type_scope=True,
                 )
                 can_open_now, required_min_win = self._evaluate_hourly_bad_window_guard(
                     side=side,
@@ -1802,6 +1822,82 @@ class PaperTradingEngine:
         edge = (win_rate_pct / 100.0) - 0.5
         adjusted = float(effective_prob) + edge * self.hourly_profile_prob_alpha
         return max(0.0, min(1.0, adjusted))
+
+    def _apply_recent_symbol_behavior_penalty(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        effective_prob: float,
+        force_entry_type_scope: bool = False,
+    ) -> tuple[float, str | None]:
+        normalized_entry_type = str(entry_type or "").strip().upper()
+        if not normalized_entry_type.startswith("ML_CANDLES"):
+            return max(0.0, min(1.0, float(effective_prob))), None
+
+        try:
+            rows = self.repo.list_recent_closed_trades_for_symbol(
+                symbol=symbol,
+                entry_type=normalized_entry_type if force_entry_type_scope else None,
+                limit=6,
+            )
+        except Exception:
+            return max(0.0, min(1.0, float(effective_prob))), None
+
+        if not rows:
+            return max(0.0, min(1.0, float(effective_prob))), None
+
+        penalty = 0.0
+        sl_count = 0
+        deep_loss_count = 0
+        flip_count = 0
+        previous_side: str | None = None
+
+        for row in rows[:4]:
+            row_side = str(row.get("side") or "").upper()
+            close_reason = str(row.get("close_reason") or "").upper()
+            pnl_pct = self._estimate_trade_pnl_pct_from_row(row)
+            try:
+                mae_pct = float(row.get("mae_pct") or 0.0)
+            except Exception:
+                mae_pct = 0.0
+
+            if close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
+                sl_count += 1
+                penalty += 0.08
+            if pnl_pct <= -4.5 or mae_pct <= -6.0:
+                deep_loss_count += 1
+                penalty += 0.07
+            if previous_side and row_side and row_side != previous_side:
+                flip_count += 1
+            previous_side = row_side or previous_side
+
+        target_side = str(side or "").upper()
+        latest_side = str(rows[0].get("side") or "").upper()
+        if latest_side and target_side and latest_side != target_side:
+            penalty += 0.05
+
+        if sl_count >= 2:
+            penalty += 0.12
+        if deep_loss_count >= 2:
+            penalty += 0.12
+        if flip_count >= 2:
+            penalty += 0.14 + max(0, flip_count - 2) * 0.04
+
+        adjusted = max(0.0, min(1.0, float(effective_prob) - penalty))
+        if penalty < 0.08:
+            return adjusted, None
+
+        reasons: list[str] = []
+        if deep_loss_count > 0:
+            reasons.append("deep-loss")
+        if sl_count > 0:
+            reasons.append("SL")
+        if flip_count > 0:
+            reasons.append("flip")
+        detail = "/".join(reasons) if reasons else "recent-bad-behavior"
+        return adjusted, f"Recent {detail} penalty"
 
     def _current_vn_hour_weekday(self) -> tuple[int, int]:
         now = datetime.now(self._vn_tz)

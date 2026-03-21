@@ -833,6 +833,8 @@ class PaperTradeAPI:
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
+        leverage = req.leverage or self._resolve_default_leverage(req.symbol)
+        atr_value = self._resolve_symbol_atr(req.symbol)
         normalized_tp, normalized_sl = normalize_tp_sl(
             side=req.side,
             entry_price=float(market_price),
@@ -843,12 +845,13 @@ class PaperTradeAPI:
                 calc_min_sl_pct_from_loss(min_sl_loss_pct=settings.paper_trade_min_sl_loss_pct),
             ),
             sl_extra_buffer_pct=settings.paper_trade_sl_extra_buffer_pct,
-            atr_value=self._resolve_symbol_atr(req.symbol),
+            atr_value=atr_value,
             sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
             min_rr=settings.paper_trade_min_rr,
             max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+            leverage=leverage,
+            max_margin_loss_pct=settings.paper_trade_max_margin_loss_pct,
         )
-        leverage = req.leverage or self._resolve_default_leverage(req.symbol)
         risk_pct = calc_estimated_margin_ratio_pct(
             leverage=leverage,
             maint_margin_rate=settings.paper_trade_maint_margin_rate,

@@ -1161,6 +1161,49 @@ class MySQLTradeRepository:
         wins = sum(1 for row in rows if int(row.get("result", 0)) == 1)
         return wins / len(rows)
 
+    def list_recent_closed_trades_for_symbol(
+        self,
+        *,
+        symbol: str,
+        entry_type: str | None = None,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 100))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if entry_type:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            id, symbol, side, entry_type, status, close_reason,
+                            opened_at, closed_at, updated_at,
+                            pnl, mae_pct, mfe_pct, margin_usdt, entry_price, quantity, leverage
+                        FROM paper_trades
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND status='CLOSED'
+                          AND entry_type=%s
+                        ORDER BY COALESCE(closed_at, updated_at, opened_at) DESC, id DESC
+                        LIMIT {safe_limit}
+                        """,
+                        (symbol, entry_type),
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT
+                            id, symbol, side, entry_type, status, close_reason,
+                            opened_at, closed_at, updated_at,
+                            pnl, mae_pct, mfe_pct, margin_usdt, entry_price, quantity, leverage
+                        FROM paper_trades
+                        WHERE REPLACE(UPPER(symbol), ':USDT', '') = REPLACE(UPPER(%s), ':USDT', '')
+                          AND status='CLOSED'
+                        ORDER BY COALESCE(closed_at, updated_at, opened_at) DESC, id DESC
+                        LIMIT {safe_limit}
+                        """,
+                        (symbol,),
+                    )
+                return list(cur.fetchall() or [])
+
     def list_feedback(self, limit: int = 1000) -> list[dict[str, Any]]:
         safe_limit = max(10, min(limit, 5000))
         with self._conn() as conn:

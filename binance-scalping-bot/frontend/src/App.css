@@ -445,6 +445,17 @@ h2 {
   color: var(--muted);
 }
 
+.warning-banner {
+  margin-top: 0.8rem;
+  border: 1px solid #e3b1a9;
+  background: #fff1ee;
+  color: #8b1f1f;
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
 strong {
   color: var(--ink);
 }

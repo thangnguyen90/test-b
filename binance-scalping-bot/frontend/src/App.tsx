@@ -473,6 +473,7 @@ const PAPER_REPO_MAIN = 'main' as const
 const PAPER_REPO_CANDLES = 'candles' as const
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const AUTO_ML_CANDLES_OPEN_COOLDOWN_MS = 30 * 1000
+const BACKEND_HEALTH_STALE_MS = 15 * 1000
 const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
@@ -1079,6 +1080,7 @@ function App() {
   const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const mlCandlesAutoOpenedRef = useRef<Record<string, number>>({})
   const [health, setHealth] = useState<Health | null>(null)
+  const [healthLastOkAt, setHealthLastOkAt] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
@@ -1172,6 +1174,12 @@ function App() {
   const [timeframe, setTimeframe] = useState('12h')
   const [threshold, setThreshold] = useState(0.62)
   const [paletteId, setPaletteId] = useState(PALETTES[0].id)
+
+  const backendEngineHealthy = Boolean(
+    health?.status === 'ok'
+    && healthLastOkAt != null
+    && (Date.now() - healthLastOkAt) <= BACKEND_HEALTH_STALE_MS,
+  )
 
   useEffect(() => {
     selectedCoinRef.current = selectedCoin
@@ -1860,6 +1868,7 @@ function App() {
     const response = await fetch(`${API_BASE}/health`)
     if (!response.ok) throw new Error('Health check failed')
     setHealth(await response.json())
+    setHealthLastOkAt(Date.now())
   }
 
   async function fetchMlStatus() {
@@ -2401,6 +2410,20 @@ function App() {
         window.clearTimeout(timerId)
       }
       toastTimerRef.current.clear()
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchHealth().catch(() => {
+      // Keep previous health if backend is briefly unavailable.
+    })
+    const timer = window.setInterval(() => {
+      fetchHealth().catch(() => {
+        // Keep previous health if backend is briefly unavailable.
+      })
+    }, 5000)
+    return () => {
+      window.clearInterval(timer)
     }
   }, [])
 
@@ -3454,6 +3477,13 @@ function App() {
               {' '}de quan sat som, nhung dieu kien vao lenh thuc te van bi gate boi
               {' '}{`${(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%`} va cac bo loc risk/BTC/duplicate.
             </p>
+            {!backendEngineHealthy ? (
+              <div className="warning-banner">
+                Backend/engine dang offline hoac mat heartbeat.
+                {' '}uPnL hien tai chi la mark-to-market tren UI, SL/TP cua `ML_CANDLES_TEST` va `ML_CANDLES_BG`
+                {' '}co the khong duoc xu ly cho den khi backend song lai.
+              </div>
+            ) : null}
           </div>
           <div className="stats-grid">
             {mlCompareBuckets.map((bucket) => (

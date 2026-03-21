@@ -210,7 +210,21 @@ def _evaluate_paper_entry_gate(
             if hist_acc is not None
             else raw_win_probability
         )
+        penalty_reason: str | None = None
+        if normalized_entry_type.startswith("ML_CANDLES"):
+            try:
+                effective_probability, penalty_reason = engine._apply_recent_symbol_behavior_penalty(
+                    symbol=symbol,
+                    side=side,
+                    entry_type=normalized_entry_type,
+                    effective_prob=effective_probability,
+                    force_entry_type_scope=force_entry_type_scope,
+                )
+            except Exception:
+                penalty_reason = None
         if effective_probability < min_win:
+            if penalty_reason:
+                return False, str(penalty_reason), effective_probability, None
             return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, None
 
         btc_guard: dict = {}
@@ -406,6 +420,11 @@ def _build_scan_match(
     }
     if compare_field:
         payload[compare_field] = compare_payload
+    if signal_source == "ML":
+        aligned = bool((compare_payload or {}).get("aligned"))
+        if not aligned:
+            payload["can_enter"] = False
+            payload["blocked_reason"] = "Candles opposite" if compare_payload else "Candles unavailable"
     return payload
 
 
