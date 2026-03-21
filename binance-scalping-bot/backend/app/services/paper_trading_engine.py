@@ -108,6 +108,7 @@ class PaperTradingEngine:
         btc_follow_min_beta: float = 0.2,
         btc_follow_lookback: int = 120,
         btc_follow_cache_sec: float = 300.0,
+        base_ml_max_symbols: int = 200,
         test_ml_enabled: bool = False,
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
@@ -254,13 +255,14 @@ class PaperTradingEngine:
         self.btc_follow_min_beta = max(0.0, float(btc_follow_min_beta))
         self.btc_follow_lookback = max(60, min(500, int(btc_follow_lookback)))
         self.btc_follow_cache_sec = max(30.0, float(btc_follow_cache_sec))
+        self.base_ml_max_symbols = max(10, min(600, int(base_ml_max_symbols)))
         self.test_ml_enabled = bool(test_ml_enabled)
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
-        self.test_ml_max_symbols = max(10, min(200, int(test_ml_max_symbols)))
+        self.test_ml_max_symbols = max(10, min(600, int(test_ml_max_symbols)))
         self.test_ml_max_orders_per_cycle = max(1, min(20, int(test_ml_max_orders_per_cycle)))
         self.candles_bg_enabled = bool(candles_bg_enabled)
         self.candles_bg_min_win_probability = max(0.0, min(float(candles_bg_min_win_probability), 1.0))
-        self.candles_bg_max_symbols = max(10, min(200, int(candles_bg_max_symbols)))
+        self.candles_bg_max_symbols = max(10, min(600, int(candles_bg_max_symbols)))
         self.candles_bg_max_orders_per_cycle = max(1, min(20, int(candles_bg_max_orders_per_cycle)))
         self.candles_bg_entry_type = str(candles_bg_entry_type or "ML_CANDLES_BG").strip().upper() or "ML_CANDLES_BG"
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
@@ -378,7 +380,11 @@ class PaperTradingEngine:
         await asyncio.to_thread(self._refresh_hourly_profiles_if_needed)
         signals: list[dict[str, Any]] = []
         try:
-            snapshot = await asyncio.to_thread(get_scan_snapshot, min_win=0.7, max_symbols=100)
+            snapshot = await asyncio.to_thread(
+                get_scan_snapshot,
+                min_win=0.7,
+                max_symbols=self.base_ml_max_symbols,
+            )
             signals = snapshot.get("signals", [])
             if self.major_dynamic_enabled:
                 await asyncio.to_thread(self._refresh_major_symbols_runtime, signals)

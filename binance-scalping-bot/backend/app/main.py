@@ -159,6 +159,7 @@ async def on_startup() -> None:
                 btc_follow_min_beta=settings.paper_trade_btc_follow_min_beta,
                 btc_follow_lookback=settings.paper_trade_btc_follow_lookback,
                 btc_follow_cache_sec=settings.paper_trade_btc_follow_cache_sec,
+                base_ml_max_symbols=settings.paper_trade_base_ml_max_symbols,
                 test_ml_enabled=settings.paper_trade_test_ml_enabled,
                 test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
                 test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,

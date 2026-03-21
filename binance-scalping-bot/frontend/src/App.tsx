@@ -1952,7 +1952,7 @@ function App() {
 
   async function fetchHighWinSignals() {
     const response = await fetch(
-      `${API_BASE}/api/v1/signals/scan?min_win=0.7&max_symbols=80`,
+      `${API_BASE}/api/v1/signals/scan?min_win=0.7`,
     )
     if (!response.ok) throw new Error('Cannot scan high-win signals')
     const data = (await response.json()) as ScanSignalsResponse
@@ -1962,7 +1962,7 @@ function App() {
 
   async function fetchMlCandlesSignals() {
     const response = await fetch(
-      `${API_BASE}/api/v1/signals/candles/scan?min_win=${ML_CANDLES_DISPLAY_MIN_WIN}&max_symbols=80`,
+      `${API_BASE}/api/v1/signals/candles/scan?min_win=${ML_CANDLES_DISPLAY_MIN_WIN}`,
     )
     if (!response.ok) throw new Error('Cannot scan ml-candles signals')
     const data = (await response.json()) as ScanSignalsResponse

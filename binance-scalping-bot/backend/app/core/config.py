@@ -72,6 +72,11 @@ class Settings(BaseModel):
     ml_use_liquidation_features: bool = os.getenv("ML_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     ml_candles_use_liquidation_features: bool = os.getenv("ML_CANDLES_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     ml_candles_profile_min_samples: int = int(os.getenv("ML_CANDLES_PROFILE_MIN_SAMPLES", "18"))
+    signals_active_symbols_cache_sec: int = int(os.getenv("SIGNALS_ACTIVE_SYMBOLS_CACHE_SEC", "180"))
+    signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "200"))
+    signals_candles_scan_default_max_symbols: int = int(
+        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "350")
+    )
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
@@ -199,13 +204,14 @@ class Settings(BaseModel):
     paper_trade_btc_follow_min_beta: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_BETA", "0.2"))
     paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
     paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
+    paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "200"))
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
-    paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "80"))
+    paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "350"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_candles_bg_enabled: bool = os.getenv("PAPER_TRADE_CANDLES_BG_ENABLED", "true").lower() == "true"
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
-    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "80"))
+    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "350"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))

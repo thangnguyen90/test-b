@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
+from app.core.config import settings
 from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor
 from app.services.binance_client import BinanceFuturesClient
 from app.services.risk_manager import calc_estimated_margin_ratio_pct
@@ -59,7 +60,21 @@ def _is_418_error(exc: Exception) -> bool:
     return "418" in text or "I'm a teapot" in text or "Client Error" in text
 
 
-def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int = 600) -> list[str]:
+def _activity_score_from_ticker(ticker: dict) -> float:
+    if not isinstance(ticker, dict):
+        return 0.0
+    quote_volume = max(0.0, _safe_float(ticker.get("quoteVolume")) or 0.0)
+    change_pct = abs(_safe_float(ticker.get("percentage")) or 0.0)
+    trade_count = max(0.0, _safe_float(ticker.get("count")) or 0.0)
+    high = _safe_float(ticker.get("high"))
+    low = _safe_float(ticker.get("low"))
+    intraday_range_pct = ((high - low) / low * 100.0) if high is not None and low is not None and low > 0 else 0.0
+    momentum_boost = 1.0 + min(change_pct, 40.0) / 20.0 + min(intraday_range_pct, 20.0) / 20.0
+    return quote_volume * momentum_boost + trade_count * 100.0
+
+
+def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int | None = None) -> list[str]:
+    ttl_sec = max(30, int(cache_ttl_sec or settings.signals_active_symbols_cache_sec))
     now = time.time()
     if _SYMBOLS_CACHE["symbols"] and now < float(_SYMBOLS_CACHE["expires_at"]):
         return _SYMBOLS_CACHE["symbols"][:max_symbols]
@@ -78,8 +93,20 @@ def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int = 600) -> list[s
             symbols.append(symbol)
 
     symbols = sorted(set(symbols))
+    try:
+        tickers_map = market_client.fetch_tickers(symbols) if symbols else {}
+    except Exception:
+        tickers_map = {}
+    if isinstance(tickers_map, dict) and tickers_map:
+        symbols.sort(
+            key=lambda symbol: (
+                _activity_score_from_ticker(tickers_map.get(symbol, {})),
+                symbol,
+            ),
+            reverse=True,
+        )
     _SYMBOLS_CACHE["symbols"] = symbols
-    _SYMBOLS_CACHE["expires_at"] = now + cache_ttl_sec
+    _SYMBOLS_CACHE["expires_at"] = now + ttl_sec
     return symbols[:max_symbols]
 
 
@@ -583,12 +610,20 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
     }
 
 
-def get_scan_snapshot(min_win: float = 0.7, max_symbols: int = 80, symbols: str | None = None) -> dict:
+def get_scan_snapshot(
+    min_win: float = 0.7,
+    max_symbols: int = settings.signals_scan_default_max_symbols,
+    symbols: str | None = None,
+) -> dict:
     parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     return _scan_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
 
 
-def get_candles_scan_snapshot(min_win: float = 0.7, max_symbols: int = 80, symbols: str | None = None) -> dict:
+def get_candles_scan_snapshot(
+    min_win: float = 0.7,
+    max_symbols: int = settings.signals_candles_scan_default_max_symbols,
+    symbols: str | None = None,
+) -> dict:
     parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     return _scan_candles_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
 
@@ -653,7 +688,7 @@ def get_latest_candles_signal(
 @router.get("/scan")
 def scan_signals(
     min_win: float = Query(default=0.7, ge=0.0, le=1.0),
-    max_symbols: int = Query(default=80, ge=1, le=200),
+    max_symbols: int = Query(default=settings.signals_scan_default_max_symbols, ge=1, le=600),
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
@@ -662,7 +697,7 @@ def scan_signals(
 @router.get("/candles/scan")
 def scan_candles_signals(
     min_win: float = Query(default=0.7, ge=0.0, le=1.0),
-    max_symbols: int = Query(default=80, ge=1, le=200),
+    max_symbols: int = Query(default=settings.signals_candles_scan_default_max_symbols, ge=1, le=600),
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_candles_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)

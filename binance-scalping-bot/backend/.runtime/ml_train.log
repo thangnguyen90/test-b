@@ -266,3 +266,16 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-03-20T13:29:47.716604+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-20T13:34:17.992346+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-03-20T14:11:43.116755+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-20T15:31:45.562754+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-20T15:35:05.019098+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-20T19:35:28.329402+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-20T23:35:45.719977+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T01:34:09.771643+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T02:14:32.127567+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T02:15:33.065195+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T06:15:54.125100+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T06:59:40.088907+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T09:53:17.289572+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T12:37:18.601714+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T12:40:26.289028+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-03-21T12:43:41.118070+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
