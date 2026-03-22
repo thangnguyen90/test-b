@@ -464,7 +464,8 @@ type PaperManualCloseRequest = {
   force_result?: 0 | 1
 }
 
-const API_BASE = 'http://127.0.0.1:8000'
+const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
+const API_BASE = `http://${API_HOST}:8005`
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const ML_CANDLES_DISPLAY_MIN_WIN = 0.7
@@ -472,9 +473,16 @@ const ML_CANDLES_ENTRY_MIN_WIN = 0.75
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const PAPER_REPO_MAIN = 'main' as const
 const PAPER_REPO_CANDLES = 'candles' as const
+const ML_COMPARE_HISTORY_LIMIT = 2000
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const AUTO_ML_CANDLES_OPEN_COOLDOWN_MS = 30 * 1000
 const BACKEND_HEALTH_STALE_MS = 15 * 1000
+const BACKEND_HEALTH_POLL_MS = 15 * 1000
+const ML_STATUS_POLL_MS = 15 * 1000
+const HIGH_WIN_SIGNAL_POLL_MS = 20 * 1000
+const ML_CANDLES_SIGNAL_POLL_MS = 20 * 1000
+const HIGH_WIN_WS_MAX_HIGH_WIN_SYMBOLS = 80
+const HIGH_WIN_WS_MAX_ML_CANDLES_SYMBOLS = 40
 const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
@@ -742,10 +750,49 @@ function isEntryTouchedNow(
     : (markPrice as number) >= touchDown
 }
 
+function parseApiDate(value?: string | number | null): Date | null {
+  if (value == null) return null
+  if (typeof value === 'number') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+
+  const raw = String(value).trim()
+  if (!raw) return null
+
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)
+  const vnLocalMatch = raw.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?)?$/,
+  )
+  if (vnLocalMatch && !hasTimezone) {
+    const [, yearText, monthText, dayText, hourText = '00', minuteText = '00', secondText = '00', fractionText = ''] = vnLocalMatch
+    const millisText = `${fractionText}000`.slice(0, 3)
+    const utcMillis = Date.UTC(
+      Number(yearText),
+      Number(monthText) - 1,
+      Number(dayText),
+      Number(hourText) - 7,
+      Number(minuteText),
+      Number(secondText),
+      Number(millisText || '0'),
+    )
+    const date = new Date(utcMillis)
+    return Number.isNaN(date.getTime()) ? null : date
+  }
+
+  const normalized = raw.includes(' ') && !raw.includes('T') ? raw.replace(' ', 'T') : raw
+  const date = new Date(normalized)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function parseApiTimeMs(value?: string | number | null): number {
+  return parseApiDate(value)?.getTime() ?? 0
+}
+
 function formatVnTimestamp(value?: string | null): string {
   if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
+  const date = parseApiDate(value)
+  if (!date) return value
 
   const parts = VN_DATETIME_FORMATTER.formatToParts(date)
   const get = (type: Intl.DateTimeFormatPartTypes): string =>
@@ -756,8 +803,8 @@ function formatVnTimestamp(value?: string | null): string {
 
 function formatVnDateOnly(value?: string | null): string | null {
   if (!value) return null
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return null
+  const date = parseApiDate(value)
+  if (!date) return null
   return VN_DATE_FORMATTER.format(date)
 }
 
@@ -784,6 +831,10 @@ function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | n
 
 function highWinSignalKey(symbol: string, side: 'LONG' | 'SHORT'): string {
   return `${canonicalSymbol(symbol)}:${side}`
+}
+
+function entryScopedTradeKey(symbol: string, side: 'LONG' | 'SHORT', entryType: string): string {
+  return `${canonicalSymbol(symbol)}:${side}:${entryType.trim().toUpperCase()}`
 }
 
 function calcTargetPnlPct(
@@ -1171,6 +1222,8 @@ function App() {
   })
   const [paperModelFilter, setPaperModelFilter] = useState<ModelViewFilter>('ALL')
 
+  const mlCompareRefreshInFlightRef = useRef(false)
+
   const [selectedCoin, setSelectedCoin] = useState('BTC/USDT')
   const [searchCoin, setSearchCoin] = useState('')
   const [timeframe, setTimeframe] = useState('12h')
@@ -1339,19 +1392,32 @@ function App() {
     return rows
   }, [mlCandlesSignals])
   const highWinWsSymbols = useMemo(() => {
-    const set = new Set<string>()
-    for (const row of highWinSignals) {
-      if (!row?.symbol) continue
-      set.add(row.symbol)
+    const picked: string[] = []
+    const seen = new Set<string>()
+
+    const appendSymbol = (symbol?: string | null) => {
+      if (!symbol || seen.has(symbol)) return
+      seen.add(symbol)
+      picked.push(symbol)
     }
+
+    for (const row of sortedHighWinSignals) {
+      if (picked.length >= HIGH_WIN_WS_MAX_HIGH_WIN_SYMBOLS) break
+      appendSymbol(row?.symbol)
+    }
+
     if (showMlCandlesScreen && mlCandlesScreenView === 'signals') {
-      for (const row of mlCandlesSignals) {
-        if (!row?.symbol) continue
-        set.add(row.symbol)
+      let addedMlCandles = 0
+      for (const row of sortedMlCandlesSignals) {
+        if (addedMlCandles >= HIGH_WIN_WS_MAX_ML_CANDLES_SYMBOLS) break
+        const before = picked.length
+        appendSymbol(row?.symbol)
+        if (picked.length > before) addedMlCandles += 1
       }
     }
-    return Array.from(set).sort((a, b) => a.localeCompare(b))
-  }, [highWinSignals, mlCandlesSignals, showMlCandlesScreen, mlCandlesScreenView])
+
+    return picked
+  }, [sortedHighWinSignals, sortedMlCandlesSignals, showMlCandlesScreen, mlCandlesScreenView])
   const sortedPaperHistory = useMemo(() => {
     const rows = [...paperHistory]
     const { key, direction } = historySort
@@ -1466,7 +1532,7 @@ function App() {
           return mark ?? Number.NEGATIVE_INFINITY
         case 'mark_ts': {
           if (!markTs) return Number.NEGATIVE_INFINITY
-          const value = Date.parse(markTs)
+          const value = parseApiTimeMs(markTs)
           return Number.isNaN(value) ? Number.NEGATIVE_INFINITY : value
         }
         case 'margin_usdt':
@@ -1625,8 +1691,8 @@ function App() {
         return model === 'ML' || candlesVariant != null
       })
       .sort((a, b) => {
-        const bTime = Date.parse(b.opened_at ?? '') || 0
-        const aTime = Date.parse(a.opened_at ?? '') || 0
+        const bTime = parseApiTimeMs(b.opened_at)
+        const aTime = parseApiTimeMs(a.opened_at)
         if (bTime !== aTime) return bTime - aTime
         return b.id - a.id
       }),
@@ -1667,7 +1733,7 @@ function App() {
   const mlCandlesOpenTradeKeySet = useMemo(() => {
     const set = new Set<string>()
     for (const row of mlCandlesOpenTradesDb) {
-      set.add(`${canonicalSymbol(row.symbol)}:${row.side}`)
+      set.add(entryScopedTradeKey(row.symbol, row.side, row.entry_type ?? 'LIMIT'))
     }
     return set
   }, [mlCandlesOpenTradesDb])
@@ -2018,35 +2084,47 @@ function App() {
   }
 
   async function fetchMlCandlesTradingStats() {
-    const [statsRes, openRes] = await Promise.all([
-      fetch(`${API_BASE}/api/v1/paper-trades/stats?repo_scope=${PAPER_REPO_CANDLES}`),
-      fetch(`${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_CANDLES}`),
-    ])
-    const errors: string[] = []
-
-    if (statsRes.ok) {
-      const statsPayload = await statsRes.json() as { stats: PaperTradeStats }
-      setMlCandlesStats(statsPayload.stats ?? null)
-    } else {
-      errors.push(`stats:${statsRes.status}`)
+    const openRes = await fetch(`${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_CANDLES}`)
+    if (!openRes.ok) {
+      throw new Error(`ML candles trading partial failure (open:${openRes.status})`)
     }
 
-    if (openRes.ok) {
-      const openPayload = await openRes.json() as { items: PaperTrade[] }
-      setMlCandlesOpenTradesDb(openPayload.items ?? [])
-    } else {
-      errors.push(`open:${openRes.status}`)
-    }
+    const openPayload = await openRes.json() as { items: PaperTrade[] }
+    setMlCandlesOpenTradesDb(openPayload.items ?? [])
+  }
 
-    if (errors.length > 0) {
-      throw new Error(`ML candles trading partial failure (${errors.join(', ')})`)
+  async function fetchMlCompareMainOpenTrades() {
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/open`)
+    if (!response.ok) throw new Error('Compare main open API unavailable')
+    const payload = await response.json() as { items: PaperTrade[] }
+    setPaperOpenTrades(payload.items ?? [])
+  }
+
+  async function refreshMlCompareData() {
+    if (mlCompareRefreshInFlightRef.current) return
+
+    mlCompareRefreshInFlightRef.current = true
+    try {
+      const results = await Promise.allSettled([
+        fetchMlCompareMainOpenTrades(),
+        fetchMlCandlesTradingStats(),
+        fetchMlCompareHistory(),
+      ])
+      const firstRejected = results.find((item) => item.status === 'rejected')
+      if (firstRejected && firstRejected.status === 'rejected') {
+        throw firstRejected.reason instanceof Error
+          ? firstRejected.reason
+          : new Error('Compare refresh failed')
+      }
+    } finally {
+      mlCompareRefreshInFlightRef.current = false
     }
   }
 
   async function fetchMlCompareHistory() {
     const [mainResponse, candlesResponse] = await Promise.all([
-      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=1000&repo_scope=${PAPER_REPO_MAIN}`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=1000&repo_scope=${PAPER_REPO_CANDLES}`),
+      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_MAIN}`),
+      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_CANDLES}`),
     ])
     if (!mainResponse.ok || !candlesResponse.ok) {
       throw new Error('Compare history API unavailable')
@@ -2070,15 +2148,15 @@ function App() {
         continue
       }
       const prev = byId.get(row.id)!
-      const prevTs = Date.parse(prev.opened_at ?? '') || Date.parse(prev.closed_at ?? '') || 0
-      const nextTs = Date.parse(row.opened_at ?? '') || Date.parse(row.closed_at ?? '') || 0
+      const prevTs = parseApiTimeMs(prev.opened_at) || parseApiTimeMs(prev.closed_at)
+      const nextTs = parseApiTimeMs(row.opened_at) || parseApiTimeMs(row.closed_at)
       if (nextTs >= prevTs) byId.set(row.id, row)
     }
 
     const deduped = [...byId.values(), ...fallbackRows]
       .sort((a, b) => {
-        const bTime = Date.parse(b.opened_at ?? '') || 0
-        const aTime = Date.parse(a.opened_at ?? '') || 0
+        const bTime = parseApiTimeMs(b.opened_at)
+        const aTime = parseApiTimeMs(a.opened_at)
         if (bTime !== aTime) return bTime - aTime
         return b.id - a.id
       })
@@ -2222,7 +2300,23 @@ function App() {
         signal: controller.signal,
       })
       if (response.status === 409) {
-        // Duplicate open trade for same symbol/side; treat as idempotent success.
+        const payloadText = await response.text()
+        let detail = payloadText
+        try {
+          const parsed = JSON.parse(payloadText) as { detail?: string }
+          if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+            detail = parsed.detail.trim()
+          }
+        } catch {
+          // FastAPI normally returns JSON, but keep raw text as a fallback.
+        }
+        const normalizedDetail = detail.toLowerCase()
+        const isDuplicateConflict = normalizedDetail.includes('already exists')
+          || normalizedDetail.includes('open trade exists')
+        if (!isDuplicateConflict) {
+          throw new Error(`Market open blocked: ${detail}`)
+        }
+        // Duplicate open trade for the same entry scope; treat as idempotent success.
         const targetScope = input.repo_scope === PAPER_REPO_CANDLES || input.entry_type === 'ML_CANDLES_TEST'
           ? PAPER_REPO_CANDLES
           : PAPER_REPO_MAIN
@@ -2424,7 +2518,7 @@ function App() {
       fetchHealth().catch(() => {
         // Keep previous health if backend is briefly unavailable.
       })
-    }, 5000)
+    }, BACKEND_HEALTH_POLL_MS)
     return () => {
       window.clearInterval(timer)
     }
@@ -2438,7 +2532,7 @@ function App() {
       fetchMlStatus().catch(() => {
         // Keep previous ML status on transient errors.
       })
-    }, 5000)
+    }, ML_STATUS_POLL_MS)
     return () => {
       window.clearInterval(timer)
     }
@@ -2503,32 +2597,24 @@ function App() {
         // Keep previous signals if refresh fails.
       })
     } else {
-      fetchMlCandlesTradingStats().catch((err) => {
-        setError(err instanceof Error ? err.message : 'Unknown error')
-      })
-      fetchMlCompareHistory().catch((err) => {
+      refreshMlCompareData().catch((err) => {
         setError(err instanceof Error ? err.message : 'Unknown error')
       })
     }
 
-    const timer = window.setInterval(() => {
-      if (mlCandlesScreenView === 'signals') {
+    if (mlCandlesScreenView === 'signals') {
+      const timer = window.setInterval(() => {
         fetchMlCandlesSignals().catch(() => {
           // Keep previous signals on transient failures.
         })
-      } else {
-        fetchMlCandlesTradingStats().catch(() => {
-          // Keep previous ML candles trading data on transient failures.
-        })
-        fetchMlCompareHistory().catch(() => {
-          // Keep previous compare history on transient failures.
-        })
-      }
-    }, 12000)
+      }, ML_CANDLES_SIGNAL_POLL_MS)
 
-    return () => {
-      window.clearInterval(timer)
+      return () => {
+        window.clearInterval(timer)
+      }
     }
+
+    return () => undefined
   }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
@@ -2734,7 +2820,8 @@ function App() {
         if (item.can_enter !== true) continue
 
         const key = `${canonicalSymbol(item.symbol)}:${item.side}`
-        if (mlCandlesOpenTradeKeySet.has(key)) continue
+        const testTradeKey = entryScopedTradeKey(item.symbol, item.side, 'ML_CANDLES_TEST')
+        if (mlCandlesOpenTradeKeySet.has(testTradeKey)) continue
 
         const lastOpened = mlCandlesAutoOpenedRef.current[key] ?? 0
         if ((now - lastOpened) < AUTO_ML_CANDLES_OPEN_COOLDOWN_MS) continue
@@ -2788,26 +2875,12 @@ function App() {
       fetchHighWinSignals().catch(() => {
         // Keep previous values when request fails.
       })
-    }, 12000)
+    }, HIGH_WIN_SIGNAL_POLL_MS)
     return () => {
       window.clearInterval(timer)
     }
   }, [])
 
-  useEffect(() => {
-    if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
-    fetchMlCandlesSignals().catch(() => {
-      // Initial fetch.
-    })
-    const timer = window.setInterval(() => {
-      fetchMlCandlesSignals().catch(() => {
-        // Keep previous values when request fails.
-      })
-    }, 12000)
-    return () => {
-      window.clearInterval(timer)
-    }
-  }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
     fetchEventWindows(eventPhase).catch(() => {
@@ -3081,6 +3154,11 @@ function App() {
               setShowMlCandlesScreen(nextOpen)
               setShowPaperScreen(false)
               setShowDailyScreen(false)
+              if (nextOpen) {
+                refreshMlCompareData().catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unknown error')
+                })
+              }
             }}
           >
             {showMlCandlesScreen && mlCandlesScreenView === 'compare' ? 'Back To Main Screen' : 'Open ML Candles Compare'}
@@ -3509,9 +3587,7 @@ function App() {
                   </span>
                 </>
               ) : (
-                <>
-                  <span className="badge neutral">DB Total: {mlCandlesStats?.total_trades ?? 0}</span>
-                  <span className={`badge ${paperPriceWsStatus === 'live' ? 'success' : 'warn'}`}>Compare Live</span>
+                <>                  <span className={`badge ${paperPriceWsStatus === 'live' ? 'success' : 'warn'}`}>Compare Live</span>
                 </>
               )}
             </div>
@@ -3523,63 +3599,10 @@ function App() {
                 {' '}tro len de giam render tren browser. Dieu kien vao lenh thuc te van bi gate boi
                 {' '}{`${(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%`} va cac bo loc risk/duplicate.
               </p>
-            ) : (
-              <>
-                <p>
-                  `ML Candles` khac cot tham khao o bang chinh: page nay cho phep mo lenh test rieng voi
-                  `entry_type=ML_CANDLES_TEST`, dong thoi tach rieng de so sanh voi nhom auto nen
-                  `entry_type=ML_CANDLES_BG` va nhom `ML` cu.
-                  Du lieu test cua page nay doc/ghi tu DB rieng `trading_bot_candle`, trong khi nhom `ML`
-                  goc van nam o `trading_bot`.
-                </p>
-                {!backendEngineHealthy ? (
-                  <div className="warning-banner">
-                    Backend/engine dang offline hoac mat heartbeat.
-                    {' '}uPnL hien tai chi la mark-to-market tren UI, SL/TP cua `ML_CANDLES_TEST` va `ML_CANDLES_BG`
-                    {' '}co the khong duoc xu ly cho den khi backend song lai.
-                  </div>
-                ) : null}
-              </>
-            )}
+          ) : null}
           </div>
           {mlCandlesScreenView === 'compare' ? (
             <>
-          <div className="stats-grid">
-            {mlCompareBuckets.map((bucket) => (
-              <div key={bucket.label} className="stats-item">
-                <strong>{bucket.label}</strong>
-                <div>Open: {bucket.open}</div>
-                <div>Closed: {bucket.closed}</div>
-                <div>Win/Loss: {bucket.wins}/{bucket.losses}</div>
-                <div>Win Rate: {(bucket.winRate * 100).toFixed(2)}%</div>
-                <div>
-                  Closed PnL:{' '}
-                  <span className={bucket.closedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                    {`${bucket.closedPnl >= 0 ? '+' : ''}${bucket.closedPnl.toFixed(4)} USDT`}
-                  </span>
-                </div>
-                <div>
-                  Floating PnL:{' '}
-                  <span className={bucket.floatingPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                    {`${bucket.floatingPnl >= 0 ? '+' : ''}${bucket.floatingPnl.toFixed(4)} USDT`}
-                  </span>
-                </div>
-                <div>
-                  Net Now:{' '}
-                  <span className={bucket.netPnlNow >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                    {`${bucket.netPnlNow >= 0 ? '+' : ''}${bucket.netPnlNow.toFixed(4)} USDT`}
-                  </span>
-                </div>
-                <div>
-                  Avg Closed PnL:{' '}
-                  <span className={bucket.avgClosedPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
-                    {`${bucket.avgClosedPnl >= 0 ? '+' : ''}${bucket.avgClosedPnl.toFixed(4)} USDT`}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-
           <div className="history-header">
             <h3 className="section-title">Daily Compare Stats</h3>
             <div className="scan-actions">
@@ -3628,119 +3651,6 @@ function App() {
               </div>
             ))}
           </div>
-            </>
-          ) : null}
-
-          {mlCandlesScreenView === 'signals' ? (
-          <>
-          <h3 className="section-title">ML Candles High Win Signals</h3>
-          <div className="content table-wrap">
-            {sortedMlCandlesSignals.length === 0 ? (
-              <p>No ml-candles signal currently above 70%.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>ML Candles</th>
-                    <th>Base ML</th>
-                    <th>Mark</th>
-                    <th>Can Enter</th>
-                    <th>Blocked</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedMlCandlesSignals.map((item) => {
-                    const mark = resolveHighWinPrice(item.symbol) ?? item.mark_price
-                    const canEnter = typeof item.can_enter === 'boolean'
-                      ? item.can_enter
-                      : isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
-                    return (
-                      <tr key={`candles-${item.symbol}-${item.side}`}>
-                        <td>{renderSymbolJump(item.symbol, item.predicted_entry_price)}</td>
-                        <td>
-                          <div className="signal-model-stack">
-                            <span className="badge success">
-                              {item.side} {(item.win_probability * 100).toFixed(1)}%
-                            </span>
-                            <span className="signal-model-meta">E {item.predicted_entry_price}</span>
-                            <span className="signal-model-meta">TP {item.take_profit}</span>
-                            {item.reference_win_symbol ? (
-                              <span className="signal-model-meta">
-                                Ref win: {item.reference_win_symbol}
-                                {item.reference_win_at ? ` @ ${formatVnTimestamp(item.reference_win_at)}` : ''}
-                              </span>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td>
-                          {item.baseline_ml ? (
-                            <div className="signal-model-stack">
-                              <span className={`badge ${item.baseline_ml.aligned ? 'success' : 'neutral'}`}>
-                                {item.baseline_ml.side} {(item.baseline_ml.win_probability * 100).toFixed(1)}%
-                              </span>
-                              <span className="signal-model-meta">E {item.baseline_ml.predicted_entry_price}</span>
-                              <span className="signal-model-meta">TP {item.baseline_ml.take_profit}</span>
-                              {item.baseline_ml.reference_win_symbol ? (
-                                <span className="signal-model-meta">
-                                  Ref win: {item.baseline_ml.reference_win_symbol}
-                                  {item.baseline_ml.reference_win_at ? ` @ ${formatVnTimestamp(item.baseline_ml.reference_win_at)}` : ''}
-                                </span>
-                              ) : null}
-                            </div>
-                          ) : '-'}
-                        </td>
-                        <td>{typeof mark === 'number' ? mark : '-'}</td>
-                        <td>
-                          <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
-                            {canEnter ? 'READY' : 'WAIT'}
-                          </span>
-                        </td>
-                        <td>{item.blocked_reason ?? '-'}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="btn-inline"
-                            disabled={
-                              isOpeningMarketOrder
-                              || mlCandlesOpenTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
-                            }
-                            onClick={() => {
-                              openPaperMarketOrder({
-                                symbol: item.symbol,
-                                side: item.side,
-                              signal_win_probability: item.win_probability,
-                              effective_win_probability: item.effective_win_probability,
-                              repo_scope: PAPER_REPO_CANDLES,
-                              entry_type: 'ML_CANDLES_TEST',
-                              entry_price: item.predicted_entry_price,
-                              reference_win_symbol: item.reference_win_symbol ?? undefined,
-                              reference_win_at: item.reference_win_at ?? undefined,
-                              take_profit: item.take_profit,
-                              stop_loss: item.stop_loss,
-                            }).then(() => {
-                                fetchMlCompareHistory().catch(() => {
-                                  // no-op
-                                })
-                              }).catch((err) => {
-                                setError(err instanceof Error ? err.message : 'Unknown error')
-                              })
-                            }}
-                          >
-                            {isOpeningMarketOrder ? 'Opening...' : 'Open ML Candles Test'}
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            )}
-          </div>
-          </>
-          ) : (
-          <>
 
           <h3 className="section-title">Open ML Candles Test Trades</h3>
           <div className="content table-wrap">
@@ -3762,10 +3672,12 @@ function App() {
                     <th>Ref Win</th>
                     <th>Side</th>
                     <th>Margin</th>
+                    <th>TP</th>
+                    <th>TP%</th>
+                    <th>SL</th>
+                    <th>SL%</th>
                     <th>Entry</th>
                     <th>Mark</th>
-                    <th>TP</th>
-                    <th>SL</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3779,6 +3691,8 @@ function App() {
                     const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
                       ? (marginUsdt * upnlPct / 100)
                       : null
+                    const tpPct = calcTargetPnlPct(row.side, row.entry_price, row.take_profit, row.leverage)
+                    const slPct = calcTargetPnlPct(row.side, row.entry_price, row.stop_loss, row.leverage)
                     const rowClassName = typeof upnlUsdt === 'number'
                       ? (upnlUsdt > 0 ? 'row-profit' : upnlUsdt < 0 ? 'row-loss' : '')
                       : ''
@@ -3835,10 +3749,24 @@ function App() {
                         </td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                         <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
+                        <td>{row.take_profit}</td>
+                        <td>
+                          {typeof tpPct === 'number' ? (
+                            <span className={tpPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${tpPct >= 0 ? '+' : ''}${tpPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td>{row.stop_loss}</td>
+                        <td>
+                          {typeof slPct === 'number' ? (
+                            <span className={slPct >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {`${slPct >= 0 ? '+' : ''}${slPct.toFixed(2)}%`}
+                            </span>
+                          ) : '-'}
+                        </td>
                         <td>{row.entry_price}</td>
                         <td>{typeof mark === 'number' ? mark : '-'}</td>
-                        <td>{row.take_profit}</td>
-                        <td>{row.stop_loss}</td>
                       </tr>
                     )
                   })}
@@ -4004,8 +3932,120 @@ function App() {
               </table>
             )}
           </div>
+            </>
+          ) : null}
+
+          {mlCandlesScreenView === 'signals' ? (
+          <>
+          <h3 className="section-title">ML Candles High Win Signals</h3>
+          <div className="content table-wrap">
+            {sortedMlCandlesSignals.length === 0 ? (
+              <p>No ml-candles signal currently above 70%.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>ML Candles</th>
+                    <th>Base ML</th>
+                    <th>Mark</th>
+                    <th>Can Enter</th>
+                    <th>Blocked</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedMlCandlesSignals.map((item) => {
+                    const mark = resolveHighWinPrice(item.symbol) ?? item.mark_price
+                    const canEnter = typeof item.can_enter === 'boolean'
+                      ? item.can_enter
+                      : isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
+                    return (
+                      <tr key={`candles-${item.symbol}-${item.side}`}>
+                        <td>{renderSymbolJump(item.symbol, item.predicted_entry_price)}</td>
+                        <td>
+                          <div className="signal-model-stack">
+                            <span className="badge success">
+                              {item.side} {(item.win_probability * 100).toFixed(1)}%
+                            </span>
+                            <span className="signal-model-meta">E {item.predicted_entry_price}</span>
+                            <span className="signal-model-meta">TP {item.take_profit}</span>
+                            {item.reference_win_symbol ? (
+                              <span className="signal-model-meta">
+                                Ref win: {item.reference_win_symbol}
+                                {item.reference_win_at ? ` @ ${formatVnTimestamp(item.reference_win_at)}` : ''}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td>
+                          {item.baseline_ml ? (
+                            <div className="signal-model-stack">
+                              <span className={`badge ${item.baseline_ml.aligned ? 'success' : 'neutral'}`}>
+                                {item.baseline_ml.side} {(item.baseline_ml.win_probability * 100).toFixed(1)}%
+                              </span>
+                              <span className="signal-model-meta">E {item.baseline_ml.predicted_entry_price}</span>
+                              <span className="signal-model-meta">TP {item.baseline_ml.take_profit}</span>
+                              {item.baseline_ml.reference_win_symbol ? (
+                                <span className="signal-model-meta">
+                                  Ref win: {item.baseline_ml.reference_win_symbol}
+                                  {item.baseline_ml.reference_win_at ? ` @ ${formatVnTimestamp(item.baseline_ml.reference_win_at)}` : ''}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : '-'}
+                        </td>
+                        <td>{typeof mark === 'number' ? mark : '-'}</td>
+                        <td>
+                          <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
+                            {canEnter ? 'READY' : 'WAIT'}
+                          </span>
+                        </td>
+                        <td>{item.blocked_reason ?? '-'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn-inline"
+                            disabled={
+                              isOpeningMarketOrder
+                              || mlCandlesOpenTradeKeySet.has(
+                                entryScopedTradeKey(item.symbol, item.side, 'ML_CANDLES_TEST'),
+                              )
+                            }
+                            onClick={() => {
+                              openPaperMarketOrder({
+                                symbol: item.symbol,
+                                side: item.side,
+                              signal_win_probability: item.win_probability,
+                              effective_win_probability: item.effective_win_probability,
+                              repo_scope: PAPER_REPO_CANDLES,
+                              entry_type: 'ML_CANDLES_TEST',
+                              entry_price: item.predicted_entry_price,
+                              reference_win_symbol: item.reference_win_symbol ?? undefined,
+                              reference_win_at: item.reference_win_at ?? undefined,
+                              take_profit: item.take_profit,
+                              stop_loss: item.stop_loss,
+                            }).then(() => {
+                                fetchMlCompareHistory().catch(() => {
+                                  // no-op
+                                })
+                              }).catch((err) => {
+                                setError(err instanceof Error ? err.message : 'Unknown error')
+                              })
+                            }}
+                          >
+                            {isOpeningMarketOrder ? 'Opening...' : 'Open ML Candles Test'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
           </>
-          )}
+          ) : null}
         </section>
       ) : null}
 
@@ -5023,3 +5063,11 @@ function App() {
 }
 
 export default App
+
+
+
+
+
+
+
+

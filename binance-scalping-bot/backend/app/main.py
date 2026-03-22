@@ -188,6 +188,7 @@ async def on_startup() -> None:
                 instant_sl_global_window_minutes=settings.paper_trade_instant_sl_global_window_minutes,
                 instant_sl_global_cooldown_minutes=settings.paper_trade_instant_sl_global_cooldown_minutes,
                 entry_hard_block_hours_vn=settings.paper_trade_entry_hard_block_hours_vn,
+                limit_long_block_hours_vn=settings.paper_trade_limit_long_block_hours_vn,
                 hourly_profile_enabled=settings.paper_trade_hourly_profile_enabled,
                 hourly_profile_min_samples=settings.paper_trade_hourly_profile_min_samples,
                 hourly_profile_prob_alpha=settings.paper_trade_hourly_profile_prob_alpha,
@@ -331,9 +332,20 @@ async def prices_socket(
 ) -> None:
     await websocket.accept()
     poll_interval = min(max(interval_sec, 0.6), 5.0)
-    target_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+    max_symbols = 160
+    requested_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+    deduped_symbols: list[str] = []
+    seen_symbols: set[str] = set()
+    for symbol in requested_symbols:
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        deduped_symbols.append(symbol)
+    truncated = len(deduped_symbols) > max_symbols
+    target_symbols = deduped_symbols[:max_symbols]
     if not target_symbols:
         target_symbols = ["BTC/USDT"]
+        truncated = False
 
     try:
         while websocket.client_state == WebSocketState.CONNECTED:
@@ -346,6 +358,8 @@ async def prices_socket(
                     "timestamp": stamp,
                     "timestamps": timestamps,
                     "source": "stream_cache",
+                    "truncated": truncated,
+                    "requested_symbol_count": len(deduped_symbols),
                 }
             )
             await asyncio.sleep(poll_interval)

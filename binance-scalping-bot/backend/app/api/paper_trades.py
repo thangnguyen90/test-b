@@ -30,6 +30,7 @@ from app.models.paper_trades import (
     PaperTradeStats,
     PaperTradeStatsResponse,
 )
+from app.deps import get_paper_trade_runtime
 from app.services.binance_client import BinanceFuturesClient
 from app.services.data_pipeline import DataPipeline
 from app.services.mysql_trade_repo import MySQLTradeRepository
@@ -367,7 +368,11 @@ class PaperTradeAPI:
         safe_block = float(block_win_rate_pct)
         safe_strict = max(safe_block, float(strict_win_rate_pct))
 
-        repo.refresh_hourly_profiles(lookback_days=days)
+        if repo.hourly_profiles_last_updated_at() is None:
+            repo.refresh_hourly_profiles_if_stale(
+                lookback_days=days,
+                max_age_sec=settings.paper_trade_hourly_profile_refresh_sec,
+            )
         rows = repo.list_hourly_profiles(scope=query_scope)
         by_side_hour: dict[str, dict[int, dict]] = {"ALL": {}, "LONG": {}, "SHORT": {}}
         for row in rows:
@@ -803,7 +808,26 @@ class PaperTradeAPI:
 
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._resolve_repo(repo_scope=req.repo_scope, entry_type=req.entry_type)
-        if repo.has_open_trade(symbol=req.symbol, side=req.side):
+        entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
+        force_entry_type_scope = (entry_type == "ML_CANDLES_TEST")
+        _, runtime_engine = get_paper_trade_runtime()
+        if runtime_engine is not None:
+            try:
+                reentry_cooldown_reason = runtime_engine._reentry_cooldown_reason(
+                    symbol=req.symbol,
+                    side=req.side,
+                    entry_type=entry_type,
+                    force_entry_type_scope=force_entry_type_scope,
+                )
+            except Exception:
+                reentry_cooldown_reason = None
+            if reentry_cooldown_reason:
+                raise HTTPException(status_code=409, detail=str(reentry_cooldown_reason))
+        if repo.has_open_trade(
+            symbol=req.symbol,
+            side=req.side,
+            entry_type=entry_type if force_entry_type_scope else None,
+        ):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
 
         market_price = req.entry_price
@@ -889,8 +913,6 @@ class PaperTradeAPI:
                 btc_following = bool(self.btc_follow_resolver(req.symbol))
             except Exception:
                 btc_following = None
-        entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
-
         trade_id = repo.create_open_trade(
             {
                 "symbol": req.symbol,

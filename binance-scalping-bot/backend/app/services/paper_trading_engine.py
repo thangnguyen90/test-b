@@ -137,6 +137,7 @@ class PaperTradingEngine:
         instant_sl_global_window_minutes: int = 20,
         instant_sl_global_cooldown_minutes: int = 60,
         entry_hard_block_hours_vn: str = "20",
+        limit_long_block_hours_vn: str = "",
         hourly_profile_enabled: bool = True,
         hourly_profile_min_samples: int = 60,
         hourly_profile_prob_alpha: float = 0.25,
@@ -300,6 +301,8 @@ class PaperTradingEngine:
         self.instant_sl_global_cooldown_minutes = max(1, int(instant_sl_global_cooldown_minutes))
         self.entry_hard_block_hours_vn = str(entry_hard_block_hours_vn or "").strip()
         self._entry_hard_block_hours_set = self._parse_entry_hard_block_hours(self.entry_hard_block_hours_vn)
+        self.limit_long_block_hours_vn = str(limit_long_block_hours_vn or "").strip()
+        self._limit_long_block_hours_set = self._parse_entry_hard_block_hours(self.limit_long_block_hours_vn)
         self.hourly_profile_enabled = bool(hourly_profile_enabled)
         self.hourly_profile_min_samples = max(10, int(hourly_profile_min_samples))
         self.hourly_profile_prob_alpha = max(0.0, float(hourly_profile_prob_alpha))
@@ -326,7 +329,15 @@ class PaperTradingEngine:
         self.fee_taker_pct = max(0.0, float(fee_taker_pct))
         self.fee_maker_pct = max(0.0, float(fee_maker_pct))
         self._task: asyncio.Task | None = None
+        self._stream_exit_task: asyncio.Task | None = None
+        self._stream_watch_task: asyncio.Task | None = None
         self._running = False
+        self._stream_exit_event = asyncio.Event()
+        self._stream_exit_prices: dict[str, float] = {}
+        self._stream_open_trades_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        self._watched_stream_symbol_keys: set[str] = set()
+        self._stream_open_trade_refresh_sec = 1.0
+        self._stream_open_trades_refreshed_ts: float = 0.0
         self._vn_tz = timezone(timedelta(hours=7))
         self._atr_cache: dict[str, tuple[float, float]] = {}
         self._top_vol_cache: tuple[float, list[str]] | None = None
@@ -355,16 +366,30 @@ class PaperTradingEngine:
         if self._task and not self._task.done():
             return
         self._running = True
+        await asyncio.to_thread(self._refresh_stream_open_trade_watch, True)
+        if self.price_stream is not None and hasattr(self.price_stream, "add_listener"):
+            try:
+                self.price_stream.add_listener(self._handle_stream_price_updates)
+            except Exception:
+                pass
         self._task = asyncio.create_task(self._loop())
+        self._stream_watch_task = asyncio.create_task(self._stream_watch_loop())
+        self._stream_exit_task = asyncio.create_task(self._stream_exit_loop())
 
     async def stop(self) -> None:
         self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
+        if self.price_stream is not None and hasattr(self.price_stream, "remove_listener"):
             try:
-                await self._task
-            except asyncio.CancelledError:
+                self.price_stream.remove_listener(self._handle_stream_price_updates)
+            except Exception:
                 pass
+        for task in (self._stream_exit_task, self._stream_watch_task, self._task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _loop(self) -> None:
         while self._running:
@@ -375,6 +400,55 @@ class PaperTradingEngine:
                 print(f"[paper-engine] loop error: {type(exc).__name__}: {exc}")
                 traceback.print_exc()
             await asyncio.sleep(self.poll_interval_sec)
+
+    async def _stream_watch_loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.to_thread(self._refresh_stream_open_trade_watch, True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[paper-engine] stream watch refresh failed: {type(exc).__name__}: {exc}")
+            await asyncio.sleep(self._stream_open_trade_refresh_sec)
+
+    async def _handle_stream_price_updates(self, updates: dict[str, float], _stamps: dict[str, str]) -> None:
+        watched = self._watched_stream_symbol_keys
+        if not watched:
+            return
+        matched = False
+        for key, price in updates.items():
+            if key not in watched:
+                continue
+            self._stream_exit_prices[key] = float(price)
+            matched = True
+        if matched:
+            self._stream_exit_event.set()
+
+    async def _stream_exit_loop(self) -> None:
+        while self._running:
+            try:
+                await self._stream_exit_event.wait()
+                self._stream_exit_event.clear()
+                pending = self._stream_exit_prices
+                self._stream_exit_prices = {}
+                if not pending:
+                    continue
+                watch_snapshot = dict(self._stream_open_trades_by_symbol)
+                for key, price in pending.items():
+                    for trade in list(watch_snapshot.get(key, [])):
+                        try:
+                            self._process_realtime_tp_sl_for_trade(trade, float(price))
+                        except Exception as exc:
+                            trade_id = int(trade.get("id") or 0)
+                            print(
+                                f"[paper-engine] realtime manage failed id={trade_id} symbol={trade.get('symbol')}: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[paper-engine] stream exit loop error: {type(exc).__name__}: {exc}")
+                traceback.print_exc()
 
     async def _run_once(self) -> None:
         await asyncio.to_thread(self._refresh_hourly_profiles_if_needed)
@@ -392,6 +466,7 @@ class PaperTradingEngine:
             # Never block TP/SL management because scan failed.
             print(f"[paper-engine] scan failed, continue with open-trade management only: {type(exc).__name__}: {exc}")
         open_trades = self.repo.list_open_trades()
+        self._set_stream_open_trade_watch(open_trades)
         open_trades_by_symbol = self._index_open_trades_by_symbol(open_trades)
         candles_entry_type = self.candles_bg_entry_type
         candles_open_trades = [
@@ -451,6 +526,8 @@ class PaperTradingEngine:
 
                 symbol = str(item.get("symbol"))
                 side = str(item.get("side"))
+                if self._entry_block_reason(symbol=symbol, side=side, entry_type="LIMIT"):
+                    continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT"):
@@ -861,9 +938,9 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
-                if not skip_btc_guards:
-                    if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
-                        continue
+                # ML Candles BG should still honor BTC shock / directional entry blocks like normal ML.
+                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                    continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -1335,6 +1412,135 @@ class PaperTradingEngine:
                     f"{type(exc).__name__}: {exc}"
                 )
 
+    def _set_stream_open_trade_watch(self, rows: list[dict[str, Any]]) -> None:
+        by_symbol: dict[str, list[dict[str, Any]]] = {}
+        watched: set[str] = set()
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            key = self._normalize_stream_symbol_key(symbol)
+            if not key:
+                continue
+            by_symbol.setdefault(key, []).append(dict(row))
+            watched.add(key)
+        self._stream_open_trades_by_symbol = by_symbol
+        self._watched_stream_symbol_keys = watched
+        self._stream_open_trades_refreshed_ts = time.time()
+
+    def _refresh_stream_open_trade_watch(self, force: bool = False) -> None:
+        now = time.time()
+        if (not force) and (now - self._stream_open_trades_refreshed_ts < self._stream_open_trade_refresh_sec):
+            return
+        self._set_stream_open_trade_watch(self.repo.list_open_trades())
+
+    def _remove_stream_open_trade(self, trade_id: int, symbol: str) -> None:
+        key = self._normalize_stream_symbol_key(symbol)
+        rows = list(self._stream_open_trades_by_symbol.get(key, []))
+        if not rows:
+            return
+        kept = [row for row in rows if int(row.get("id") or 0) != int(trade_id)]
+        if kept:
+            self._stream_open_trades_by_symbol[key] = kept
+        else:
+            self._stream_open_trades_by_symbol.pop(key, None)
+            self._watched_stream_symbol_keys.discard(key)
+
+    def _process_realtime_tp_sl_for_trade(self, trade: dict[str, Any], price: float) -> None:
+        trade_id = int(trade.get("id") or 0)
+        symbol = str(trade.get("symbol") or "")
+        if trade_id <= 0 or not symbol or price <= 0:
+            return
+
+        side = str(trade.get("side") or "")
+        entry_type = str(trade.get("entry_type") or "LIMIT")
+        entry = float(trade.get("entry_price") or 0.0)
+        tp = float(trade.get("take_profit") or 0.0)
+        sl = float(trade.get("stop_loss") or 0.0)
+        qty = float(trade.get("quantity") or 0.0)
+        leverage = int(trade.get("leverage") or self.leverage)
+        if entry <= 0 or tp <= 0 or sl <= 0 or qty <= 0:
+            return
+
+        pnl = self._calc_pnl(side=side, entry=entry, close_price=price, quantity=qty)
+        pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=leverage)
+        prev_mae = float(trade.get("mae_pct") or 0.0)
+        prev_mfe = float(trade.get("mfe_pct") or 0.0)
+        next_mae = min(prev_mae, pnl_pct)
+        next_mfe = max(prev_mfe, pnl_pct)
+        if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
+            self.repo.update_trade_excursions(trade_id=trade_id, mae_pct=next_mae, mfe_pct=next_mfe)
+            trade["mae_pct"] = next_mae
+            trade["mfe_pct"] = next_mfe
+
+        move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=leverage)
+        if (not self.disable_sl) and pnl_pct >= move_sl_trigger_pct:
+            lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
+            locked_sl = self._calc_locked_profit_sl(
+                side=side,
+                entry=entry,
+                mark_price=price,
+                leverage=leverage,
+                lock_pnl_pct=lock_pnl_pct,
+            )
+            if locked_sl is not None:
+                if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
+                    self.repo.update_stop_loss(trade_id=trade_id, stop_loss=locked_sl)
+                    sl = locked_sl
+                    trade["stop_loss"] = locked_sl
+
+        sl_hit = False
+        if not self.disable_sl:
+            sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
+        if sl_hit:
+            result = 1 if pnl >= 0 else 0
+            commission = self._calc_fee(
+                entry=entry,
+                quantity=qty,
+                entry_type=entry_type,
+                fee_taker=self.fee_taker_pct,
+                fee_maker=self.fee_maker_pct,
+            )
+            net_pnl = pnl - commission
+            self._register_instant_sl_event(
+                symbol=symbol,
+                side=side,
+                opened_at=trade.get("opened_at"),
+                pnl_pct=pnl_pct,
+                mae_pct=next_mae,
+            )
+            self.repo.close_trade(
+                trade_id=trade_id,
+                close_price=price,
+                pnl=net_pnl,
+                result=result,
+                close_reason="SL",
+                commission_usdt=commission,
+            )
+            self._remove_stream_open_trade(trade_id, symbol)
+            return
+
+        tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
+        if tp_hit:
+            result = 1 if pnl >= 0 else 0
+            commission = self._calc_fee(
+                entry=entry,
+                quantity=qty,
+                entry_type=entry_type,
+                fee_taker=self.fee_taker_pct,
+                fee_maker=self.fee_maker_pct,
+            )
+            net_pnl = pnl - commission
+            self.repo.close_trade(
+                trade_id=trade_id,
+                close_price=price,
+                pnl=net_pnl,
+                result=result,
+                close_reason="TP",
+                commission_usdt=commission,
+            )
+            self._remove_stream_open_trade(trade_id, symbol)
+
     def _index_open_trades_by_symbol(self, rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
@@ -1390,6 +1596,56 @@ class PaperTradingEngine:
             return self.repo.has_open_trade(symbol=symbol, side=side)
         return self.repo.has_open_trade(symbol=symbol, side=side, entry_type=entry_type)
 
+
+    def _reentry_cooldown_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        force_entry_type_scope: bool = False,
+    ) -> str | None:
+        if (
+            self.reentry_cooldown_minutes <= 0
+            and self.reentry_after_sl_cooldown_minutes <= 0
+            and (not self.instant_sl_guard_enabled)
+        ):
+            return None
+
+        latest = self.repo.latest_trade(
+            symbol=symbol,
+            side=side,
+            entry_type=None if (self.single_position_per_symbol_side and not force_entry_type_scope) else entry_type,
+        )
+        if not latest:
+            return None
+
+        if str(latest.get("status") or "").upper() == "OPEN":
+            return "Open trade exists"
+
+        last_update = self._parse_dt(latest.get("updated_at"))
+        if last_update is None:
+            last_update = self._parse_dt(latest.get("closed_at"))
+        if last_update is None:
+            return None
+
+        close_reason = str(latest.get("close_reason") or "").upper()
+        cooldown_minutes = self.reentry_cooldown_minutes
+        if self._is_sl_close_reason(close_reason):
+            cooldown_minutes = max(cooldown_minutes, self.reentry_after_sl_cooldown_minutes)
+            if self._is_severe_instant_sl_row(latest):
+                cooldown_minutes = max(cooldown_minutes, self.instant_sl_guard_cooldown_minutes)
+        if cooldown_minutes <= 0:
+            return None
+
+        now = datetime.now(self._vn_tz).replace(tzinfo=None)
+        elapsed = max(0.0, (now - last_update).total_seconds())
+        remaining_seconds = float(cooldown_minutes * 60) - elapsed
+        if remaining_seconds <= 0:
+            return None
+        remain_minutes = max(1, int(math.ceil(remaining_seconds / 60.0)))
+        return f"Reentry cooldown ({remain_minutes}m left)"
+
     def _is_reentry_cooldown_active(
         self,
         *,
@@ -1398,42 +1654,12 @@ class PaperTradingEngine:
         entry_type: str,
         force_entry_type_scope: bool = False,
     ) -> bool:
-        if (
-            self.reentry_cooldown_minutes <= 0
-            and self.reentry_after_sl_cooldown_minutes <= 0
-            and (not self.instant_sl_guard_enabled)
-        ):
-            return False
-
-        latest = self.repo.latest_trade(
+        return self._reentry_cooldown_reason(
             symbol=symbol,
             side=side,
-            entry_type=None if (self.single_position_per_symbol_side and not force_entry_type_scope) else entry_type,
-        )
-        if not latest:
-            return False
-
-        if str(latest.get("status") or "").upper() == "OPEN":
-            return True
-
-        last_update = self._parse_dt(latest.get("updated_at"))
-        if last_update is None:
-            last_update = self._parse_dt(latest.get("closed_at"))
-        if last_update is None:
-            return False
-
-        close_reason = str(latest.get("close_reason") or "").upper()
-        cooldown_minutes = self.reentry_cooldown_minutes
-        if close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
-            cooldown_minutes = max(cooldown_minutes, self.reentry_after_sl_cooldown_minutes)
-            if self._is_severe_instant_sl_row(latest):
-                cooldown_minutes = max(cooldown_minutes, self.instant_sl_guard_cooldown_minutes)
-        if cooldown_minutes <= 0:
-            return False
-
-        now = datetime.now(self._vn_tz).replace(tzinfo=None)
-        elapsed = (now - last_update).total_seconds()
-        return elapsed < float(cooldown_minutes * 60)
+            entry_type=entry_type,
+            force_entry_type_scope=force_entry_type_scope,
+        ) is not None
 
     def _elapsed_seconds_since(self, value: object) -> float | None:
         dt = self._parse_dt(value)
@@ -1655,7 +1881,7 @@ class PaperTradingEngine:
     @staticmethod
     def _is_sl_close_reason(close_reason: str) -> bool:
         reason = str(close_reason or "").upper()
-        return reason in {"SL", "MANUAL_FORCE_LOSS"}
+        return reason in {"SL", "STOP_LOSS", "MANUAL_FORCE_LOSS"}
 
     def _is_btc_bullish_regime(self, btc_guard: dict[str, Any] | None) -> bool:
         guard = btc_guard or {}
@@ -1816,12 +2042,13 @@ class PaperTradingEngine:
         if not self._hourly_profiles_cache:
             return max(0.0, min(1.0, float(effective_prob)))
 
-        chosen = self._find_hourly_profile_for_now(side=side, entry_type=entry_type, btc_guard=btc_guard)
+        chosen = self._find_hourly_profile_for_now(
+            side=side,
+            entry_type=entry_type,
+            btc_guard=btc_guard,
+            min_total_orders=self.hourly_profile_min_samples,
+        )
         if not chosen:
-            return max(0.0, min(1.0, float(effective_prob)))
-
-        total_orders = int(chosen.get("total_orders") or 0)
-        if total_orders < self.hourly_profile_min_samples:
             return max(0.0, min(1.0, float(effective_prob)))
 
         win_rate_pct = float(chosen.get("win_rate_pct") or 0.0)
@@ -1999,6 +2226,29 @@ class PaperTradingEngine:
         hour_vn, _ = self._current_vn_hour_weekday()
         return f"Hard block hour VN ({hour_vn:02d}h)"
 
+    def _is_limit_long_blocked_now(self, *, side: str, entry_type: str) -> bool:
+        if not self._limit_long_block_hours_set:
+            return False
+        if str(side or "").upper() != "LONG":
+            return False
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return int(hour_vn) in self._limit_long_block_hours_set
+
+    def _limit_long_block_reason(self, *, side: str, entry_type: str) -> str | None:
+        if not self._is_limit_long_blocked_now(side=side, entry_type=entry_type):
+            return None
+        hour_vn, _ = self._current_vn_hour_weekday()
+        return f"LIMIT LONG block hour VN ({hour_vn:02d}h)"
+
+    def _entry_block_reason(self, *, symbol: str, side: str, entry_type: str) -> str | None:
+        del symbol
+        hard_block_reason = self._entry_hard_block_reason()
+        if hard_block_reason:
+            return hard_block_reason
+        return self._limit_long_block_reason(side=side, entry_type=entry_type)
+
     def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
         if not self.hourly_profile_use_btc_trend:
             return "ALL"
@@ -2052,6 +2302,7 @@ class PaperTradingEngine:
         side: str,
         entry_type: str,
         btc_guard: dict[str, Any] | None = None,
+        min_total_orders: int | None = None,
     ) -> dict[str, Any] | None:
         if not self._hourly_profiles_cache:
             return None
@@ -2063,11 +2314,21 @@ class PaperTradingEngine:
             weekday_vn=weekday_vn,
             trend_key=trend_key,
         )
+        fallback_match: dict[str, Any] | None = None
         for scope in scope_candidates:
             for key in (side_key, "ALL"):
                 chosen = self._hourly_profiles_cache.get(scope, {}).get(key, {}).get(hour_vn)
-                if chosen is not None:
+                if chosen is None:
+                    continue
+                if fallback_match is None:
+                    fallback_match = chosen
+                if min_total_orders is None:
                     return chosen
+                total_orders = int(chosen.get("total_orders") or 0)
+                if total_orders >= int(min_total_orders):
+                    return chosen
+        if min_total_orders is None:
+            return fallback_match
         return None
 
     def _evaluate_hourly_bad_window_guard(
@@ -2082,12 +2343,13 @@ class PaperTradingEngine:
         if not self.hourly_bad_window_enabled:
             return True, required_min_win
 
-        profile = self._find_hourly_profile_for_now(side=side, entry_type=entry_type, btc_guard=btc_guard)
+        profile = self._find_hourly_profile_for_now(
+            side=side,
+            entry_type=entry_type,
+            btc_guard=btc_guard,
+            min_total_orders=self.hourly_bad_window_min_samples,
+        )
         if not profile:
-            return True, required_min_win
-
-        total_orders = int(profile.get("total_orders") or 0)
-        if total_orders < self.hourly_bad_window_min_samples:
             return True, required_min_win
 
         wins = int(profile.get("wins") or 0)
@@ -3043,7 +3305,7 @@ class PaperTradingEngine:
         fee_maker: float,
     ) -> float:
         """Return total commission for both legs (entry + exit) in USDT.
-        MARKET order → taker rate, LIMIT order → maker rate.
+        MARKET order -> taker rate, LIMIT order -> maker rate.
         """
         notional = entry * quantity
         rate = fee_taker if str(entry_type).upper() == "MARKET" else fee_maker
@@ -3090,6 +3352,11 @@ class PaperTradingEngine:
     def _normalize_symbol_key(symbol: str) -> str:
         base = str(symbol or "").upper().strip()
         return base.replace(":USDT", "")
+
+    @staticmethod
+    def _normalize_stream_symbol_key(symbol: str) -> str:
+        base = str(symbol or "").upper().strip()
+        return base.replace(":USDT", "").replace("/", "")
 
     def is_major_symbol(self, symbol: str) -> bool:
         return self._is_major_symbol(symbol)

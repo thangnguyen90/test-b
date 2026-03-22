@@ -17,9 +17,17 @@ class BinancePriceStream:
     def __init__(self) -> None:
         self._prices: dict[str, float] = {}
         self._updated_at: dict[str, str] = {}
+        self._listeners: set[Any] = set()
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._running = False
+
+    def add_listener(self, listener: Any) -> None:
+        if callable(listener):
+            self._listeners.add(listener)
+
+    def remove_listener(self, listener: Any) -> None:
+        self._listeners.discard(listener)
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -121,6 +129,17 @@ class BinancePriceStream:
             for key, px in updates.items():
                 self._prices[key] = px
                 self._updated_at[key] = stamps.get(key, datetime.now(timezone.utc).isoformat())
+
+        if self._listeners:
+            listener_payload = dict(updates)
+            listener_stamps = dict(stamps)
+            for listener in tuple(self._listeners):
+                try:
+                    result = listener(listener_payload, listener_stamps)
+                    if asyncio.iscoroutine(result):
+                        asyncio.create_task(result)
+                except Exception:
+                    continue
 
     async def get_price(self, symbol: str) -> tuple[float | None, str | None]:
         key = _normalize_symbol(symbol)

@@ -130,6 +130,8 @@ def _evaluate_paper_entry_gate(
         if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
             return False, "Invalid TP/SL", raw_win_probability, None
 
+        normalized_entry_type = str(entry_type or "LIMIT").strip().upper() or "LIMIT"
+
         try:
             if bool(engine._is_open_paused()):
                 pause_reason = str(getattr(engine, "_open_pause_reason", "") or "").strip()
@@ -137,9 +139,13 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
         try:
-            hard_block_reason = engine._entry_hard_block_reason()
-            if hard_block_reason:
-                return False, str(hard_block_reason), raw_win_probability, None
+            entry_block_reason = engine._entry_block_reason(
+                symbol=symbol,
+                side=side,
+                entry_type=normalized_entry_type,
+            )
+            if entry_block_reason:
+                return False, str(entry_block_reason), raw_win_probability, None
         except Exception:
             pass
         try:
@@ -149,7 +155,6 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
 
-        normalized_entry_type = str(entry_type or "LIMIT").strip().upper() or "LIMIT"
         skip_btc_guards = normalized_entry_type.startswith("ML_CANDLES")
 
         try:
@@ -165,15 +170,14 @@ def _evaluate_paper_entry_gate(
         except Exception:
             return False, "Repo unavailable", raw_win_probability, None
         try:
-            if bool(
-                engine._is_reentry_cooldown_active(
-                    symbol=symbol,
-                    side=side,
-                    entry_type=normalized_entry_type,
-                    force_entry_type_scope=force_entry_type_scope,
-                )
-            ):
-                return False, "Reentry cooldown", raw_win_probability, None
+            reentry_cooldown_reason = engine._reentry_cooldown_reason(
+                symbol=symbol,
+                side=side,
+                entry_type=normalized_entry_type,
+                force_entry_type_scope=force_entry_type_scope,
+            )
+            if reentry_cooldown_reason:
+                return False, str(reentry_cooldown_reason), raw_win_probability, None
         except Exception:
             pass
 

@@ -9,8 +9,13 @@ PID_FILE="$RUNTIME_DIR/backend.pid"
 LOG_FILE="$RUNTIME_DIR/backend.log"
 LOG_MAX_MB="${BACKEND_LOG_MAX_MB:-128}"
 LOG_KEEP_FILES="${BACKEND_LOG_KEEP_FILES:-5}"
-HOST="127.0.0.1"
-PORT="8000"
+ENV_FILE="$BACKEND_DIR/.env"
+HOST="${HOST:-127.0.0.1}"
+PORT="${PORT:-}"
+if [[ -z "$PORT" && -f "$ENV_FILE" ]]; then
+  PORT="$(grep -E '^[[:space:]]*PORT=' "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+fi
+PORT="${PORT:-8000}"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -159,3 +164,4 @@ case "$cmd" in
   trim-log) : > "$LOG_FILE"; echo "Log truncated: $LOG_FILE" ;;
   *) usage; exit 1 ;;
 esac
+

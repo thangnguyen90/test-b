@@ -783,6 +783,7 @@ class MySQLTradeRepository:
                     )
                 return cur.fetchone()
 
+
     def list_open_trades(self) -> list[dict[str, Any]]:
         with self._conn() as conn:
             with conn.cursor() as cur:
@@ -1490,6 +1491,33 @@ class MySQLTradeRepository:
                         rows_to_upsert,
                     )
                 return len(rows_to_upsert)
+
+    def hourly_profiles_last_updated_at(self) -> datetime | None:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(updated_at) AS updated_at FROM trade_hourly_profiles")
+                row = cur.fetchone() or {}
+        updated_at = row.get("updated_at")
+        if updated_at is None:
+            return None
+        if isinstance(updated_at, datetime):
+            if updated_at.tzinfo is not None:
+                return updated_at.astimezone(_VN_TZ).replace(tzinfo=None)
+            return updated_at
+        try:
+            return datetime.fromisoformat(str(updated_at))
+        except Exception:
+            return None
+
+    def refresh_hourly_profiles_if_stale(self, *, lookback_days: int = 60, max_age_sec: int = 300) -> bool:
+        safe_max_age_sec = max(0, int(max_age_sec))
+        last_updated_at = self.hourly_profiles_last_updated_at()
+        if last_updated_at is not None and safe_max_age_sec > 0:
+            age_sec = (_now_vn() - last_updated_at).total_seconds()
+            if age_sec >= 0 and age_sec < safe_max_age_sec:
+                return False
+        self.refresh_hourly_profiles(lookback_days=lookback_days)
+        return True
 
     def list_hourly_profiles(self, scope: str | None = None, side_key: str | None = None) -> list[dict[str, Any]]:
         with self._conn() as conn:
