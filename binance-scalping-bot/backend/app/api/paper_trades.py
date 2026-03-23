@@ -304,18 +304,16 @@ class PaperTradeAPI:
         repo = self._resolve_repo(repo_scope=repo_scope)
         if page is None and page_size is None:
             rows = repo.list_recent_trades(limit=limit)
-            btc_follow_map = self._resolve_btc_follow_map(rows)
             return PaperTradeListResponse(
-                items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
+                items=[self._map_trade(row, btc_following=None) for row in rows]
             )
 
         target_page = page or 1
         target_page_size = page_size or min(limit, 200)
         rows, total = repo.list_recent_trades_paged(page=target_page, page_size=target_page_size)
-        btc_follow_map = self._resolve_btc_follow_map(rows)
         total_pages = max(1, math.ceil(total / target_page_size)) if total > 0 else 1
         return PaperTradeListResponse(
-            items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows],
+            items=[self._map_trade(row, btc_following=None) for row in rows],
             total=total,
             page=min(target_page, total_pages),
             page_size=target_page_size,

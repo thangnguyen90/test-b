@@ -474,6 +474,10 @@ const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const PAPER_REPO_MAIN = 'main' as const
 const PAPER_REPO_CANDLES = 'candles' as const
 const ML_COMPARE_HISTORY_LIMIT = 2000
+const API_TIMEOUT_MS = 8000
+const API_HEAVY_TIMEOUT_MS = 12000
+const ML_COMPARE_HTTP_TIMEOUT_MS = 10000
+const ML_COMPARE_POLL_MS = 8000
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const AUTO_ML_CANDLES_OPEN_COOLDOWN_MS = 30 * 1000
 const BACKEND_HEALTH_STALE_MS = 15 * 1000
@@ -812,6 +816,22 @@ function currentVnDateString(): string {
   return VN_DATE_FORMATTER.format(new Date())
 }
 
+async function fetchResponseWithTimeout(url: string, timeoutMs = ML_COMPARE_HTTP_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController()
+  let timeoutId: number | null = null
+  try {
+    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+    return await fetch(url, { signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error(`Compare request timed out after ${Math.round(timeoutMs / 1000)}s`)
+    }
+    throw error
+  } finally {
+    if (timeoutId != null) window.clearTimeout(timeoutId)
+  }
+}
+
 function formatWeekdayFilterLabel(value?: number | null): string {
   if (typeof value !== 'number' || value < 0 || value > 6) return 'All Days'
   const found = WEEKDAY_FILTER_OPTIONS.find((item) => item.value === value)
@@ -1131,6 +1151,7 @@ function App() {
   const toastTimerRef = useRef<Map<number, number>>(new Map())
   const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const mlCandlesAutoOpenedRef = useRef<Record<string, number>>({})
+  const mlCandlesPendingRequestsRef = useRef<Set<string>>(new Set())
   const [health, setHealth] = useState<Health | null>(null)
   const [healthLastOkAt, setHealthLastOkAt] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
@@ -1224,6 +1245,8 @@ function App() {
 
   const mlCompareRefreshInFlightRef = useRef(false)
 
+  const isOverlayScreenOpen = showPaperScreen || showDailyScreen || showMlCandlesScreen
+
   const [selectedCoin, setSelectedCoin] = useState('BTC/USDT')
   const [searchCoin, setSearchCoin] = useState('')
   const [timeframe, setTimeframe] = useState('12h')
@@ -1238,7 +1261,7 @@ function App() {
 
   useEffect(() => {
     selectedCoinRef.current = selectedCoin
-  }, [selectedCoin])
+  }, [selectedCoin, isOverlayScreenOpen])
 
   const activePalette = useMemo(
     () => PALETTES.find((p) => p.id === paletteId) ?? PALETTES[0],
@@ -1935,21 +1958,22 @@ function App() {
   }
 
   async function fetchHealth() {
-    const response = await fetch(`${API_BASE}/health`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/health`, API_TIMEOUT_MS)
     if (!response.ok) throw new Error('Health check failed')
     setHealth(await response.json())
     setHealthLastOkAt(Date.now())
   }
 
   async function fetchMlStatus() {
-    const response = await fetch(`${API_BASE}/api/v1/ml/status`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/ml/status`, API_TIMEOUT_MS)
     if (!response.ok) throw new Error('ML status API failed')
     setMlStatus(await response.json() as MlStatus)
   }
 
   async function fetchSignal(symbol = selectedCoin, markPrice = chartBasePrice) {
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/signals/latest?symbol=${encodeURIComponent(symbol)}&mark_price=${markPrice}`,
+      API_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Signal API failed')
     const payload = await response.json()
@@ -1959,13 +1983,13 @@ function App() {
   }
 
   async function fetchPendingOrders() {
-    const response = await fetch(`${API_BASE}/api/v1/orders/pending`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/orders/pending`, API_TIMEOUT_MS)
     if (!response.ok) throw new Error('Pending orders API failed')
     setPendingOrders(await response.json())
   }
 
   async function fetchFuturesSymbols() {
-    const response = await fetch(`${API_BASE}/api/v1/market/symbols`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/market/symbols`, API_TIMEOUT_MS)
     if (!response.ok) throw new Error('Cannot fetch Binance Futures symbols')
     const data = (await response.json()) as SymbolListResponse
     if (!Array.isArray(data.symbols) || data.symbols.length === 0) return
@@ -1978,8 +2002,9 @@ function App() {
   }
 
   async function fetchMarketPriceFallback(symbol = selectedCoin): Promise<number> {
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/market/price?symbol=${encodeURIComponent(symbol)}`,
+      API_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error(`Cannot fetch market price for ${symbol}`)
     const data = (await response.json()) as MarketPriceResponse
@@ -1992,8 +2017,9 @@ function App() {
 
   async function fetchMarketPricesBatch(symbols: string[]): Promise<Record<string, number>> {
     if (symbols.length === 0) return {}
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/market/prices?symbols=${encodeURIComponent(symbols.join(','))}`,
+      API_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Cannot fetch market prices batch')
     const data = await response.json() as MarketPricesBatchResponse
@@ -2009,8 +2035,9 @@ function App() {
   }
 
   async function fetchKlines(symbol = selectedCoin) {
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=5m&limit=1200`,
+      API_HEAVY_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error(`Cannot fetch klines for ${symbol}`)
     const data = (await response.json()) as KlinesResponse
@@ -2021,8 +2048,9 @@ function App() {
   }
 
   async function fetchHighWinSignals() {
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/signals/scan?min_win=0.7`,
+      API_HEAVY_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Cannot scan high-win signals')
     const data = (await response.json()) as ScanSignalsResponse
@@ -2031,8 +2059,9 @@ function App() {
   }
 
   async function fetchMlCandlesSignals() {
-    const response = await fetch(
+    const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/signals/candles/scan?min_win=${ML_CANDLES_DISPLAY_MIN_WIN}`,
+      API_HEAVY_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Cannot scan ml-candles signals')
     const data = (await response.json()) as ScanSignalsResponse
@@ -2042,9 +2071,12 @@ function App() {
 
   async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
     const [statsRes, openRes, historyRes] = await Promise.all([
-      fetch(`${API_BASE}/api/v1/paper-trades/stats`),
-      fetch(`${API_BASE}/api/v1/paper-trades/open`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}`),
+      fetchResponseWithTimeout(`${API_BASE}/api/v1/paper-trades/stats`, API_TIMEOUT_MS),
+      fetchResponseWithTimeout(`${API_BASE}/api/v1/paper-trades/open`, API_TIMEOUT_MS),
+      fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}`,
+        API_HEAVY_TIMEOUT_MS,
+      ),
     ])
     const errors: string[] = []
 
@@ -2084,7 +2116,9 @@ function App() {
   }
 
   async function fetchMlCandlesTradingStats() {
-    const openRes = await fetch(`${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_CANDLES}`)
+    const openRes = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_CANDLES}`,
+    )
     if (!openRes.ok) {
       throw new Error(`ML candles trading partial failure (open:${openRes.status})`)
     }
@@ -2094,7 +2128,7 @@ function App() {
   }
 
   async function fetchMlCompareMainOpenTrades() {
-    const response = await fetch(`${API_BASE}/api/v1/paper-trades/open`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/paper-trades/open`)
     if (!response.ok) throw new Error('Compare main open API unavailable')
     const payload = await response.json() as { items: PaperTrade[] }
     setPaperOpenTrades(payload.items ?? [])
@@ -2123,8 +2157,12 @@ function App() {
 
   async function fetchMlCompareHistory() {
     const [mainResponse, candlesResponse] = await Promise.all([
-      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_MAIN}`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_CANDLES}`),
+      fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_MAIN}`,
+      ),
+      fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/history?limit=${ML_COMPARE_HISTORY_LIMIT}&repo_scope=${PAPER_REPO_CANDLES}`,
+      ),
     ])
     if (!mainResponse.ok || !candlesResponse.ok) {
       throw new Error('Compare history API unavailable')
@@ -2164,7 +2202,7 @@ function App() {
   }
 
   async function fetchDailySummary() {
-    const response = await fetch(`${API_BASE}/api/v1/paper-trades/daily?days=30`)
+    const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/paper-trades/daily?days=30`, API_HEAVY_TIMEOUT_MS)
     if (!response.ok) throw new Error('Daily summary API unavailable')
     const payload = await response.json() as { items: DailyTradeSummary[] }
     setDailySummary(payload.items ?? [])
@@ -2181,7 +2219,10 @@ function App() {
     const params = new URLSearchParams({ scope: 'ENTRY:LIMIT' })
     if (weekday !== 'ALL') params.set('weekday_vn', String(weekday))
     if (trend !== 'ALL') params.set('trend_key', trend)
-    const response = await fetch(`${API_BASE}/api/v1/paper-trades/hourly-windows?${params.toString()}`)
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/paper-trades/hourly-windows?${params.toString()}`,
+      API_HEAVY_TIMEOUT_MS,
+    )
     if (!response.ok) throw new Error('Hourly windows API unavailable')
     const payload = await response.json() as HourlyWindowResponse
     setHourlyWindows(payload.items ?? [])
@@ -2209,7 +2250,10 @@ function App() {
         active_only: 'true',
         limit: '120',
       })
-      const response = await fetch(`${API_BASE}/api/v1/paper-trades/event-windows?${params.toString()}`)
+      const response = await fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/event-windows?${params.toString()}`,
+        API_HEAVY_TIMEOUT_MS,
+      )
       if (!response.ok) throw new Error('Event windows API unavailable')
       const payload = await response.json() as MarketEventWindowListResponse
       setEventWindows(payload.items ?? [])
@@ -2251,7 +2295,10 @@ function App() {
   }
 
   async function fetchTopVolatility(days: 1 | 3 | 5 | 7 = volDays) {
-    const response = await fetch(`${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`)
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/analytics/top-volatility?days=${days}&limit=30`,
+      API_HEAVY_TIMEOUT_MS,
+    )
     if (!response.ok) throw new Error('Cannot fetch top volatility')
     const payload = await response.json() as { items: VolatilityItem[] }
     setTopVolatility(payload.items ?? [])
@@ -2261,8 +2308,9 @@ function App() {
     if (liqReqRef.current) return
     liqReqRef.current = true
     try {
-      const response = await fetch(
+      const response = await fetchResponseWithTimeout(
         `${API_BASE}/api/v1/analytics/liquidation-overview?page=${page}&page_size=${liqPageSize}&full_symbols=true`,
+        API_HEAVY_TIMEOUT_MS,
       )
       if (!response.ok) throw new Error('Cannot fetch liquidation overview')
       const payload = await response.json() as { items: LiquidationOverviewItem[]; total_symbols?: number; page?: number }
@@ -2278,7 +2326,7 @@ function App() {
     if (btcTrendReqRef.current) return
     btcTrendReqRef.current = true
     try {
-      const response = await fetch(`${API_BASE}/api/v1/analytics/btc-trend`)
+      const response = await fetchResponseWithTimeout(`${API_BASE}/api/v1/analytics/btc-trend`, API_TIMEOUT_MS)
       if (!response.ok) throw new Error('Cannot fetch BTC trend forecast')
       const payload = await response.json() as BtcTrendResponse
       setBtcTrend(payload)
@@ -2477,21 +2525,12 @@ function App() {
     const bootstrap = async () => {
       try {
         setError('')
-        await fetchMarketPriceFallback(selectedCoin).catch(() => {
-          // Initial fallback until price websocket is connected.
-        })
         await Promise.all([
-          fetchHealth(),
-          fetchMlStatus(),
           fetchPendingOrders(),
-          fetchSignal(selectedCoin, chartBasePrice),
-          fetchHighWinSignals(),
-          fetchKlines(selectedCoin),
+          fetchMarketPriceFallback(selectedCoin).catch(() => {
+            // Initial fallback until price websocket is connected.
+          }),
         ])
-        await fetchFuturesSymbols().catch(() => {
-          setSymbolsSource('fallback')
-          setSymbolsStatus('Cannot reach Binance symbols endpoint, using fallback list')
-        })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Unknown error')
       }
@@ -2511,6 +2550,8 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchHealth().catch(() => {
       // Keep previous health if backend is briefly unavailable.
     })
@@ -2522,9 +2563,11 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchMlStatus().catch(() => {
       // Keep previous ML status when endpoint is temporarily unavailable.
     })
@@ -2536,9 +2579,16 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
+    fetchFuturesSymbols().catch(() => {
+      setSymbolsSource('fallback')
+      setSymbolsStatus('Cannot reach Binance symbols endpoint, using fallback list')
+    })
+
     const timer = window.setInterval(() => {
       fetchFuturesSymbols().catch(() => {
         setSymbolsSource('fallback')
@@ -2549,9 +2599,11 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     const reqId = ++symbolReqIdRef.current
     const refreshForSymbol = async () => {
       try {
@@ -2569,7 +2621,7 @@ function App() {
       }
     }
     refreshForSymbol()
-  }, [selectedCoin])
+  }, [selectedCoin, isOverlayScreenOpen])
 
   useEffect(() => {
     if (!showPaperScreen) return
@@ -2596,13 +2648,6 @@ function App() {
       fetchMlCandlesSignals().catch(() => {
         // Keep previous signals if refresh fails.
       })
-    } else {
-      refreshMlCompareData().catch((err) => {
-        setError(err instanceof Error ? err.message : 'Unknown error')
-      })
-    }
-
-    if (mlCandlesScreenView === 'signals') {
       const timer = window.setInterval(() => {
         fetchMlCandlesSignals().catch(() => {
           // Keep previous signals on transient failures.
@@ -2612,9 +2657,30 @@ function App() {
       return () => {
         window.clearInterval(timer)
       }
-    }
+    } else {
+      let mounted = true
 
-    return () => undefined
+      const runCompareRefresh = async (surfaceError: boolean) => {
+        try {
+          await refreshMlCompareData()
+        } catch (err) {
+          if (!mounted) return
+          if (surfaceError) {
+            setError(err instanceof Error ? err.message : 'Compare refresh failed')
+          }
+        }
+      }
+
+      void runCompareRefresh(true)
+      const timer = window.setInterval(() => {
+        void runCompareRefresh(false)
+      }, ML_COMPARE_POLL_MS)
+
+      return () => {
+        mounted = false
+        window.clearInterval(timer)
+      }
+    }
   }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
@@ -2742,12 +2808,16 @@ function App() {
   }, [showPaperScreen, showMlCandlesScreen, mlCandlesScreenView, paperOpenTrades, mlCandlesOpenTradesDb])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchTopVolatility(volDays).catch(() => {
       // Keep previous volatility table on request failure.
     })
-  }, [volDays])
+  }, [volDays, isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchBtcTrend().catch(() => {
       // Keep previous BTC trend block on request failure.
     })
@@ -2761,9 +2831,11 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchLiqOverview(liqPage).catch(() => {
       // Keep previous liquidation overview table on request failure.
     })
@@ -2777,7 +2849,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [liqPage, liqPageSize])
+  }, [liqPage, liqPageSize, isOverlayScreenOpen])
 
   useEffect(() => {
     if (!autoLiqMarketEnabled) return
@@ -2829,6 +2901,9 @@ function App() {
         const liveMark = resolveHighWinPrice(item.symbol) ?? item.mark_price
         if (!isEntryTouchedNow(item.side, item.predicted_entry_price, liveMark)) continue
 
+        if (mlCandlesPendingRequestsRef.current.has(testTradeKey)) continue
+        mlCandlesPendingRequestsRef.current.add(testTradeKey)
+
         mlCandlesAutoOpenedRef.current[key] = now
         try {
           await openPaperMarketOrder({
@@ -2851,6 +2926,8 @@ function App() {
           break
         } catch {
           // Ignore duplicate/transient failures in ML candles auto-open mode.
+        } finally {
+          mlCandlesPendingRequestsRef.current.delete(testTradeKey)
         }
       }
     }
@@ -2868,6 +2945,8 @@ function App() {
   ])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return
+
     fetchHighWinSignals().catch(() => {
       // Initial fetch.
     })
@@ -2879,10 +2958,12 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [isOverlayScreenOpen])
 
 
   useEffect(() => {
+    if (!showDailyScreen) return
+
     fetchEventWindows(eventPhase).catch(() => {
       // Keep previous event windows on request failure.
     })
@@ -2894,10 +2975,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [eventPhase])
+  }, [eventPhase, showDailyScreen])
 
   useEffect(() => {
-    if (highWinWsSymbols.length === 0) {
+    if (isOverlayScreenOpen || highWinWsSymbols.length === 0) {
       setSignalsWsStatus('fallback')
       setHighWinLivePrices({})
       setHighWinLivePriceTime({})
@@ -3005,9 +3086,11 @@ function App() {
       stopFallback()
       socket?.close()
     }
-  }, [highWinWsSymbols])
+  }, [highWinWsSymbols, isOverlayScreenOpen])
 
   useEffect(() => {
+    if (isOverlayScreenOpen) return () => undefined
+
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
     let fallbackTimer: number | null = null
@@ -3087,7 +3170,7 @@ function App() {
       stopFallback()
       socket?.close()
     }
-  }, [selectedCoin])
+  }, [selectedCoin, isOverlayScreenOpen])
 
   return (
     <main className="app-shell">
@@ -3154,11 +3237,7 @@ function App() {
               setShowMlCandlesScreen(nextOpen)
               setShowPaperScreen(false)
               setShowDailyScreen(false)
-              if (nextOpen) {
-                refreshMlCompareData().catch((err) => {
-                  setError(err instanceof Error ? err.message : 'Unknown error')
-                })
-              }
+
             }}
           >
             {showMlCandlesScreen && mlCandlesScreenView === 'compare' ? 'Back To Main Screen' : 'Open ML Candles Compare'}

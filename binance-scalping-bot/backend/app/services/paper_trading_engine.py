@@ -3212,10 +3212,7 @@ class PaperTradingEngine:
 
     @staticmethod
     def _extract_price_from_ticker(ticker: dict[str, Any]) -> float | None:
-        bid = ticker.get("bid")
-        ask = ticker.get("ask")
-        if bid is not None and ask is not None:
-            return float((bid + ask) / 2)
+        # Prefer markPrice for accurate TP/SL checks (matches exchange UI).
         mark_price = ticker.get("markPrice")
         if mark_price is None:
             info = ticker.get("info")
@@ -3223,6 +3220,11 @@ class PaperTradingEngine:
                 mark_price = info.get("markPrice")
         if mark_price is not None:
             return float(mark_price)
+        # Fallback: mid price of best bid/ask.
+        bid = ticker.get("bid")
+        ask = ticker.get("ask")
+        if bid is not None and ask is not None:
+            return float((bid + ask) / 2)
         price = ticker.get("last") or ticker.get("close")
         if price is not None:
             return float(price)

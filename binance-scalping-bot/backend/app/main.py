@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name)
 paper_trade_repo: MySQLTradeRepository | None = None
 paper_trade_candle_repo: MySQLTradeRepository | None = None
@@ -284,6 +286,76 @@ async def signals_socket(
                 )
             await asyncio.sleep(poll_interval)
     except WebSocketDisconnect:
+        return
+
+
+@app.websocket("/ws/ml-candles/compare")
+async def ml_candles_compare_socket(
+    websocket: WebSocket,
+    interval_sec: float = 6.0,
+    history_limit: int = 200,
+) -> None:
+    await websocket.accept()
+    poll_interval = min(max(interval_sec, 3.0), 30.0)
+
+    def fetch_data(repo_scope: str, is_open: bool):
+        repo = paper_trade_api._resolve_repo(repo_scope=repo_scope)
+        if is_open:
+            rows = repo.list_open_trades()
+            btc_follow_map = paper_trade_api._resolve_btc_follow_map(rows)
+        else:
+            rows, _ = repo.list_recent_trades_paged(page=1, page_size=history_limit)
+            btc_follow_map = {}
+        
+        return [
+            paper_trade_api._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))).dict()
+            for row in rows
+        ]
+
+    try:
+        while websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                (
+                    main_open_items,
+                    candles_open_items,
+                    main_history_items,
+                    candles_history_items,
+                ) = await asyncio.wait_for(
+                    asyncio.gather(
+                        asyncio.to_thread(fetch_data, repo_scope="main", is_open=True),
+                        asyncio.to_thread(fetch_data, repo_scope="candles", is_open=True),
+                        asyncio.to_thread(fetch_data, repo_scope="main", is_open=False),
+                        asyncio.to_thread(fetch_data, repo_scope="candles", is_open=False),
+                    ),
+                    timeout=max(8.0, poll_interval * 2),
+                )
+
+                payload = {
+                    "main_open_items": main_open_items,
+                    "candles_open_items": candles_open_items,
+                    "main_history_items": main_history_items,
+                    "candles_history_items": candles_history_items,
+                }
+
+                await websocket.send_json({"type": "ml_candles_compare_sync", "data": payload})
+            except asyncio.TimeoutError:
+                logger.warning("ml_candles_compare_socket sync timed out")
+                try:
+                    await websocket.send_json(
+                        {
+                            "type": "ml_candles_compare_error",
+                            "error": "Compare sync timed out",
+                        }
+                    )
+                except Exception:
+                    pass
+            except Exception as exc:
+                try:
+                    await websocket.send_json({"type": "ml_candles_compare_error", "error": str(exc)})
+                except Exception:
+                    pass
+            await asyncio.sleep(poll_interval)
+    except Exception:
         return
 
 

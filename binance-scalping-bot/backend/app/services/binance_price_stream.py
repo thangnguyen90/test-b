@@ -45,10 +45,10 @@ class BinancePriceStream:
                 pass
 
     async def _loop(self) -> None:
-        # Prefer all-bookTicker (fastest), fallback to markPrice/miniTicker.
+        # Prefer markPrice stream for accurate TP/SL, fallback to bookTicker/miniTicker.
         urls = [
-            "wss://fstream.binance.com/ws/!bookTicker",
             "wss://fstream.binance.com/ws/!markPrice@arr@1s",
+            "wss://fstream.binance.com/ws/!bookTicker",
             "wss://fstream.binance.com/ws/!miniTicker@arr",
         ]
         backoff = 1.0
@@ -90,20 +90,21 @@ class BinancePriceStream:
             if not s:
                 continue
             px: float | None = None
-            # bookTicker: use mid price of best bid/ask for fastest movement
-            bid_raw = row.get("b")
-            ask_raw = row.get("a")
-            if bid_raw is not None and ask_raw is not None:
-                try:
-                    px = (float(bid_raw) + float(ask_raw)) / 2.0
-                except Exception:
-                    px = None
-            # markPrice stream uses 'p'
-            if px is None and row.get("p") is not None:
+            # Prefer markPrice for accurate TP/SL checks (matches exchange UI).
+            if row.get("p") is not None:
                 try:
                     px = float(row.get("p"))
                 except Exception:
                     px = None
+            # Fallback: bookTicker mid price of best bid/ask.
+            if px is None:
+                bid_raw = row.get("b")
+                ask_raw = row.get("a")
+                if bid_raw is not None and ask_raw is not None:
+                    try:
+                        px = (float(bid_raw) + float(ask_raw)) / 2.0
+                    except Exception:
+                        px = None
             # miniTicker uses 'c'
             if px is None and row.get("c") is not None:
                 try:
