@@ -240,6 +240,7 @@ type DailyTradeSummary = {
   avg_pnl: number
 }
 
+
 type HourlyWindowAction = 'ALLOW' | 'STRICT' | 'BLOCK' | 'LOW_DATA'
 
 type HourlyWindowSideStats = {
@@ -389,18 +390,6 @@ type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 type MlCandlesScreenView = 'signals' | 'compare'
 
-type CompareBucket = {
-  label: string
-  open: number
-  closed: number
-  wins: number
-  losses: number
-  winRate: number
-  closedPnl: number
-  floatingPnl: number
-  netPnlNow: number
-  avgClosedPnl: number
-}
 type OpenSortKey =
   | 'id'
   | 'symbol'
@@ -465,22 +454,24 @@ type PaperManualCloseRequest = {
 }
 
 const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
-const API_BASE = `http://${API_HOST}:8005`
+export const API_BASE = `http://${API_HOST}:8005`
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const ML_CANDLES_DISPLAY_MIN_WIN = 0.7
 const ML_CANDLES_ENTRY_MIN_WIN = 0.75
+const ML_CANDLES_SCAN_MAX_SYMBOLS = 50
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const PAPER_REPO_MAIN = 'main' as const
 const PAPER_REPO_CANDLES = 'candles' as const
 const ML_COMPARE_HISTORY_LIMIT = 2000
 const API_TIMEOUT_MS = 8000
-const API_HEAVY_TIMEOUT_MS = 12000
-const ML_COMPARE_HTTP_TIMEOUT_MS = 10000
-const ML_COMPARE_POLL_MS = 8000
+export const API_HEAVY_TIMEOUT_MS = 30000
+const ML_COMPARE_HTTP_TIMEOUT_MS = 30000
+const ML_COMPARE_POLL_MS = 3000 // Refined polling interval
+
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const AUTO_ML_CANDLES_OPEN_COOLDOWN_MS = 30 * 1000
-const BACKEND_HEALTH_STALE_MS = 15 * 1000
+
 const BACKEND_HEALTH_POLL_MS = 15 * 1000
 const ML_STATUS_POLL_MS = 15 * 1000
 const HIGH_WIN_SIGNAL_POLL_MS = 20 * 1000
@@ -1153,7 +1144,7 @@ function App() {
   const mlCandlesAutoOpenedRef = useRef<Record<string, number>>({})
   const mlCandlesPendingRequestsRef = useRef<Set<string>>(new Set())
   const [health, setHealth] = useState<Health | null>(null)
-  const [healthLastOkAt, setHealthLastOkAt] = useState<number | null>(null)
+
   const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
@@ -1186,7 +1177,7 @@ function App() {
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
-  const [mlCandlesStats, setMlCandlesStats] = useState<PaperTradeStats | null>(null)
+
   const [mlCandlesOpenTradesDb, setMlCandlesOpenTradesDb] = useState<PaperTrade[]>([])
   const [mlCandlesSignals, setMlCandlesSignals] = useState<ScanSignalItem[]>([])
   const [mlCandlesScannedCount, setMlCandlesScannedCount] = useState(0)
@@ -1253,11 +1244,6 @@ function App() {
   const [threshold, setThreshold] = useState(0.62)
   const [paletteId, setPaletteId] = useState(PALETTES[0].id)
 
-  const backendEngineHealthy = Boolean(
-    health?.status === 'ok'
-    && healthLastOkAt != null
-    && (Date.now() - healthLastOkAt) <= BACKEND_HEALTH_STALE_MS,
-  )
 
   useEffect(() => {
     selectedCoinRef.current = selectedCoin
@@ -1609,54 +1595,7 @@ function App() {
     }
     return { open, closed }
   }, [paperOpenTrades, paperHistory])
-  const mlCompareBuckets = useMemo(() => {
-    const buildBucket = (
-      label: string,
-      target: MlCandlesCompareTarget,
-      selectedDate?: string,
-    ): CompareBucket => {
-      const openSource = target === 'ML' ? paperOpenTrades : mlCandlesOpenTradesDb
-      const openRows = openSource.filter((row) => {
-        if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
-        if (!selectedDate) return true
-        return formatVnDateOnly(row.opened_at) === selectedDate
-      })
-      const closedRows = mlCompareHistory.filter((row) => {
-        if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
-        if (!selectedDate) return true
-        return formatVnDateOnly(row.opened_at) === selectedDate
-      })
-      const wins = closedRows.filter((row) => row.result === 1).length
-      const losses = closedRows.filter((row) => row.result === 0).length
-      const closedPnl = closedRows.reduce((sum, row) => sum + (typeof row.pnl === 'number' ? row.pnl : 0), 0)
-      const floatingPnl = openRows.reduce((sum, row) => {
-        const mark = resolveLivePrice(row.symbol)
-        const upnlPct = calcUnrealizedPnlPct(row, mark)
-        const marginUsdt = typeof row.margin_usdt === 'number'
-          ? row.margin_usdt
-          : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
-        if (typeof upnlPct !== 'number' || typeof marginUsdt !== 'number') return sum
-        return sum + (marginUsdt * upnlPct / 100)
-      }, 0)
-      return {
-        label,
-        open: openRows.length,
-        closed: closedRows.length,
-        wins,
-        losses,
-        winRate: closedRows.length > 0 ? wins / closedRows.length : 0,
-        closedPnl,
-        floatingPnl,
-        netPnlNow: closedPnl + floatingPnl,
-        avgClosedPnl: closedRows.length > 0 ? closedPnl / closedRows.length : 0,
-      }
-    }
-    return [
-      buildBucket('ML', 'ML'),
-      buildBucket('ML Candles BG', 'ML_CANDLES_BG'),
-      buildBucket('ML Candles Test', 'ML_CANDLES_TEST'),
-    ]
-  }, [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices])
+
   const mlCompareDailyBuckets = useMemo(
     () => [
       ...(['ML', 'ML_CANDLES_BG', 'ML_CANDLES_TEST'] as MlCandlesCompareTarget[]).map((target) => {
@@ -1961,7 +1900,7 @@ function App() {
     const response = await fetchResponseWithTimeout(`${API_BASE}/health`, API_TIMEOUT_MS)
     if (!response.ok) throw new Error('Health check failed')
     setHealth(await response.json())
-    setHealthLastOkAt(Date.now())
+
   }
 
   async function fetchMlStatus() {
@@ -2060,7 +1999,7 @@ function App() {
 
   async function fetchMlCandlesSignals() {
     const response = await fetchResponseWithTimeout(
-      `${API_BASE}/api/v1/signals/candles/scan?min_win=${ML_CANDLES_DISPLAY_MIN_WIN}`,
+      `${API_BASE}/api/v1/signals/candles/scan?min_win=${ML_CANDLES_DISPLAY_MIN_WIN}&max_symbols=${ML_CANDLES_SCAN_MAX_SYMBOLS}`,
       API_HEAVY_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Cannot scan ml-candles signals')
@@ -2687,21 +2626,20 @@ function App() {
     if (!showDailyScreen) return
 
     fetchDailySummary().catch((err) => {
-      setError(err instanceof Error ? err.message : 'Unknown error')
+      setError(err instanceof Error ? err.message : 'Unknown error fetching daily summary')
     })
     fetchHourlyWindows().catch(() => {
-      // Daily summary should still render even if hourly-window API fails.
+      // Keep previous hourly windows
     })
 
     const timer = window.setInterval(() => {
       fetchDailySummary().catch(() => {
-        // Keep previous daily summary on transient failures.
+        // Keep previous daily summary
       })
       fetchHourlyWindows().catch(() => {
-        // Keep previous hourly windows on transient failures.
+        // Keep previous hourly windows
       })
-    }, 12000)
-
+    }, 15000)
     return () => {
       window.clearInterval(timer)
     }
@@ -4166,6 +4104,7 @@ function App() {
               </table>
             )}
           </div>
+
           <h3 className="section-title">Auto Bad-Hour Windows (Entry Time, VN)</h3>
           <div className="daily-filter-row">
             <select

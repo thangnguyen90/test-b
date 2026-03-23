@@ -128,6 +128,21 @@ class PaperTradeHourlyWindowResponse(BaseModel):
     items: list[PaperTradeHourlyWindow]
 
 
+class PaperTradeDailyHourlySummary(BaseModel):
+    trade_date: str
+    trade_hour: int
+    total_trades: int
+    win_trades: int
+    loss_trades: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
+
+
+class PaperTradeDailyHourlySummaryResponse(BaseModel):
+    items: list[PaperTradeDailyHourlySummary]
+
+
 class PaperMarketOpenRequest(BaseModel):
     symbol: str
     side: str = Field(pattern="^(LONG|SHORT)$")

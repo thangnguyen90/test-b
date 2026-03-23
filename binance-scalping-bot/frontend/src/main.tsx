@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import DailyHourlyPage from './DailyHourlyPage.tsx'
 
 function patchPerformanceMeasure(): void {
   if (typeof window === 'undefined' || !window.performance) return
@@ -52,6 +53,9 @@ function patchPerformanceMeasure(): void {
 
 patchPerformanceMeasure()
 
-createRoot(document.getElementById('root')!).render(
-  <App />,
-)
+const path = window.location.pathname
+if (path === '/daily-hourly') {
+  createRoot(document.getElementById('root')!).render(<DailyHourlyPage />)
+} else {
+  createRoot(document.getElementById('root')!).render(<App />)
+}

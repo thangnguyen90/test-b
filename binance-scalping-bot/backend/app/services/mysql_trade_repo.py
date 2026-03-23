@@ -1629,6 +1629,53 @@ class MySQLTradeRepository:
         return out
 
 
+    def daily_hourly_summary(self, days: int = 30) -> list[dict[str, Any]]:
+        safe_days = max(1, min(days, 365))
+        now = _now_vn()
+        from_dt = now - timedelta(days=safe_days - 1)
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        DATE(opened_at) AS trade_date,
+                        HOUR(opened_at) AS trade_hour,
+                        COUNT(*) AS total_trades,
+                        SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END) AS win_trades,
+                        SUM(CASE WHEN COALESCE(pnl, 0) <= 0 THEN 1 ELSE 0 END) AS loss_trades,
+                        COALESCE(SUM(pnl), 0) AS total_pnl,
+                        COALESCE(AVG(pnl), 0) AS avg_pnl
+                    FROM paper_trades
+                    WHERE status='CLOSED' AND opened_at >= %s
+                    GROUP BY DATE(opened_at), HOUR(opened_at)
+                    ORDER BY trade_date DESC, trade_hour DESC
+                    """,
+                    (from_dt,),
+                )
+                rows = cur.fetchall()
+
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            total = int(row.get("total_trades") or 0)
+            wins = int(row.get("win_trades") or 0)
+            win_rate = (wins / total) if total > 0 else 0.0
+            trade_date = row.get("trade_date")
+            trade_hour = row.get("trade_hour")
+            out.append(
+                {
+                    "trade_date": str(trade_date),
+                    "trade_hour": int(trade_hour),
+                    "total_trades": total,
+                    "win_trades": wins,
+                    "loss_trades": int(row.get("loss_trades") or 0),
+                    "win_rate": float(win_rate),
+                    "total_pnl": float(row.get("total_pnl") or 0.0),
+                    "avg_pnl": float(row.get("avg_pnl") or 0.0),
+                }
+            )
+        return out
+
+
     @staticmethod
     def _to_vn_naive(value: datetime | None) -> datetime | None:
         if value is None:

@@ -19,6 +19,8 @@ from app.models.event_windows import (
 )
 from app.models.paper_trades import (
     PaperManualCloseRequest,
+    PaperTradeDailyHourlySummary,
+    PaperTradeDailyHourlySummaryResponse,
     PaperTradeDailySummary,
     PaperTradeDailySummaryResponse,
     PaperTradeHourlySideStats,
@@ -71,6 +73,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
+        self.router.add_api_route("/daily-hourly", self.get_daily_hourly_summary, methods=["GET"], response_model=PaperTradeDailyHourlySummaryResponse)
         self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
         self.router.add_api_route("/event-windows", self.list_event_windows, methods=["GET"], response_model=MarketEventWindowListResponse)
         self.router.add_api_route("/event-windows", self.create_event_window, methods=["POST"], response_model=MarketEventWindow)
@@ -340,6 +343,15 @@ class PaperTradeAPI:
         repo = self._require_repo()
         rows = repo.daily_summary(days=days)
         return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
+
+    def get_daily_hourly_summary(
+        self,
+        days: int = Query(default=30, ge=1, le=365),
+    ) -> PaperTradeDailyHourlySummaryResponse:
+        repo = self._require_repo()
+        rows = repo.daily_hourly_summary(days=days)
+        return PaperTradeDailyHourlySummaryResponse(items=[PaperTradeDailyHourlySummary(**row) for row in rows])
+
 
     def get_hourly_windows(
         self,
@@ -1041,3 +1053,4 @@ class PaperTradeAPI:
 
 paper_trade_api = PaperTradeAPI()
 router = paper_trade_api.router
+

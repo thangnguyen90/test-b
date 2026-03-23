@@ -75,7 +75,7 @@ class Settings(BaseModel):
     signals_active_symbols_cache_sec: int = int(os.getenv("SIGNALS_ACTIVE_SYMBOLS_CACHE_SEC", "180"))
     signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "200"))
     signals_candles_scan_default_max_symbols: int = int(
-        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "350")
+        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "50")
     )
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
