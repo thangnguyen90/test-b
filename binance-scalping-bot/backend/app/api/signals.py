@@ -150,7 +150,7 @@ def _evaluate_paper_entry_gate(
             pass
 
         normalized_entry_type = str(entry_type or "LIMIT").strip().upper() or "LIMIT"
-        skip_btc_guards = normalized_entry_type.startswith("ML_CANDLES")
+        skip_btc_guards = bool(engine._skip_btc_guards_for_entry_type(normalized_entry_type))
 
         try:
             if bool(

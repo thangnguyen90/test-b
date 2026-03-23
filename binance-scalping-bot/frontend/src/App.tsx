@@ -1868,11 +1868,15 @@ function App() {
     }
   }
 
+  function markBackendAlive() {
+    setHealthLastOkAt(Date.now())
+  }
+
   async function fetchHealth() {
     const response = await fetch(`${API_BASE}/health`)
     if (!response.ok) throw new Error('Health check failed')
     setHealth(await response.json())
-    setHealthLastOkAt(Date.now())
+    markBackendAlive()
   }
 
   async function fetchMlStatus() {
@@ -1960,6 +1964,7 @@ function App() {
     )
     if (!response.ok) throw new Error('Cannot scan high-win signals')
     const data = (await response.json()) as ScanSignalsResponse
+    markBackendAlive()
     setHighWinSignals(data.signals ?? [])
     setScannedCount(data.scanned ?? 0)
   }
@@ -1970,6 +1975,7 @@ function App() {
     )
     if (!response.ok) throw new Error('Cannot scan ml-candles signals')
     const data = (await response.json()) as ScanSignalsResponse
+    markBackendAlive()
     setMlCandlesSignals(data.signals ?? [])
     setMlCandlesScannedCount(data.scanned ?? 0)
   }
@@ -2015,6 +2021,7 @@ function App() {
     if (errors.length > 0) {
       throw new Error(`Paper trading partial failure (${errors.join(', ')})`)
     }
+    markBackendAlive()
   }
 
   async function fetchMlCandlesTradingStats() {
@@ -2041,6 +2048,7 @@ function App() {
     if (errors.length > 0) {
       throw new Error(`ML candles trading partial failure (${errors.join(', ')})`)
     }
+    markBackendAlive()
   }
 
   async function fetchMlCompareHistory() {
@@ -2055,6 +2063,7 @@ function App() {
       mainResponse.json() as Promise<PaperTradeHistoryResponse>,
       candlesResponse.json() as Promise<PaperTradeHistoryResponse>,
     ])
+    markBackendAlive()
     const combined = [...(mainPayload.items ?? []), ...(candlesPayload.items ?? [])]
 
     // main/candles can point to the same DB in some deployments; dedupe identical rows by id.
@@ -2203,6 +2212,7 @@ function App() {
       const response = await fetch(`${API_BASE}/api/v1/analytics/btc-trend`)
       if (!response.ok) throw new Error('Cannot fetch BTC trend forecast')
       const payload = await response.json() as BtcTrendResponse
+      markBackendAlive()
       setBtcTrend(payload)
     } finally {
       btcTrendReqRef.current = false
@@ -2222,6 +2232,7 @@ function App() {
         signal: controller.signal,
       })
       if (response.status === 409) {
+        markBackendAlive()
         // Duplicate open trade for same symbol/side; treat as idempotent success.
         const targetScope = input.repo_scope === PAPER_REPO_CANDLES || input.entry_type === 'ML_CANDLES_TEST'
           ? PAPER_REPO_CANDLES
@@ -2244,6 +2255,7 @@ function App() {
         const text = await response.text()
         throw new Error(`Market open failed: ${text}`)
       }
+      markBackendAlive()
       // Do not block the button waiting for all stats endpoints.
       const targetScope = input.repo_scope === PAPER_REPO_CANDLES || input.entry_type === 'ML_CANDLES_TEST'
         ? PAPER_REPO_CANDLES
