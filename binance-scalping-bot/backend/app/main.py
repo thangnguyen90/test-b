@@ -17,6 +17,7 @@ from app.api.signals import router as signals_router
 from app.core.config import settings
 from app.deps import (
     auto_trainer,
+    candle_pattern_refresher,
     bind_paper_trade_runtime,
     liquid_ml_predictor,
     ml_candles_predictor,
@@ -30,6 +31,19 @@ from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
 
 logger = logging.getLogger(__name__)
+
+def _warm_signal_predictors() -> None:
+    warm_symbol = 'BTC/USDT'
+    warm_price = 100000.0
+    try:
+        ml_predictor.predict(symbol=warm_symbol, mark_price=warm_price)
+    except Exception as exc:
+        logger.warning('ML predictor warm-up failed: %s', exc)
+    try:
+        ml_candles_predictor.predict(symbol=warm_symbol, mark_price=warm_price)
+    except Exception as exc:
+        logger.warning('ML candles predictor warm-up failed: %s', exc)
+
 app = FastAPI(title=settings.app_name)
 paper_trade_repo: MySQLTradeRepository | None = None
 paper_trade_candle_repo: MySQLTradeRepository | None = None
@@ -117,6 +131,40 @@ async def on_startup() -> None:
                 max_margin_loss_aligned_regime_bonus_pct=settings.paper_trade_max_margin_loss_aligned_regime_bonus_pct,
                 max_margin_loss_countertrend_penalty_pct=settings.paper_trade_max_margin_loss_countertrend_penalty_pct,
                 max_hold_minutes=settings.paper_trade_max_hold_minutes,
+                negative_recovery_exit_enabled=settings.paper_trade_negative_recovery_exit_enabled,
+                negative_recovery_exit_arm_after_minutes=settings.paper_trade_negative_recovery_exit_arm_after_minutes,
+                negative_recovery_exit_negative_pnl_pct=settings.paper_trade_negative_recovery_exit_negative_pnl_pct,
+                negative_recovery_exit_recover_pnl_pct=settings.paper_trade_negative_recovery_exit_recover_pnl_pct,
+                hourly_transition_guard_enabled=settings.paper_trade_hourly_transition_guard_enabled,
+                hourly_transition_start_minute=settings.paper_trade_hourly_transition_start_minute,
+                hourly_transition_force_close_end_minute=settings.paper_trade_hourly_transition_force_close_end_minute,
+                hourly_transition_entry_block_before_minutes=settings.paper_trade_hourly_transition_entry_block_before_minutes,
+                hourly_transition_entry_block_after_minutes=settings.paper_trade_hourly_transition_entry_block_after_minutes,
+                hourly_transition_min_hold_minutes=settings.paper_trade_hourly_transition_min_hold_minutes,
+                hourly_transition_safe_pnl_pct=settings.paper_trade_hourly_transition_safe_pnl_pct,
+                funding_guard_enabled=settings.paper_trade_funding_guard_enabled,
+                funding_guard_force_close_before_minutes=settings.paper_trade_funding_guard_force_close_before_minutes,
+                funding_guard_force_close_after_minutes=settings.paper_trade_funding_guard_force_close_after_minutes,
+                funding_guard_entry_block_before_minutes=settings.paper_trade_funding_guard_entry_block_before_minutes,
+                funding_guard_entry_block_after_minutes=settings.paper_trade_funding_guard_entry_block_after_minutes,
+                funding_guard_min_hold_minutes=settings.paper_trade_funding_guard_min_hold_minutes,
+                funding_guard_safe_pnl_pct=settings.paper_trade_funding_guard_safe_pnl_pct,
+                session_open_guard_enabled=settings.paper_trade_session_open_guard_enabled,
+                session_open_guard_sessions=settings.paper_trade_session_open_guard_sessions,
+                session_open_guard_force_close_before_minutes=settings.paper_trade_session_open_guard_force_close_before_minutes,
+                session_open_guard_force_close_after_minutes=settings.paper_trade_session_open_guard_force_close_after_minutes,
+                session_open_guard_entry_block_before_minutes=settings.paper_trade_session_open_guard_entry_block_before_minutes,
+                session_open_guard_entry_block_after_minutes=settings.paper_trade_session_open_guard_entry_block_after_minutes,
+                session_open_guard_min_hold_minutes=settings.paper_trade_session_open_guard_min_hold_minutes,
+                session_open_guard_safe_pnl_pct=settings.paper_trade_session_open_guard_safe_pnl_pct,
+                macro_event_guard_enabled=settings.paper_trade_macro_event_guard_enabled,
+                macro_event_guard_keywords=settings.paper_trade_macro_event_guard_keywords,
+                macro_event_guard_entry_block_before_minutes=settings.paper_trade_macro_event_guard_entry_block_before_minutes,
+                macro_event_guard_entry_block_after_minutes=settings.paper_trade_macro_event_guard_entry_block_after_minutes,
+                macro_event_guard_force_close_before_minutes=settings.paper_trade_macro_event_guard_force_close_before_minutes,
+                macro_event_guard_force_close_after_minutes=settings.paper_trade_macro_event_guard_force_close_after_minutes,
+                macro_event_guard_min_hold_minutes=settings.paper_trade_macro_event_guard_min_hold_minutes,
+                macro_event_guard_safe_pnl_pct=settings.paper_trade_macro_event_guard_safe_pnl_pct,
                 disable_sl=settings.paper_trade_disable_sl,
                 move_sl_to_entry_pnl_pct=settings.paper_trade_move_sl_to_entry_pnl_pct,
                 move_sl_lock_pnl_pct=settings.paper_trade_move_sl_lock_pnl_pct,
@@ -162,6 +210,8 @@ async def on_startup() -> None:
                 btc_follow_lookback=settings.paper_trade_btc_follow_lookback,
                 btc_follow_cache_sec=settings.paper_trade_btc_follow_cache_sec,
                 base_ml_max_symbols=settings.paper_trade_base_ml_max_symbols,
+                basic_ml_pattern_gate_enabled=settings.paper_trade_basic_ml_pattern_gate_enabled,
+                basic_ml_pattern_min_win_rate_pct=settings.paper_trade_basic_ml_pattern_min_win_rate_pct,
                 test_ml_enabled=settings.paper_trade_test_ml_enabled,
                 test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
                 test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,
@@ -224,15 +274,18 @@ async def on_startup() -> None:
             paper_trade_api.bind_btc_follow_resolver(None)
             bind_paper_trade_runtime(None, None)
 
+    await asyncio.to_thread(_warm_signal_predictors)
     await ws_manager.start()
     await price_stream.start()
     await auto_trainer.start()
+    await candle_pattern_refresher.start()
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     if paper_trade_engine is not None:
         await paper_trade_engine.stop()
+    await candle_pattern_refresher.stop()
     await auto_trainer.stop()
     await price_stream.stop()
     await ws_manager.stop()

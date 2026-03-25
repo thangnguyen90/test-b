@@ -2,6 +2,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.auto_trainer import AutoTrainer
+from app.services.candle_pattern_refresher import CandlePatternRefresher
 from app.services.binance_price_stream import BinancePriceStream
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_candles_predictor import MLCandlesPredictor
@@ -39,6 +40,12 @@ auto_trainer = AutoTrainer(
     horizon=settings.auto_train_horizon,
     rr_ratio=settings.auto_train_rr_ratio,
     symbols=settings.training_symbols,
+)
+
+candle_pattern_refresher = CandlePatternRefresher(
+    enabled=settings.signal_candle_pattern_auto_refresh_enabled,
+    interval_minutes=settings.signal_candle_pattern_auto_refresh_minutes,
+    startup_delay_sec=settings.signal_candle_pattern_auto_refresh_startup_delay_sec,
 )
 
 # Runtime references so APIs can expose true paper-trade enterability state.

@@ -73,10 +73,17 @@ class Settings(BaseModel):
     ml_candles_use_liquidation_features: bool = os.getenv("ML_CANDLES_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     ml_candles_profile_min_samples: int = int(os.getenv("ML_CANDLES_PROFILE_MIN_SAMPLES", "18"))
     signals_active_symbols_cache_sec: int = int(os.getenv("SIGNALS_ACTIVE_SYMBOLS_CACHE_SEC", "180"))
-    signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "200"))
+    signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "80"))
     signals_candles_scan_default_max_symbols: int = int(
-        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "50")
+        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "400")
     )
+    signal_candle_pattern_cache_sec: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_CACHE_SEC", "300"))
+    signal_candle_pattern_refresh_limit: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_REFRESH_LIMIT", "4000"))
+    signal_candle_pattern_min_samples: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_MIN_SAMPLES", "3"))
+    signal_candle_pattern_example_limit: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_EXAMPLE_LIMIT", "4"))
+    signal_candle_pattern_auto_refresh_enabled: bool = os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_ENABLED", "true").lower() == "true"
+    signal_candle_pattern_auto_refresh_minutes: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_MINUTES", "15"))
+    signal_candle_pattern_auto_refresh_startup_delay_sec: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_STARTUP_DELAY_SEC", "45"))
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
@@ -145,7 +152,92 @@ class Settings(BaseModel):
     paper_trade_max_margin_loss_countertrend_penalty_pct: float = float(
         os.getenv("PAPER_TRADE_MAX_MARGIN_LOSS_COUNTERTREND_PENALTY_PCT", "1.0")
     )
-    paper_trade_max_hold_minutes: int = int(os.getenv("PAPER_TRADE_MAX_HOLD_MINUTES", "120"))
+    paper_trade_max_hold_minutes: int = int(os.getenv("PAPER_TRADE_MAX_HOLD_MINUTES", "60"))
+    paper_trade_negative_recovery_exit_enabled: bool = os.getenv(
+        "PAPER_TRADE_NEGATIVE_RECOVERY_EXIT_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_negative_recovery_exit_arm_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_NEGATIVE_RECOVERY_EXIT_ARM_AFTER_MINUTES", "30")
+    )
+    paper_trade_negative_recovery_exit_negative_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_NEGATIVE_RECOVERY_EXIT_NEGATIVE_PNL_PCT", "0.0")
+    )
+    paper_trade_negative_recovery_exit_recover_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_NEGATIVE_RECOVERY_EXIT_RECOVER_PNL_PCT", "0.1")
+    )
+    paper_trade_hourly_transition_guard_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_TRANSITION_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_hourly_transition_start_minute: int = int(os.getenv("PAPER_TRADE_HOURLY_TRANSITION_START_MINUTE", "55"))
+    paper_trade_hourly_transition_force_close_end_minute: int = int(
+        os.getenv("PAPER_TRADE_HOURLY_TRANSITION_FORCE_CLOSE_END_MINUTE", "5")
+    )
+    paper_trade_hourly_transition_entry_block_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_HOURLY_TRANSITION_ENTRY_BLOCK_BEFORE_MINUTES", "10")
+    )
+    paper_trade_hourly_transition_entry_block_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_HOURLY_TRANSITION_ENTRY_BLOCK_AFTER_MINUTES", "10")
+    )
+    paper_trade_hourly_transition_min_hold_minutes: int = int(os.getenv("PAPER_TRADE_HOURLY_TRANSITION_MIN_HOLD_MINUTES", "15"))
+    paper_trade_hourly_transition_safe_pnl_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_TRANSITION_SAFE_PNL_PCT", "0.3"))
+    paper_trade_funding_guard_enabled: bool = os.getenv("PAPER_TRADE_FUNDING_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_funding_guard_force_close_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_FUNDING_GUARD_FORCE_CLOSE_BEFORE_MINUTES", "5")
+    )
+    paper_trade_funding_guard_force_close_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_FUNDING_GUARD_FORCE_CLOSE_AFTER_MINUTES", "5")
+    )
+    paper_trade_funding_guard_entry_block_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_FUNDING_GUARD_ENTRY_BLOCK_BEFORE_MINUTES", "10")
+    )
+    paper_trade_funding_guard_entry_block_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_FUNDING_GUARD_ENTRY_BLOCK_AFTER_MINUTES", "10")
+    )
+    paper_trade_funding_guard_min_hold_minutes: int = int(os.getenv("PAPER_TRADE_FUNDING_GUARD_MIN_HOLD_MINUTES", "15"))
+    paper_trade_funding_guard_safe_pnl_pct: float = float(os.getenv("PAPER_TRADE_FUNDING_GUARD_SAFE_PNL_PCT", "0.3"))
+    paper_trade_session_open_guard_enabled: bool = os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_session_open_guard_sessions: list[str] = _csv_list(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_SESSIONS", "TOKYO,LONDON,US")
+    )
+    paper_trade_session_open_guard_force_close_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_BEFORE_MINUTES", "5")
+    )
+    paper_trade_session_open_guard_force_close_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_AFTER_MINUTES", "10")
+    )
+    paper_trade_session_open_guard_entry_block_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_BEFORE_MINUTES", "15")
+    )
+    paper_trade_session_open_guard_entry_block_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_AFTER_MINUTES", "15")
+    )
+    paper_trade_session_open_guard_min_hold_minutes: int = int(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_MIN_HOLD_MINUTES", "15")
+    )
+    paper_trade_session_open_guard_safe_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_SAFE_PNL_PCT", "0.3")
+    )
+    paper_trade_macro_event_guard_enabled: bool = os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_macro_event_guard_keywords: list[str] = _csv_list(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_KEYWORDS", "CPI,FOMC,NFP")
+    )
+    paper_trade_macro_event_guard_entry_block_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_ENTRY_BLOCK_BEFORE_MINUTES", "30")
+    )
+    paper_trade_macro_event_guard_entry_block_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_ENTRY_BLOCK_AFTER_MINUTES", "30")
+    )
+    paper_trade_macro_event_guard_force_close_before_minutes: int = int(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_FORCE_CLOSE_BEFORE_MINUTES", "15")
+    )
+    paper_trade_macro_event_guard_force_close_after_minutes: int = int(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_FORCE_CLOSE_AFTER_MINUTES", "15")
+    )
+    paper_trade_macro_event_guard_min_hold_minutes: int = int(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_MIN_HOLD_MINUTES", "15")
+    )
+    paper_trade_macro_event_guard_safe_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_MACRO_EVENT_GUARD_SAFE_PNL_PCT", "0.3")
+    )
     paper_trade_disable_sl: bool = os.getenv("PAPER_TRADE_DISABLE_SL", "false").lower() == "true"
     paper_trade_move_sl_to_entry_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT", "15"))
     paper_trade_move_sl_lock_pnl_pct: float = float(os.getenv("PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT", "10"))
@@ -205,13 +297,20 @@ class Settings(BaseModel):
     paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
     paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
     paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "200"))
+    paper_trade_basic_ml_pattern_gate_enabled: bool = os.getenv(
+        "PAPER_TRADE_BASIC_ML_PATTERN_GATE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_basic_ml_pattern_min_win_rate_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_MIN_WIN_RATE_PCT", "90")
+    )
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
     paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "350"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_candles_bg_enabled: bool = os.getenv("PAPER_TRADE_CANDLES_BG_ENABLED", "true").lower() == "true"
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
-    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "350"))
+    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "557"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))

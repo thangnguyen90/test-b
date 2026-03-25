@@ -802,6 +802,7 @@ class MySQLTradeRepository:
         commission_usdt: float | None = None,
     ) -> None:
         now = _now_vn()
+        refresh_pattern_samples = False
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -813,6 +814,8 @@ class MySQLTradeRepository:
                     """,
                     (now, close_price, close_reason, pnl, commission_usdt, result, now, trade_id),
                 )
+                if int(cur.rowcount or 0) <= 0:
+                    return
                 cur.execute(
                     "SELECT * FROM paper_trades WHERE id=%s LIMIT 1",
                     (trade_id,),
@@ -859,6 +862,13 @@ class MySQLTradeRepository:
                             now,
                         ),
                     )
+                    refresh_pattern_samples = bool(row.get("feature_snapshot_json"))
+        if refresh_pattern_samples:
+            try:
+                from app.services.signal_candle_pattern_service import signal_candle_pattern_service
+                signal_candle_pattern_service.get_catalog(force_refresh=True)
+            except Exception:
+                pass
 
     def update_trade_excursions(self, trade_id: int, mae_pct: float, mfe_pct: float) -> None:
         now = _now_vn()

@@ -24,6 +24,15 @@ class MLCandlesPredictor(MLPredictor):
     ATR_CAP_PCT = 0.12
     MIN_DISTANCE_PCT = 0.001
     MIN_PRICE = 1e-10
+    SIGNAL_PROB_FLOOR = 0.5
+    SIGNAL_PROB_CEIL = 0.8
+    PROFILE_SCORE_FLOOR = 0.15
+    PROFILE_SCORE_CEIL = 0.85
+    TP_STRENGTH_SCALE_MIN = 0.85
+    TP_STRENGTH_SCALE_MAX = 1.45
+    SL_STRENGTH_SCALE_MIN = 0.9
+    SL_STRENGTH_SCALE_MAX = 1.35
+    DEFAULT_TP_ATR_MULTIPLIER = 1.25
 
     def __init__(
         self,
@@ -164,19 +173,33 @@ class MLCandlesPredictor(MLPredictor):
             except Exception:
                 pass
 
+        feature_snapshot = self._build_feature_snapshot(row=row, side=side) if row is not None else None
         profile = self._resolve_profile(row=row, side=side) if row is not None else None
         if not profile:
-            fallback_signal = self._to_signal(symbol, side, win_prob, entry_price, atr)
+            signal_strength = self._normalize_strength_component(
+                win_prob,
+                floor=self.SIGNAL_PROB_FLOOR,
+                ceil=self.SIGNAL_PROB_CEIL,
+            )
+            take_profit, stop_loss = self._build_profile_exit_targets(
+                side=side,
+                entry=entry_price,
+                atr=atr,
+                win_prob=win_prob,
+                profile_tp_multiplier=self.DEFAULT_TP_ATR_MULTIPLIER,
+                signal_strength=signal_strength,
+            )
             return self._attach_reference_win(
                 self._sanitize_signal(
                     symbol=symbol,
                     side=side,
-                    win_prob=fallback_signal.win_probability,
-                    entry=fallback_signal.predicted_entry_price,
-                    stop_loss=fallback_signal.stop_loss,
-                    take_profit=fallback_signal.take_profit,
+                    win_prob=win_prob,
+                    entry=entry_price,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
                     mark_price=mark,
                     atr=atr,
+                    feature_snapshot=feature_snapshot,
                 ),
                 profile=None,
                 side=side,
@@ -185,14 +208,23 @@ class MLCandlesPredictor(MLPredictor):
         entry_offset_atr = float(profile.get("entry_offset_atr") or 0.0)
         tp_atr_multiplier = float(profile.get("tp_atr_multiplier") or 1.5)
         profile_win_rate = float(profile.get("win_rate") or win_prob)
+        signal_strength = self._resolve_signal_strength(
+            raw_win_prob=win_prob,
+            profile=profile,
+            profile_win_rate=profile_win_rate,
+        )
 
         entry_offset = atr * max(0.0, entry_offset_atr)
         entry = entry_price - entry_offset if side == "LONG" else entry_price + entry_offset
-        take_profit = entry + (atr * tp_atr_multiplier) if side == "LONG" else entry - (atr * tp_atr_multiplier)
         win_prob = float(np.clip((win_prob * 0.7) + (profile_win_rate * 0.3), 0.0, 0.99))
-
-        sl_distance = atr * max(0.75, 1.7 - (win_prob * 0.55))
-        stop_loss = entry - sl_distance if side == "LONG" else entry + sl_distance
+        take_profit, stop_loss = self._build_profile_exit_targets(
+            side=side,
+            entry=entry,
+            atr=atr,
+            win_prob=win_prob,
+            profile_tp_multiplier=tp_atr_multiplier,
+            signal_strength=signal_strength,
+        )
         return self._attach_reference_win(
             self._sanitize_signal(
                 symbol=symbol,
@@ -203,6 +235,7 @@ class MLCandlesPredictor(MLPredictor):
                 take_profit=take_profit,
                 mark_price=mark,
                 atr=atr,
+                feature_snapshot=feature_snapshot,
             ),
             profile=profile,
             side=side,
@@ -227,6 +260,83 @@ class MLCandlesPredictor(MLPredictor):
         if atr > max_atr:
             atr = max_atr
         return atr
+
+    def _resolve_signal_strength(
+        self,
+        *,
+        raw_win_prob: float,
+        profile: dict[str, float | int | str],
+        profile_win_rate: float,
+    ) -> float:
+        model_prob_component = self._normalize_strength_component(
+            raw_win_prob,
+            floor=self.SIGNAL_PROB_FLOOR,
+            ceil=self.SIGNAL_PROB_CEIL,
+        )
+        profile_win_component = self._normalize_strength_component(
+            profile_win_rate,
+            floor=self.SIGNAL_PROB_FLOOR,
+            ceil=self.SIGNAL_PROB_CEIL,
+        )
+        profile_score_component = self._normalize_strength_component(
+            profile.get("score"),
+            floor=self.PROFILE_SCORE_FLOOR,
+            ceil=self.PROFILE_SCORE_CEIL,
+        )
+        fill_rate_component = self._normalize_strength_component(
+            profile.get("fill_rate"),
+            floor=0.18,
+            ceil=0.75,
+        )
+        samples = max(0.0, float(profile.get("fills") or profile.get("samples") or 0.0))
+        sample_component = float(
+            np.clip(samples / max(1.0, float(self.profile_min_samples) * 3.0), 0.0, 1.0)
+        )
+        strength = (
+            (model_prob_component * 0.5)
+            + (profile_win_component * 0.2)
+            + (profile_score_component * 0.15)
+            + (fill_rate_component * 0.1)
+            + (sample_component * 0.05)
+        )
+        return float(np.clip(strength, 0.0, 1.0))
+
+    @staticmethod
+    def _normalize_strength_component(value: object, *, floor: float, ceil: float) -> float:
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = floor
+        if not np.isfinite(numeric):
+            numeric = floor
+        if ceil <= floor:
+            return float(np.clip(numeric, 0.0, 1.0))
+        return float(np.clip((numeric - floor) / (ceil - floor), 0.0, 1.0))
+
+    @classmethod
+    def _build_profile_exit_targets(
+        cls,
+        *,
+        side: str,
+        entry: float,
+        atr: float,
+        win_prob: float,
+        profile_tp_multiplier: float,
+        signal_strength: float,
+    ) -> tuple[float, float]:
+        tp_scale = cls.TP_STRENGTH_SCALE_MIN + (
+            (cls.TP_STRENGTH_SCALE_MAX - cls.TP_STRENGTH_SCALE_MIN) * signal_strength
+        )
+        sl_scale = cls.SL_STRENGTH_SCALE_MIN + (
+            (cls.SL_STRENGTH_SCALE_MAX - cls.SL_STRENGTH_SCALE_MIN) * signal_strength
+        )
+        tp_distance = atr * max(0.9, float(profile_tp_multiplier) * tp_scale)
+        base_sl_multiplier = max(0.75, 1.45 - (float(win_prob) * 0.25))
+        sl_distance = atr * max(0.7, base_sl_multiplier * sl_scale)
+
+        if side == "LONG":
+            return entry + tp_distance, entry - sl_distance
+        return entry - tp_distance, entry + sl_distance
 
     @staticmethod
     def _safe_positive(value: object, *, fallback: float) -> float:
@@ -265,6 +375,7 @@ class MLCandlesPredictor(MLPredictor):
         take_profit: float,
         mark_price: float,
         atr: float,
+        feature_snapshot: dict[str, float] | None = None,
     ) -> SignalResult:
         mark = self._safe_positive(mark_price, fallback=1.0)
         safe_entry = self._safe_positive(entry, fallback=mark)
@@ -298,6 +409,7 @@ class MLCandlesPredictor(MLPredictor):
             predicted_entry_price=self._round_price(safe_entry),
             stop_loss=self._round_price(sl),
             take_profit=self._round_price(tp),
+            feature_snapshot=feature_snapshot,
         )
 
     def _load_feedback_rows(self, limit: int) -> list[dict]:

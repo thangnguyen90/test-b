@@ -36,6 +36,7 @@ from app.deps import get_paper_trade_runtime
 from app.services.binance_client import BinanceFuturesClient
 from app.services.data_pipeline import DataPipeline
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.signal_candle_pattern_service import signal_candle_pattern_service
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
     calc_estimated_margin_ratio_pct,
@@ -234,6 +235,21 @@ class PaperTradeAPI:
             return "STRICT", "raise min win"
         return "ALLOW", "normal"
 
+    @staticmethod
+    def _match_trade_candle_pattern(row: dict) -> dict | None:
+        feature_snapshot = signal_candle_pattern_service._parse_feature_snapshot(row.get("feature_snapshot_json"))
+        if not feature_snapshot:
+            return None
+        entry_type = str(row.get("entry_type") or "LIMIT").strip().upper()
+        signal_source = "ML_CANDLES" if entry_type.startswith("ML_CANDLES") else "ML"
+        side = str(row.get("side") or "LONG")
+        return signal_candle_pattern_service.match_signal(
+            signal_source=signal_source,
+            side=side,
+            feature_snapshot=feature_snapshot,
+            live_btc_phase=None,
+        )
+
     @classmethod
     def _map_trade(cls, row: dict, btc_following: bool | None = None) -> PaperTrade:
         entry_price = float(row["entry_price"])
@@ -284,6 +300,7 @@ class PaperTradeAPI:
             mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
             margin_usdt=margin_usdt,
             result=int(row["result"]) if row.get("result") is not None else None,
+            candle_pattern_sample=cls._match_trade_candle_pattern(row),
         )
 
     def get_open(

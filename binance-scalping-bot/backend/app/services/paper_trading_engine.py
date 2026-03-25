@@ -7,6 +7,7 @@ import math
 import time
 import traceback
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
 from app.core.config import settings
@@ -14,6 +15,7 @@ from app.services.binance_client import BinanceFuturesClient
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.signal_candle_pattern_service import signal_candle_pattern_service
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
     calc_estimated_margin_ratio_pct,
@@ -64,6 +66,40 @@ class PaperTradingEngine:
         max_margin_loss_aligned_regime_bonus_pct: float = 1.0,
         max_margin_loss_countertrend_penalty_pct: float = 1.0,
         max_hold_minutes: int = 120,
+        negative_recovery_exit_enabled: bool = True,
+        negative_recovery_exit_arm_after_minutes: int = 30,
+        negative_recovery_exit_negative_pnl_pct: float = 0.0,
+        negative_recovery_exit_recover_pnl_pct: float = 0.1,
+        hourly_transition_guard_enabled: bool = True,
+        hourly_transition_start_minute: int = 55,
+        hourly_transition_force_close_end_minute: int = 5,
+        hourly_transition_entry_block_before_minutes: int = 10,
+        hourly_transition_entry_block_after_minutes: int = 10,
+        hourly_transition_min_hold_minutes: int = 15,
+        hourly_transition_safe_pnl_pct: float = 0.3,
+        funding_guard_enabled: bool = True,
+        funding_guard_force_close_before_minutes: int = 5,
+        funding_guard_force_close_after_minutes: int = 5,
+        funding_guard_entry_block_before_minutes: int = 10,
+        funding_guard_entry_block_after_minutes: int = 10,
+        funding_guard_min_hold_minutes: int = 15,
+        funding_guard_safe_pnl_pct: float = 0.3,
+        session_open_guard_enabled: bool = True,
+        session_open_guard_sessions: list[str] | None = None,
+        session_open_guard_force_close_before_minutes: int = 5,
+        session_open_guard_force_close_after_minutes: int = 10,
+        session_open_guard_entry_block_before_minutes: int = 15,
+        session_open_guard_entry_block_after_minutes: int = 15,
+        session_open_guard_min_hold_minutes: int = 15,
+        session_open_guard_safe_pnl_pct: float = 0.3,
+        macro_event_guard_enabled: bool = True,
+        macro_event_guard_keywords: list[str] | None = None,
+        macro_event_guard_entry_block_before_minutes: int = 30,
+        macro_event_guard_entry_block_after_minutes: int = 30,
+        macro_event_guard_force_close_before_minutes: int = 15,
+        macro_event_guard_force_close_after_minutes: int = 15,
+        macro_event_guard_min_hold_minutes: int = 15,
+        macro_event_guard_safe_pnl_pct: float = 0.3,
         disable_sl: bool = False,
         move_sl_to_entry_pnl_pct: float = 15.0,
         move_sl_lock_pnl_pct: float = 10.0,
@@ -109,6 +145,8 @@ class PaperTradingEngine:
         btc_follow_lookback: int = 120,
         btc_follow_cache_sec: float = 300.0,
         base_ml_max_symbols: int = 200,
+        basic_ml_pattern_gate_enabled: bool = True,
+        basic_ml_pattern_min_win_rate_pct: float = 90.0,
         test_ml_enabled: bool = False,
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
@@ -205,6 +243,48 @@ class PaperTradingEngine:
         self.max_margin_loss_aligned_regime_bonus_pct = max(0.0, float(max_margin_loss_aligned_regime_bonus_pct))
         self.max_margin_loss_countertrend_penalty_pct = max(0.0, float(max_margin_loss_countertrend_penalty_pct))
         self.max_hold_minutes = max(1, max_hold_minutes)
+        self.negative_recovery_exit_enabled = bool(negative_recovery_exit_enabled)
+        self.negative_recovery_exit_arm_after_minutes = max(1, int(negative_recovery_exit_arm_after_minutes))
+        self.negative_recovery_exit_negative_pnl_pct = float(negative_recovery_exit_negative_pnl_pct)
+        self.negative_recovery_exit_recover_pnl_pct = float(negative_recovery_exit_recover_pnl_pct)
+        self.hourly_transition_guard_enabled = bool(hourly_transition_guard_enabled)
+        self.hourly_transition_start_minute = max(0, min(59, int(hourly_transition_start_minute)))
+        self.hourly_transition_force_close_end_minute = max(0, min(59, int(hourly_transition_force_close_end_minute)))
+        self.hourly_transition_entry_block_before_minutes = max(0, min(30, int(hourly_transition_entry_block_before_minutes)))
+        self.hourly_transition_entry_block_after_minutes = max(0, min(30, int(hourly_transition_entry_block_after_minutes)))
+        self.hourly_transition_min_hold_minutes = max(1, int(hourly_transition_min_hold_minutes))
+        self.hourly_transition_safe_pnl_pct = float(hourly_transition_safe_pnl_pct)
+        self.funding_guard_enabled = bool(funding_guard_enabled)
+        self.funding_guard_force_close_before_minutes = max(0, min(30, int(funding_guard_force_close_before_minutes)))
+        self.funding_guard_force_close_after_minutes = max(0, min(30, int(funding_guard_force_close_after_minutes)))
+        self.funding_guard_entry_block_before_minutes = max(0, min(60, int(funding_guard_entry_block_before_minutes)))
+        self.funding_guard_entry_block_after_minutes = max(0, min(60, int(funding_guard_entry_block_after_minutes)))
+        self.funding_guard_min_hold_minutes = max(1, int(funding_guard_min_hold_minutes))
+        self.funding_guard_safe_pnl_pct = float(funding_guard_safe_pnl_pct)
+        self.session_open_guard_enabled = bool(session_open_guard_enabled)
+        self.session_open_guard_sessions = {
+            str(item or "").strip().upper()
+            for item in (session_open_guard_sessions or [])
+            if str(item or "").strip().upper() in {"TOKYO", "LONDON", "US"}
+        }
+        self.session_open_guard_force_close_before_minutes = max(0, min(60, int(session_open_guard_force_close_before_minutes)))
+        self.session_open_guard_force_close_after_minutes = max(0, min(60, int(session_open_guard_force_close_after_minutes)))
+        self.session_open_guard_entry_block_before_minutes = max(0, min(90, int(session_open_guard_entry_block_before_minutes)))
+        self.session_open_guard_entry_block_after_minutes = max(0, min(90, int(session_open_guard_entry_block_after_minutes)))
+        self.session_open_guard_min_hold_minutes = max(1, int(session_open_guard_min_hold_minutes))
+        self.session_open_guard_safe_pnl_pct = float(session_open_guard_safe_pnl_pct)
+        self.macro_event_guard_enabled = bool(macro_event_guard_enabled)
+        self.macro_event_guard_keywords = tuple(
+            str(item or "").strip().upper()
+            for item in (macro_event_guard_keywords or [])
+            if str(item or "").strip().upper()
+        )
+        self.macro_event_guard_entry_block_before_minutes = max(0, min(240, int(macro_event_guard_entry_block_before_minutes)))
+        self.macro_event_guard_entry_block_after_minutes = max(0, min(240, int(macro_event_guard_entry_block_after_minutes)))
+        self.macro_event_guard_force_close_before_minutes = max(0, min(120, int(macro_event_guard_force_close_before_minutes)))
+        self.macro_event_guard_force_close_after_minutes = max(0, min(120, int(macro_event_guard_force_close_after_minutes)))
+        self.macro_event_guard_min_hold_minutes = max(1, int(macro_event_guard_min_hold_minutes))
+        self.macro_event_guard_safe_pnl_pct = float(macro_event_guard_safe_pnl_pct)
         self.disable_sl = disable_sl
         self.move_sl_to_entry_pnl_pct = max(0.0, move_sl_to_entry_pnl_pct)
         self.move_sl_lock_pnl_pct = max(0.0, float(move_sl_lock_pnl_pct))
@@ -257,6 +337,8 @@ class PaperTradingEngine:
         self.btc_follow_lookback = max(60, min(500, int(btc_follow_lookback)))
         self.btc_follow_cache_sec = max(30.0, float(btc_follow_cache_sec))
         self.base_ml_max_symbols = max(10, min(600, int(base_ml_max_symbols)))
+        self.basic_ml_pattern_gate_enabled = bool(basic_ml_pattern_gate_enabled)
+        self.basic_ml_pattern_min_win_rate_pct = max(0.0, min(100.0, float(basic_ml_pattern_min_win_rate_pct)))
         self.test_ml_enabled = bool(test_ml_enabled)
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(600, int(test_ml_max_symbols)))
@@ -338,7 +420,19 @@ class PaperTradingEngine:
         self._watched_stream_symbol_keys: set[str] = set()
         self._stream_open_trade_refresh_sec = 1.0
         self._stream_open_trades_refreshed_ts: float = 0.0
+        self._negative_recovery_exit_armed_trade_ids: set[int] = set()
         self._vn_tz = timezone(timedelta(hours=7))
+        self._session_guard_timezones = {
+            "TOKYO": ZoneInfo("Asia/Tokyo"),
+            "LONDON": ZoneInfo("Europe/London"),
+            "US": ZoneInfo("America/New_York"),
+        }
+        self._session_guard_specs = {
+            "TOKYO": {"hour": 9, "minute": 0},
+            "LONDON": {"hour": 8, "minute": 0},
+            "US": {"hour": 9, "minute": 30},
+        }
+        self._macro_event_guard_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._atr_cache: dict[str, tuple[float, float]] = {}
         self._top_vol_cache: tuple[float, list[str]] | None = None
         self._short_top_test_rejection_cache: dict[str, tuple[float, bool]] = {}
@@ -605,6 +699,14 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+                if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
+                    target_side=side,
+                    current_btc_following=self._resolve_btc_following_flag(symbol),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
+                ):
+                    continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -614,10 +716,30 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                feature_snapshot = None
+                basic_pattern_reason, pattern_sample, feature_snapshot = await asyncio.to_thread(
+                    self._evaluate_basic_ml_pattern_gate,
+                    symbol=symbol,
+                    side=side,
+                    candle_pattern_sample=self._coerce_pattern_sample(item.get("candle_pattern_sample")),
+                )
+                if basic_pattern_reason:
+                    continue
+                pattern_leverage_override = self._resolve_ml_pattern_leverage_override(pattern_sample)
+
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
                 atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
-                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
+                leverage = pattern_leverage_override or self._resolve_symbol_leverage(symbol, atr_pct)
+                tp, sl = self._expand_signal_exit_targets(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    leverage=leverage,
+                    effective_prob=effective_prob,
+                    base_min_win=required_min_win,
+                )
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -630,12 +752,26 @@ class PaperTradingEngine:
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
                     atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    min_rr=self._resolve_signal_min_rr(
+                        effective_prob=effective_prob,
+                        base_min_win=required_min_win,
+                    ),
+                    max_tp_pct=self._resolve_signal_max_tp_pct(
+                        entry=entry,
+                        take_profit=tp,
+                    ),
                     leverage=leverage,
-                    max_margin_loss_pct=self._resolve_max_margin_loss_pct(symbol=symbol, side=side, atr_pct=atr_pct, btc_guard=btc_guard),
+                    max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
+                        entry=entry,
+                        stop_loss=sl,
+                        leverage=leverage,
+                        symbol=symbol,
+                        side=side,
+                        atr_pct=atr_pct,
+                        btc_guard=btc_guard,
+                    ),
                 )
-                
+
                 risk_pct = calc_estimated_margin_ratio_pct(
                     leverage=leverage,
                     maint_margin_rate=self.maint_margin_rate,
@@ -651,7 +787,8 @@ class PaperTradingEngine:
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
-                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                if feature_snapshot is None:
+                    feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
                 trade_id = self.repo.create_open_trade(
@@ -762,6 +899,14 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+                if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
+                    target_side=side,
+                    current_btc_following=self._resolve_btc_following_flag(symbol),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
+                ):
+                    continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -771,10 +916,28 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                feature_snapshot = getattr(test_signal, "feature_snapshot", None)
+                pattern_sample, feature_snapshot = await asyncio.to_thread(
+                    self._resolve_ml_pattern_sample,
+                    symbol=symbol,
+                    side=side,
+                    feature_snapshot=feature_snapshot,
+                )
+                pattern_leverage_override = self._resolve_ml_pattern_leverage_override(pattern_sample)
+
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
                 atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
-                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
+                leverage = pattern_leverage_override or self._resolve_symbol_leverage(symbol, atr_pct)
+                tp, sl = self._expand_signal_exit_targets(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    leverage=leverage,
+                    effective_prob=effective_prob,
+                    base_min_win=required_min_win,
+                )
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -787,10 +950,24 @@ class PaperTradingEngine:
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
                     atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    min_rr=self._resolve_signal_min_rr(
+                        effective_prob=effective_prob,
+                        base_min_win=required_min_win,
+                    ),
+                    max_tp_pct=self._resolve_signal_max_tp_pct(
+                        entry=entry,
+                        take_profit=tp,
+                    ),
                     leverage=leverage,
-                    max_margin_loss_pct=self._resolve_max_margin_loss_pct(symbol=symbol, side=side, atr_pct=atr_pct, btc_guard=btc_guard),
+                    max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
+                        entry=entry,
+                        stop_loss=sl,
+                        leverage=leverage,
+                        symbol=symbol,
+                        side=side,
+                        atr_pct=atr_pct,
+                        btc_guard=btc_guard,
+                    ),
                 )
                 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -808,7 +985,8 @@ class PaperTradingEngine:
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
                     margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
-                feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
+                if feature_snapshot is None:
+                    feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
                 trade_id = self.repo.create_open_trade(
@@ -941,6 +1119,14 @@ class PaperTradingEngine:
                 # ML Candles BG should still honor BTC shock / directional entry blocks like normal ML.
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+                if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
+                    target_side=side,
+                    current_btc_following=self._resolve_btc_following_flag(symbol),
+                    open_trades_by_symbol=candles_open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
+                ):
+                    continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -950,10 +1136,30 @@ class PaperTradingEngine:
                 ):
                     continue
 
+                feature_snapshot = None
+                candles_pattern_reason, pattern_sample, feature_snapshot = await asyncio.to_thread(
+                    self._evaluate_ml_candles_bg_pattern_gate,
+                    symbol=symbol,
+                    side=side,
+                    feature_snapshot=getattr(candles_signal, "feature_snapshot", None),
+                )
+                if candles_pattern_reason:
+                    continue
+                pattern_leverage_override = self._resolve_ml_pattern_leverage_override(pattern_sample)
+
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
                 atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
-                leverage = self._resolve_symbol_leverage(symbol, atr_pct)
+                leverage = pattern_leverage_override or self._resolve_symbol_leverage(symbol, atr_pct)
+                tp, sl = self._expand_signal_exit_targets(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    leverage=leverage,
+                    effective_prob=effective_prob,
+                    base_min_win=required_min_win,
+                )
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
                     entry_price=entry,
@@ -966,10 +1172,24 @@ class PaperTradingEngine:
                     sl_extra_buffer_pct=self.sl_extra_buffer_pct,
                     atr_value=atr_value,
                     sl_atr_multiplier=self.sl_atr_multiplier,
-                    min_rr=self.min_rr,
-                    max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                    min_rr=self._resolve_signal_min_rr(
+                        effective_prob=effective_prob,
+                        base_min_win=required_min_win,
+                    ),
+                    max_tp_pct=self._resolve_signal_max_tp_pct(
+                        entry=entry,
+                        take_profit=tp,
+                    ),
                     leverage=leverage,
-                    max_margin_loss_pct=self._resolve_max_margin_loss_pct(symbol=symbol, side=side, atr_pct=atr_pct, btc_guard=btc_guard),
+                    max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
+                        entry=entry,
+                        stop_loss=sl,
+                        leverage=leverage,
+                        symbol=symbol,
+                        side=side,
+                        atr_pct=atr_pct,
+                        btc_guard=btc_guard,
+                    ),
                 )
 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -1112,6 +1332,14 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+                if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
+                    target_side=side,
+                    current_btc_following=self._resolve_btc_following_flag(symbol),
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
+                ):
+                    continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
@@ -1190,6 +1418,9 @@ class PaperTradingEngine:
                 )
 
         # 2) Manage open trades: close on TP, otherwise apply timeout policy.
+        self._negative_recovery_exit_armed_trade_ids.intersection_update(
+            {int(trade.get("id") or 0) for trade in open_trades if int(trade.get("id") or 0) > 0}
+        )
         for trade in open_trades:
             try:
                 trade_id = int(trade.get("id") or 0)
@@ -1363,6 +1594,42 @@ class PaperTradingEngine:
                         result=close_reason,
                         close_reason="TP",
                         commission_usdt=commission,
+                    )
+                    continue
+
+                rebound_exit_armed = self._arm_negative_recovery_exit(
+                    trade_id=trade_id,
+                    opened_at=trade.get("opened_at"),
+                    pnl_pct=pnl_pct,
+                )
+                if rebound_exit_armed and pnl_pct > self.negative_recovery_exit_recover_pnl_pct:
+                    self._close_trade_now(
+                        trade_id=trade_id,
+                        close_price=price,
+                        pnl=pnl,
+                        entry=entry,
+                        quantity=qty,
+                        entry_type=entry_type,
+                        close_reason="NEGATIVE_RECOVERY_EXIT",
+                    )
+                    continue
+
+                guard_close_reason = self._force_close_guard_reason_for_trade(
+                    trade=trade,
+                    side=side,
+                    entry=entry,
+                    stop_loss=sl,
+                    pnl_pct=pnl_pct,
+                )
+                if guard_close_reason:
+                    self._close_trade_now(
+                        trade_id=int(trade["id"]),
+                        close_price=price,
+                        pnl=pnl,
+                        entry=entry,
+                        quantity=qty,
+                        entry_type=entry_type,
+                        close_reason=guard_close_reason,
                     )
                     continue
 
@@ -2242,12 +2509,489 @@ class PaperTradingEngine:
         hour_vn, _ = self._current_vn_hour_weekday()
         return f"LIMIT LONG block hour VN ({hour_vn:02d}h)"
 
+    @staticmethod
+    def _normalize_entry_type_name(entry_type: str | None) -> str:
+        return str(entry_type or "").strip().upper()
+
+    def _is_basic_ml_entry_type(self, entry_type: str | None) -> bool:
+        return self._normalize_entry_type_name(entry_type) == "LIMIT"
+
+    @staticmethod
+    def _coerce_pattern_sample(raw: object) -> dict[str, Any] | None:
+        if isinstance(raw, dict):
+            return dict(raw)
+        return None
+
+    @staticmethod
+    def _pattern_sample_win_rate_pct(sample: dict[str, Any] | None) -> float:
+        if not isinstance(sample, dict):
+            return 0.0
+        try:
+            return float(sample.get("win_rate_pct") or 0.0)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _pattern_sample_quality_tier(sample: dict[str, Any] | None) -> str:
+        if not isinstance(sample, dict):
+            return ""
+        return str(sample.get("quality_tier") or "").strip().upper()
+
+    @classmethod
+    def _pattern_sample_is_ab_100(cls, sample: dict[str, Any] | None) -> bool:
+        tier = cls._pattern_sample_quality_tier(sample)
+        win_rate_pct = cls._pattern_sample_win_rate_pct(sample)
+        return tier in {"A", "B"} and win_rate_pct >= 100.0
+
+    @classmethod
+    def _pattern_sample_should_block_c(cls, sample: dict[str, Any] | None) -> bool:
+        tier = cls._pattern_sample_quality_tier(sample)
+        win_rate_pct = cls._pattern_sample_win_rate_pct(sample)
+        return tier == "C" and win_rate_pct < 100.0
+
+    def _resolve_ml_pattern_sample(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        candle_pattern_sample: dict[str, Any] | None = None,
+        feature_snapshot: dict[str, float] | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, float] | None]:
+        sample = self._coerce_pattern_sample(candle_pattern_sample)
+        snapshot = feature_snapshot
+        if sample is None:
+            if snapshot is None:
+                snapshot = self._capture_feature_snapshot(symbol, side)
+            if snapshot is not None:
+                sample = signal_candle_pattern_service.match_signal(
+                    signal_source="ML",
+                    side=side,
+                    feature_snapshot=snapshot,
+                )
+                sample = self._coerce_pattern_sample(sample)
+        return sample, snapshot
+
+    @classmethod
+    def _resolve_ml_pattern_leverage_override(cls, sample: dict[str, Any] | None) -> int | None:
+        if cls._pattern_sample_is_ab_100(sample):
+            return 10
+        return None
+
+    def _evaluate_basic_ml_pattern_gate(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        candle_pattern_sample: dict[str, Any] | None = None,
+        feature_snapshot: dict[str, float] | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None, dict[str, float] | None]:
+        sample, snapshot = self._resolve_ml_pattern_sample(
+            symbol=symbol,
+            side=side,
+            candle_pattern_sample=candle_pattern_sample,
+            feature_snapshot=feature_snapshot,
+        )
+        if not self.basic_ml_pattern_gate_enabled:
+            return None, sample, snapshot
+
+        if sample is None:
+            return None, None, snapshot
+
+        if not self._pattern_sample_should_block_c(sample):
+            return None, sample, snapshot
+
+        sample_name = str(sample.get("sample_code") or sample.get("sample_key") or "pattern").strip() or "pattern"
+        return f"Basic blocked {sample_name} tier C", sample, snapshot
+
+    def _evaluate_ml_candles_bg_pattern_gate(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        feature_snapshot: dict[str, float] | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None, dict[str, float] | None]:
+        sample, snapshot = self._resolve_ml_pattern_sample(
+            symbol=symbol,
+            side=side,
+            feature_snapshot=feature_snapshot,
+        )
+        if sample is None:
+            return None, None, snapshot
+
+        if not self._pattern_sample_should_block_c(sample):
+            return None, sample, snapshot
+
+        sample_name = str(sample.get("sample_code") or sample.get("sample_key") or "pattern").strip() or "pattern"
+        return f"ML_CANDLES_BG blocked {sample_name} tier C", sample, snapshot
+
+    def _is_guard_target_entry_type(self, entry_type: str | None) -> bool:
+        normalized_entry_type = self._normalize_entry_type_name(entry_type)
+        return (
+            normalized_entry_type == "LIMIT"
+            or normalized_entry_type == "ML_TEST"
+            or normalized_entry_type.startswith("ML_CANDLES")
+        )
+
+    def _coerce_vn_datetime(self, value: object) -> datetime | None:
+        dt = self._parse_dt(value)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=self._vn_tz)
+        return dt.astimezone(self._vn_tz)
+
+    def _trade_age_minutes(self, opened_at: object) -> float:
+        dt = self._coerce_vn_datetime(opened_at)
+        if dt is None:
+            return 0.0
+        return max(0.0, (datetime.now(self._vn_tz) - dt).total_seconds() / 60.0)
+
+    def _arm_negative_recovery_exit(self, *, trade_id: int, opened_at: object, pnl_pct: float) -> bool:
+        if not self.negative_recovery_exit_enabled or trade_id <= 0:
+            return False
+        if trade_id in self._negative_recovery_exit_armed_trade_ids:
+            return True
+        trade_age_minutes = self._trade_age_minutes(opened_at)
+        if trade_age_minutes < float(self.negative_recovery_exit_arm_after_minutes):
+            return False
+        if pnl_pct <= float(self.negative_recovery_exit_negative_pnl_pct):
+            self._negative_recovery_exit_armed_trade_ids.add(trade_id)
+            return True
+        return False
+
+    @staticmethod
+    def _is_minute_window_active(now_minute: int, start_minute: int, end_minute: int) -> bool:
+        if start_minute <= end_minute:
+            return start_minute <= now_minute <= end_minute
+        return now_minute >= start_minute or now_minute <= end_minute
+
+    def _is_hourly_transition_entry_block_window(self, now_vn: datetime) -> bool:
+        if not self.hourly_transition_guard_enabled:
+            return False
+        before_minutes = int(self.hourly_transition_entry_block_before_minutes)
+        after_minutes = int(self.hourly_transition_entry_block_after_minutes)
+        start_minute = (60 - before_minutes) % 60
+        end_minute = max(0, min(59, after_minutes))
+        return self._is_minute_window_active(int(now_vn.minute), start_minute, end_minute)
+
+    def _is_hourly_transition_force_close_window(self, now_vn: datetime) -> bool:
+        if not self.hourly_transition_guard_enabled:
+            return False
+        return self._is_minute_window_active(
+            int(now_vn.minute),
+            int(self.hourly_transition_start_minute),
+            int(self.hourly_transition_force_close_end_minute),
+        )
+
+    def _iter_funding_windows_vn(self, now_vn: datetime) -> list[datetime]:
+        markers: list[datetime] = []
+        for day_offset in (-1, 0, 1):
+            base_day = (now_vn + timedelta(days=day_offset)).date()
+            for hour_vn in (7, 15, 23):
+                markers.append(
+                    datetime(
+                        base_day.year,
+                        base_day.month,
+                        base_day.day,
+                        hour_vn,
+                        0,
+                        tzinfo=self._vn_tz,
+                    )
+                )
+        return markers
+
+    def _find_active_funding_guard_window(
+        self,
+        *,
+        now_vn: datetime,
+        before_minutes: int,
+        after_minutes: int,
+    ) -> dict[str, Any] | None:
+        if not self.funding_guard_enabled:
+            return None
+        best_match: tuple[float, datetime] | None = None
+        for event_dt in self._iter_funding_windows_vn(now_vn):
+            delta_minutes = (now_vn - event_dt).total_seconds() / 60.0
+            if delta_minutes < (-1.0 * float(before_minutes)) or delta_minutes > float(after_minutes):
+                continue
+            distance = abs(delta_minutes)
+            if best_match is None or distance < best_match[0]:
+                best_match = (distance, event_dt)
+        if best_match is None:
+            return None
+        return {
+            "label": f"Funding {best_match[1].strftime('%H:%M')} VN",
+            "close_reason": "FUNDING_GUARD",
+            "event_dt": best_match[1],
+        }
+
+    def _iter_session_open_windows_vn(self, now_vn: datetime) -> list[tuple[str, datetime]]:
+        out: list[tuple[str, datetime]] = []
+        for session_name in sorted(self.session_open_guard_sessions):
+            zone = self._session_guard_timezones.get(session_name)
+            spec = self._session_guard_specs.get(session_name)
+            if zone is None or spec is None:
+                continue
+            local_now = now_vn.astimezone(zone)
+            for day_offset in (-1, 0, 1):
+                local_day = (local_now + timedelta(days=day_offset)).date()
+                session_dt_local = datetime(
+                    local_day.year,
+                    local_day.month,
+                    local_day.day,
+                    int(spec["hour"]),
+                    int(spec["minute"]),
+                    tzinfo=zone,
+                )
+                out.append((session_name, session_dt_local.astimezone(self._vn_tz)))
+        return out
+
+    def _find_active_session_open_guard_window(
+        self,
+        *,
+        now_vn: datetime,
+        before_minutes: int,
+        after_minutes: int,
+    ) -> dict[str, Any] | None:
+        if not self.session_open_guard_enabled or not self.session_open_guard_sessions:
+            return None
+        best_match: tuple[float, str, datetime] | None = None
+        for session_name, event_dt in self._iter_session_open_windows_vn(now_vn):
+            delta_minutes = (now_vn - event_dt).total_seconds() / 60.0
+            if delta_minutes < (-1.0 * float(before_minutes)) or delta_minutes > float(after_minutes):
+                continue
+            distance = abs(delta_minutes)
+            if best_match is None or distance < best_match[0]:
+                best_match = (distance, session_name, event_dt)
+        if best_match is None:
+            return None
+        return {
+            "session": best_match[1],
+            "event_dt": best_match[2],
+            "close_reason": f"SESSION_OPEN_GUARD_{best_match[1]}",
+        }
+
+    def _macro_event_keyword_for_row(self, row: dict[str, Any]) -> str | None:
+        if not self.macro_event_guard_keywords:
+            return None
+        haystack = " ".join(
+            [
+                str(row.get("title") or ""),
+                str(row.get("category") or ""),
+                str(row.get("note") or ""),
+            ]
+        ).upper()
+        for keyword in self.macro_event_guard_keywords:
+            if keyword and keyword in haystack:
+                return keyword
+        return None
+
+    def _load_macro_event_guard_rows(
+        self,
+        *,
+        now_vn: datetime,
+        lookback_minutes: int,
+        lookahead_minutes: int,
+    ) -> list[dict[str, Any]]:
+        if not self.macro_event_guard_enabled or not self.macro_event_guard_keywords:
+            return []
+        cache_key = f"{int(lookback_minutes)}:{int(lookahead_minutes)}"
+        cached = self._macro_event_guard_cache.get(cache_key)
+        now_ts = time.time()
+        if cached is not None and (now_ts - float(cached[0])) <= 30.0:
+            return list(cached[1])
+        try:
+            rows = self.repo.list_market_event_windows(
+                starts_from=now_vn - timedelta(minutes=lookback_minutes),
+                ends_to=now_vn + timedelta(minutes=lookahead_minutes),
+                active_only=True,
+                limit=128,
+            )
+        except Exception as exc:
+            print(f"[paper-engine] macro event guard load failed: {type(exc).__name__}: {exc}")
+            rows = []
+        filtered = [row for row in rows if self._macro_event_keyword_for_row(row) is not None]
+        self._macro_event_guard_cache[cache_key] = (now_ts, list(filtered))
+        return filtered
+
+    def _find_active_macro_event_guard(
+        self,
+        *,
+        now_vn: datetime,
+        before_minutes: int,
+        after_minutes: int,
+    ) -> dict[str, Any] | None:
+        rows = self._load_macro_event_guard_rows(
+            now_vn=now_vn,
+            lookback_minutes=after_minutes,
+            lookahead_minutes=before_minutes,
+        )
+        best_match: tuple[float, str, str] | None = None
+        for row in rows:
+            starts_at = self._coerce_vn_datetime(row.get("starts_at"))
+            ends_at = self._coerce_vn_datetime(row.get("ends_at"))
+            keyword = self._macro_event_keyword_for_row(row)
+            if starts_at is None or ends_at is None or keyword is None:
+                continue
+            guard_start = starts_at - timedelta(minutes=before_minutes)
+            guard_end = ends_at + timedelta(minutes=after_minutes)
+            if now_vn < guard_start or now_vn > guard_end:
+                continue
+            distance = min(
+                abs((now_vn - starts_at).total_seconds()),
+                abs((now_vn - ends_at).total_seconds()),
+            )
+            title = str(row.get("title") or keyword).strip() or keyword
+            if best_match is None or distance < best_match[0]:
+                best_match = (distance, keyword, title)
+        if best_match is None:
+            return None
+        return {
+            "keyword": best_match[1],
+            "title": best_match[2],
+            "close_reason": f"MACRO_EVENT_GUARD_{best_match[1]}",
+        }
+
+    def _has_locked_profit_stop(self, *, side: str, entry: float, stop_loss: float) -> bool:
+        if self.disable_sl or entry <= 0 or stop_loss <= 0:
+            return False
+        tolerance = max(1e-9, abs(entry) * 1e-8)
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            return stop_loss >= (entry - tolerance)
+        if side_key == "SHORT":
+            return stop_loss <= (entry + tolerance)
+        return False
+
+    def _guard_entry_block_reason(self, *, entry_type: str) -> str | None:
+        if not self._is_guard_target_entry_type(entry_type):
+            return None
+        now_vn = datetime.now(self._vn_tz)
+        if self._is_hourly_transition_entry_block_window(now_vn):
+            return f"Hourly transition guard ({now_vn.strftime('%H:%M')} VN)"
+        funding_match = self._find_active_funding_guard_window(
+            now_vn=now_vn,
+            before_minutes=self.funding_guard_entry_block_before_minutes,
+            after_minutes=self.funding_guard_entry_block_after_minutes,
+        )
+        if funding_match is not None:
+            return f"{funding_match['label']} entry block"
+        session_match = self._find_active_session_open_guard_window(
+            now_vn=now_vn,
+            before_minutes=self.session_open_guard_entry_block_before_minutes,
+            after_minutes=self.session_open_guard_entry_block_after_minutes,
+        )
+        if session_match is not None:
+            session_name = str(session_match.get("session") or "SESSION")
+            event_dt = session_match.get("event_dt")
+            event_label = event_dt.strftime('%H:%M') if isinstance(event_dt, datetime) else 'session-open'
+            return f"Session open guard {session_name} ({event_label} VN)"
+        macro_match = self._find_active_macro_event_guard(
+            now_vn=now_vn,
+            before_minutes=self.macro_event_guard_entry_block_before_minutes,
+            after_minutes=self.macro_event_guard_entry_block_after_minutes,
+        )
+        if macro_match is not None:
+            return f"Macro event guard {macro_match['keyword']} ({macro_match['title']})"
+        return None
+
+    def _force_close_guard_reason_for_trade(
+        self,
+        *,
+        trade: dict[str, Any],
+        side: str,
+        entry: float,
+        stop_loss: float,
+        pnl_pct: float,
+    ) -> str | None:
+        entry_type = self._normalize_entry_type_name(trade.get("entry_type"))
+        if not self._is_guard_target_entry_type(entry_type):
+            return None
+        if self._has_locked_profit_stop(side=side, entry=entry, stop_loss=stop_loss):
+            return None
+        now_vn = datetime.now(self._vn_tz)
+        trade_age_minutes = self._trade_age_minutes(trade.get("opened_at"))
+        if self._is_hourly_transition_force_close_window(now_vn):
+            if (
+                trade_age_minutes >= float(self.hourly_transition_min_hold_minutes)
+                and pnl_pct > 0.1
+            ):
+                return "HOURLY_TRANSITION_GUARD"
+        funding_match = self._find_active_funding_guard_window(
+            now_vn=now_vn,
+            before_minutes=self.funding_guard_force_close_before_minutes,
+            after_minutes=self.funding_guard_force_close_after_minutes,
+        )
+        if funding_match is not None:
+            if (
+                trade_age_minutes >= float(self.funding_guard_min_hold_minutes)
+                and pnl_pct > 0.0
+                and pnl_pct < float(self.funding_guard_safe_pnl_pct)
+            ):
+                return str(funding_match["close_reason"])
+        session_match = self._find_active_session_open_guard_window(
+            now_vn=now_vn,
+            before_minutes=self.session_open_guard_force_close_before_minutes,
+            after_minutes=self.session_open_guard_force_close_after_minutes,
+        )
+        if session_match is not None:
+            if (
+                trade_age_minutes >= float(self.session_open_guard_min_hold_minutes)
+                and pnl_pct > 0.0
+                and pnl_pct < float(self.session_open_guard_safe_pnl_pct)
+            ):
+                return str(session_match["close_reason"])
+        macro_match = self._find_active_macro_event_guard(
+            now_vn=now_vn,
+            before_minutes=self.macro_event_guard_force_close_before_minutes,
+            after_minutes=self.macro_event_guard_force_close_after_minutes,
+        )
+        if macro_match is not None:
+            if (
+                trade_age_minutes >= float(self.macro_event_guard_min_hold_minutes)
+                and pnl_pct > 0.0
+                and pnl_pct < float(self.macro_event_guard_safe_pnl_pct)
+            ):
+                return str(macro_match["close_reason"])
+        return None
+
+    def _close_trade_now(
+        self,
+        *,
+        trade_id: int,
+        close_price: float,
+        pnl: float,
+        entry: float,
+        quantity: float,
+        entry_type: str,
+        close_reason: str,
+    ) -> None:
+        commission = self._calc_fee(
+            entry=entry,
+            quantity=quantity,
+            entry_type=entry_type,
+            fee_taker=self.fee_taker_pct,
+            fee_maker=self.fee_maker_pct,
+        )
+        net_pnl = pnl - commission
+        self.repo.close_trade(
+            trade_id=trade_id,
+            close_price=close_price,
+            pnl=net_pnl,
+            result=1 if pnl >= 0 else 0,
+            close_reason=close_reason,
+            commission_usdt=commission,
+        )
+
     def _entry_block_reason(self, *, symbol: str, side: str, entry_type: str) -> str | None:
         del symbol
         hard_block_reason = self._entry_hard_block_reason()
         if hard_block_reason:
             return hard_block_reason
-        return self._limit_long_block_reason(side=side, entry_type=entry_type)
+        limit_long_block_reason = self._limit_long_block_reason(side=side, entry_type=entry_type)
+        if limit_long_block_reason:
+            return limit_long_block_reason
+        return self._guard_entry_block_reason(entry_type=entry_type)
 
     def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
         if not self.hourly_profile_use_btc_trend:
@@ -2384,6 +3128,115 @@ class PaperTradingEngine:
         if block_bad_window:
             return False, required_min_win
         return True, required_min_win
+
+    @staticmethod
+    def _coerce_bool_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "t", "on"}
+
+    def _close_profitable_opposite_trades_on_btc_follow_cluster(
+        self,
+        *,
+        target_side: str,
+        current_btc_following: bool | None,
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+        closed_trade_ids: set[int],
+        market_prices: dict[str, float],
+    ) -> bool:
+        if current_btc_following is not True:
+            return True
+
+        target_side_key = str(target_side or "").upper()
+        if target_side_key not in {"LONG", "SHORT"}:
+            return True
+
+        btc_follow_count = 1
+        for bucket in open_trades_by_symbol.values():
+            for row in bucket:
+                trade_id = int(row.get("id") or 0)
+                if trade_id in closed_trade_ids:
+                    continue
+                if str(row.get("status") or "OPEN").upper() != "OPEN":
+                    continue
+                if str(row.get("side") or "").upper() != target_side_key:
+                    continue
+                if not self._coerce_bool_flag(row.get("btc_following")):
+                    continue
+                btc_follow_count += 1
+
+        if btc_follow_count < 5:
+            return True
+
+        resolved_prices = dict(market_prices)
+        close_items: list[tuple[int, float, float, float, str, float]] = []
+        for bucket in open_trades_by_symbol.values():
+            for row in bucket:
+                trade_id = int(row.get("id") or 0)
+                if trade_id <= 0 or trade_id in closed_trade_ids:
+                    continue
+                if str(row.get("status") or "OPEN").upper() != "OPEN":
+                    continue
+                side = str(row.get("side") or "").upper()
+                if side not in {"LONG", "SHORT"} or side == target_side_key:
+                    continue
+
+                symbol = str(row.get("symbol") or "")
+                entry_type = str(row.get("entry_type") or "LIMIT")
+                try:
+                    entry = float(row.get("entry_price") or 0.0)
+                    quantity = float(row.get("quantity") or 0.0)
+                except Exception:
+                    continue
+                if not symbol or entry <= 0 or quantity <= 0:
+                    continue
+
+                close_price = resolved_prices.get(symbol)
+                if close_price is None:
+                    close_price = self._resolve_market_price(symbol)
+                    if close_price is not None:
+                        resolved_prices[symbol] = float(close_price)
+                if close_price is None or float(close_price) <= 0:
+                    continue
+
+                pnl = self._calc_pnl(
+                    side=side,
+                    entry=entry,
+                    close_price=float(close_price),
+                    quantity=quantity,
+                )
+                if pnl <= 0.1:
+                    continue
+                close_items.append((trade_id, float(close_price), float(pnl), entry, entry_type, quantity))
+
+        for trade_id, close_price, pnl, entry, entry_type, quantity in close_items:
+            try:
+                self._close_trade_now(
+                    trade_id=trade_id,
+                    close_price=close_price,
+                    pnl=pnl,
+                    entry=entry,
+                    quantity=quantity,
+                    entry_type=entry_type,
+                    close_reason="BTC_FOLLOW_OPPOSITE_CLUSTER_EXIT",
+                )
+                closed_trade_ids.add(trade_id)
+            except Exception:
+                continue
+
+        if not close_items:
+            return True
+
+        for key, bucket in list(open_trades_by_symbol.items()):
+            open_trades_by_symbol[key] = [
+                row for row in bucket
+                if int(row.get("id") or 0) not in closed_trade_ids
+            ]
+        return True
 
     def _handle_opposite_signal_on_touch(
         self,
@@ -3416,6 +4269,107 @@ class PaperTradingEngine:
             cap_pct = cap_pct + self.max_margin_loss_aligned_regime_bonus_pct
 
         return max(0.5, float(cap_pct))
+
+    def _resolve_signal_strength(
+        self,
+        *,
+        effective_prob: float,
+        base_min_win: float,
+    ) -> float:
+        threshold = min(0.95, max(0.05, float(base_min_win)))
+        return self._clamp(
+            (float(effective_prob) - threshold)
+            / max(0.05, 0.95 - threshold),
+            0.0,
+            1.0,
+        )
+
+    def _resolve_signal_min_rr(
+        self,
+        *,
+        effective_prob: float,
+        base_min_win: float,
+    ) -> float:
+        strength = self._resolve_signal_strength(
+            effective_prob=effective_prob,
+            base_min_win=base_min_win,
+        )
+        return 0.2 + (0.1 * strength)
+
+    def _expand_signal_exit_targets(
+        self,
+        *,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        leverage: int,
+        effective_prob: float,
+        base_min_win: float,
+    ) -> tuple[float, float]:
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
+            return float(take_profit), float(stop_loss)
+        lev = max(1, int(leverage))
+        strength = self._resolve_signal_strength(
+            effective_prob=effective_prob,
+            base_min_win=base_min_win,
+        )
+        min_sl_margin_pct = 12.0 + (4.0 * strength)
+        min_tp_margin_pct = 2.4 + (1.2 * strength)
+        target_rr = self._resolve_signal_min_rr(
+            effective_prob=effective_prob,
+            base_min_win=base_min_win,
+        )
+        min_sl_distance = float(entry) * (min_sl_margin_pct / 100.0) / float(lev)
+        min_tp_distance = float(entry) * (min_tp_margin_pct / 100.0) / float(lev)
+        sl_distance = max(abs(float(entry) - float(stop_loss)), min_sl_distance)
+        tp_distance = max(
+            abs(float(take_profit) - float(entry)),
+            min_tp_distance,
+            sl_distance * target_rr,
+        )
+        if str(side or "").upper() == "LONG":
+            return float(entry + tp_distance), float(entry - sl_distance)
+        return float(entry - tp_distance), float(entry + sl_distance)
+
+    def _resolve_signal_max_tp_pct(
+        self,
+        *,
+        entry: float,
+        take_profit: float,
+    ) -> float | None:
+        base_pct = max(0.0, float(settings.paper_trade_max_tp_pct))
+        if entry <= 0 or take_profit <= 0:
+            return (base_pct / 100.0) if base_pct > 0 else None
+        signal_pct = (abs(float(take_profit) - float(entry)) / float(entry)) * 100.0
+        dynamic_pct = max(0.05, signal_pct * 1.05)
+        return dynamic_pct / 100.0
+
+    def _resolve_signal_max_margin_loss_pct(
+        self,
+        *,
+        entry: float,
+        stop_loss: float,
+        leverage: int,
+        symbol: str,
+        side: str,
+        atr_pct: float | None,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        base_cap_pct = self._resolve_max_margin_loss_pct(
+            symbol=symbol,
+            side=side,
+            atr_pct=atr_pct,
+            btc_guard=btc_guard,
+        )
+        if entry <= 0 or stop_loss <= 0:
+            return base_cap_pct
+        signal_margin_loss_pct = (
+            (abs(float(entry) - float(stop_loss)) / float(entry))
+            * float(max(1, leverage))
+            * 100.0
+        )
+        return max(0.5, signal_margin_loss_pct * 1.05)
 
     def _resolve_symbol_max_risk_pct(self, symbol: str) -> float:
         if self._is_major_symbol(symbol):

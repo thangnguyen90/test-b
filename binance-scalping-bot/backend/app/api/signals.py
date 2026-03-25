@@ -9,13 +9,36 @@ from app.core.config import settings
 from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor
 from app.services.binance_client import BinanceFuturesClient
 from app.services.risk_manager import calc_estimated_margin_ratio_pct
+from app.services.signal_candle_pattern_service import signal_candle_pattern_service
 
 router = APIRouter(prefix="/api/v1/signals", tags=["signals"])
 market_client = BinanceFuturesClient()
 
 _SYMBOLS_CACHE: dict = {"symbols": [], "expires_at": 0.0}
-_LAST_SCAN_CACHE: dict | None = None
+_LAST_SCAN_CACHE: dict[str, dict] = {}
 _BLOCK_UNTIL_TS = 0.0
+_FALLBACK_SCAN_SYMBOLS: list[str] = [
+    'BTC/USDT:USDT',
+    'ETH/USDT:USDT',
+    'SOL/USDT:USDT',
+    'XRP/USDT:USDT',
+    'BNB/USDT:USDT',
+    'DOGE/USDT:USDT',
+    'ADA/USDT:USDT',
+    'TRX/USDT:USDT',
+    'LINK/USDT:USDT',
+    'AVAX/USDT:USDT',
+    'DOT/USDT:USDT',
+    'SUI/USDT:USDT',
+    'TON/USDT:USDT',
+    'NEAR/USDT:USDT',
+    'ATOM/USDT:USDT',
+    'LTC/USDT:USDT',
+    'BCH/USDT:USDT',
+    'APT/USDT:USDT',
+    'ARB/USDT:USDT',
+    'OP/USDT:USDT',
+]
 
 
 def get_cached_symbols_snapshot(max_symbols: int | None = None) -> list[str]:
@@ -79,32 +102,23 @@ def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int | None = None) -
     if _SYMBOLS_CACHE["symbols"] and now < float(_SYMBOLS_CACHE["expires_at"]):
         return _SYMBOLS_CACHE["symbols"][:max_symbols]
 
-    markets = market_client.load_markets()
     symbols: list[str] = []
-    for market in markets.values():
-        if not market.get("active", True):
-            continue
-        if market.get("swap") is not True:
-            continue
-        if market.get("settle") != "USDT":
-            continue
-        symbol = market.get("symbol")
-        if symbol:
-            symbols.append(symbol)
-
-    symbols = sorted(set(symbols))
     try:
-        tickers_map = market_client.fetch_tickers(symbols) if symbols else {}
+        markets = market_client.load_markets()
+        for market in markets.values():
+            if not market.get("active", True):
+                continue
+            if market.get("swap") is not True:
+                continue
+            if market.get("settle") != "USDT":
+                continue
+            symbol = market.get("symbol")
+            if symbol:
+                symbols.append(symbol)
     except Exception:
-        tickers_map = {}
-    if isinstance(tickers_map, dict) and tickers_map:
-        symbols.sort(
-            key=lambda symbol: (
-                _activity_score_from_ticker(tickers_map.get(symbol, {})),
-                symbol,
-            ),
-            reverse=True,
-        )
+        symbols = []
+
+    symbols = sorted(set(symbols)) if symbols else list(_FALLBACK_SCAN_SYMBOLS)
     _SYMBOLS_CACHE["symbols"] = symbols
     _SYMBOLS_CACHE["expires_at"] = now + ttl_sec
     return symbols[:max_symbols]
@@ -121,6 +135,8 @@ def _evaluate_paper_entry_gate(
     market_price: float,
     entry_type: str = "LIMIT",
     force_entry_type_scope: bool = False,
+    candle_pattern_sample: dict | None = None,
+    feature_snapshot: dict | None = None,
 ) -> tuple[bool, str, float, bool | None]:
     try:
         repo, engine = get_paper_trade_runtime()
@@ -271,6 +287,19 @@ def _evaluate_paper_entry_gate(
         except Exception:
             btc_following = None
 
+        if normalized_entry_type == "LIMIT":
+            try:
+                basic_pattern_reason, _, _ = engine._evaluate_basic_ml_pattern_gate(
+                    symbol=symbol,
+                    side=side,
+                    candle_pattern_sample=candle_pattern_sample,
+                    feature_snapshot=feature_snapshot,
+                )
+            except Exception:
+                return False, "Basic pattern gate unavailable", effective_probability, btc_following
+            if basic_pattern_reason:
+                return False, str(basic_pattern_reason), effective_probability, btc_following
+
         if not skip_btc_guards:
             try:
                 trend_hour_lock_reason = engine._btc_trend_hour_lock_reason(
@@ -376,6 +405,26 @@ def _evaluate_paper_entry_gate(
         return False, "Precheck unavailable", raw_win_probability, None
 
 
+def _resolve_live_btc_phase() -> str | None:
+    try:
+        _, engine = get_paper_trade_runtime()
+        if engine is None:
+            return None
+        btc_guard = engine._resolve_btc_trend_guard()
+    except Exception:
+        return None
+    trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+    shock_direction = str((btc_guard or {}).get("shock_direction") or "FLAT").upper()
+    confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
+    if trend_side in {"LONG", "SHORT"} and confidence >= 0.55:
+        if shock_direction in {"UP", "DOWN"}:
+            return f"{trend_side}_SHOCK_{shock_direction}"
+        return f"{trend_side}_TREND"
+    if shock_direction in {"UP", "DOWN"}:
+        return f"SHOCK_{shock_direction}"
+    return "NEUTRAL"
+
+
 def _build_compare_signal_payload(
     *,
     symbol: str,
@@ -408,6 +457,7 @@ def _build_scan_match(
     compare_payload: dict | None = None,
     gate_entry_type: str = "LIMIT",
     force_entry_type_scope: bool = False,
+    candle_pattern_sample: dict | None = None,
 ) -> dict:
     liq_zone_price, liq_zone_value = _estimate_liq_zone(
         last_price=last_price,
@@ -425,6 +475,8 @@ def _build_scan_match(
             market_price=float(last_price),
             entry_type=gate_entry_type,
             force_entry_type_scope=force_entry_type_scope,
+            candle_pattern_sample=candle_pattern_sample,
+            feature_snapshot=getattr(signal, "feature_snapshot", None),
         )
     except Exception:
         can_enter = False
@@ -448,6 +500,7 @@ def _build_scan_match(
         "liq_zone_value": liq_zone_value,
         "reference_win_symbol": getattr(signal, "reference_win_symbol", None),
         "reference_win_at": getattr(signal, "reference_win_at", None),
+        "candle_pattern_sample": candle_pattern_sample,
     }
     if compare_field:
         payload[compare_field] = compare_payload
@@ -464,10 +517,13 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
 
     now_ts = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
+    normalized_symbols = tuple(str(s or "").strip().upper() for s in (symbols or []) if str(s or "").strip())
+    cache_key = f"{float(min_win):.6f}|{int(max_symbols)}|{'/'.join(normalized_symbols)}"
+    cached_payload = _LAST_SCAN_CACHE.get(cache_key)
 
-    if now_ts < _BLOCK_UNTIL_TS and _LAST_SCAN_CACHE is not None:
+    if now_ts < _BLOCK_UNTIL_TS and cached_payload is not None:
         payload = {
-            **_LAST_SCAN_CACHE,
+            **cached_payload,
             "source": "cache",
             "blocked_until": datetime.fromtimestamp(_BLOCK_UNTIL_TS, tz=timezone.utc).isoformat(),
             "timestamp": now_iso,
@@ -483,15 +539,16 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
             scan_symbols = _SYMBOLS_CACHE["symbols"][:max_symbols] if _SYMBOLS_CACHE["symbols"] else []
 
     matches: list[dict] = []
+    live_btc_phase = _resolve_live_btc_phase()
 
     try:
         tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
     except Exception as exc:
         if _is_418_error(exc):
             _BLOCK_UNTIL_TS = now_ts + 180
-        if _LAST_SCAN_CACHE is not None:
+        if cached_payload is not None:
             payload = {
-                **_LAST_SCAN_CACHE,
+                **cached_payload,
                 "source": "cache",
                 "error": str(exc),
                 "timestamp": now_iso,
@@ -524,6 +581,12 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                 predictor=ml_candles_predictor,
                 target_side=signal.side,
             )
+            candle_pattern_sample = signal_candle_pattern_service.match_signal(
+                signal_source="ML",
+                side=signal.side,
+                feature_snapshot=getattr(signal, "feature_snapshot", None),
+                live_btc_phase=live_btc_phase,
+            )
             matches.append(
                 _build_scan_match(
                     signal=signal,
@@ -533,6 +596,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
                     compare_field="ml_candles",
                     compare_payload=ml_candles_payload,
                     gate_entry_type="LIMIT",
+                    candle_pattern_sample=candle_pattern_sample,
                 )
             )
 
@@ -545,7 +609,10 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
         "source": "live",
         "timestamp": now_iso,
     }
-    _LAST_SCAN_CACHE = payload
+    _LAST_SCAN_CACHE[cache_key] = payload
+    if len(_LAST_SCAN_CACHE) > 24:
+        for old_key in list(_LAST_SCAN_CACHE.keys())[:-24]:
+            _LAST_SCAN_CACHE.pop(old_key, None)
     return payload
 
 
@@ -560,6 +627,7 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
 
     matches: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
+    live_btc_phase = _resolve_live_btc_phase()
     try:
         tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
     except Exception:
@@ -590,6 +658,12 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
                 predictor=ml_predictor,
                 target_side=signal.side,
             )
+            candle_pattern_sample = signal_candle_pattern_service.match_signal(
+                signal_source="ML_CANDLES",
+                side=signal.side,
+                feature_snapshot=getattr(signal, "feature_snapshot", None),
+                live_btc_phase=live_btc_phase,
+            )
             matches.append(
                 _build_scan_match(
                     signal=signal,
@@ -600,6 +674,7 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
                     compare_payload=baseline_ml_payload,
                     gate_entry_type="ML_CANDLES_TEST",
                     force_entry_type_scope=True,
+                    candle_pattern_sample=candle_pattern_sample,
                 )
             )
 
@@ -660,6 +735,12 @@ def get_latest_signal(
         "stop_loss": result.stop_loss,
         "take_profit": result.take_profit,
         "ml_candles": ml_candles_payload,
+        "candle_pattern_sample": signal_candle_pattern_service.match_signal(
+            signal_source="ML",
+            side=result.side,
+            feature_snapshot=getattr(result, "feature_snapshot", None),
+            live_btc_phase=_resolve_live_btc_phase(),
+        ),
     }
 
 
@@ -686,6 +767,12 @@ def get_latest_candles_signal(
         "reference_win_symbol": getattr(result, "reference_win_symbol", None),
         "reference_win_at": getattr(result, "reference_win_at", None),
         "baseline_ml": baseline_ml_payload,
+        "candle_pattern_sample": signal_candle_pattern_service.match_signal(
+            signal_source="ML_CANDLES",
+            side=result.side,
+            feature_snapshot=getattr(result, "feature_snapshot", None),
+            live_btc_phase=_resolve_live_btc_phase(),
+        ),
     }
 
 
@@ -705,3 +792,20 @@ def scan_candles_signals(
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_candles_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
+
+
+@router.get("/candle-pattern-samples")
+def list_candle_pattern_samples(
+    signal_source: str | None = Query(default=None),
+    only_good: bool = Query(default=False),
+    refresh: bool = Query(default=False),
+    limit: int = Query(default=120, ge=1, le=500),
+) -> dict:
+    items = signal_candle_pattern_service.get_catalog(signal_source=signal_source, force_refresh=refresh)
+    if only_good:
+        items = [item for item in items if bool(item.get("good_pattern"))]
+    return {
+        "count": min(len(items), limit),
+        "items": items[:limit],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

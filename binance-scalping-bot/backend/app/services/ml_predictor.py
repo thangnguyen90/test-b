@@ -38,6 +38,7 @@ class SignalResult:
     take_profit: float
     reference_win_symbol: str | None = None
     reference_win_at: str | None = None
+    feature_snapshot: dict[str, float] | None = None
 
 
 class MLPredictor:
@@ -387,6 +388,7 @@ class MLPredictor:
         side = "LONG" if random() > 0.5 else "SHORT"
         entry_price = mark_price
         atr = max(mark_price * 0.002, 0.001)
+        feature_snapshot: dict[str, float] | None = None
 
         if self.model is not None:
             try:
@@ -410,13 +412,14 @@ class MLPredictor:
                         win_prob = short_prob
                     entry_price = float(row.get("close_m5", mark_price))
                     atr = float(row.get("atr14_m5", atr))
-                    return self._to_signal(symbol, side, win_prob, entry_price, atr)
+                    feature_snapshot = self._build_feature_snapshot(row=row, side=side)
+                    return self._to_signal(symbol, side, win_prob, entry_price, atr, feature_snapshot=feature_snapshot)
             except Exception:
                 pass
 
         # Fallback when no model or no data is available.
         win_prob = round(0.45 + random() * 0.25, 4)
-        return self._to_signal(symbol, side, win_prob, entry_price, atr)
+        return self._to_signal(symbol, side, win_prob, entry_price, atr, feature_snapshot=feature_snapshot)
 
     @staticmethod
     def _count_side_samples(features: pd.DataFrame) -> tuple[int, int]:
@@ -460,7 +463,34 @@ class MLPredictor:
         re_weights = sample_weights.loc[final_idx].reset_index(drop=True)
         return re_features, re_labels, re_weights, True
 
-    def _to_signal(self, symbol: str, side: str, win_prob: float, entry: float, atr: float) -> SignalResult:
+    @staticmethod
+    def _build_feature_snapshot(row: pd.Series | None, side: str) -> dict[str, float] | None:
+        if row is None:
+            return None
+        payload: dict[str, float] = {}
+        for key, value in row.to_dict().items():
+            try:
+                parsed = float(value)
+            except Exception:
+                continue
+            if not np.isfinite(parsed):
+                continue
+            payload[str(key)] = parsed
+        if side == "LONG":
+            payload["setup_side"] = 1.0
+        elif side == "SHORT":
+            payload["setup_side"] = 0.0
+        return payload or None
+
+    def _to_signal(
+        self,
+        symbol: str,
+        side: str,
+        win_prob: float,
+        entry: float,
+        atr: float,
+        feature_snapshot: dict[str, float] | None = None,
+    ) -> SignalResult:
         rr = 1.5
         max_tp_distance = entry * (max(0.0, settings.paper_trade_max_tp_pct) / 100.0)
         base_tp_distance = atr * rr
@@ -483,6 +513,7 @@ class MLPredictor:
             predicted_entry_price=round(float(entry), 6),
             stop_loss=round(float(stop_loss), 6),
             take_profit=round(float(take_profit), 6),
+            feature_snapshot=feature_snapshot,
         )
 
     def _load_feedback_rows(self, limit: int) -> list[dict]:

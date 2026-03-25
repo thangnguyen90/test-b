@@ -109,6 +109,34 @@ type EmaLine = {
   points: Array<number | null>
 }
 
+type CandlePatternSample = {
+  sample_key: string
+  sample_code: string
+  signal_source: string
+  source_scope: string
+  side: 'LONG' | 'SHORT'
+  market_phase: string
+  btc_alignment: string
+  setup_kind: string
+  volatility_kind: string
+  quality_tier: string
+  good_pattern: boolean
+  total_signals: number
+  wins: number
+  losses: number
+  win_rate_pct: number
+  avg_pnl_pct?: number | null
+  avg_mae_pct?: number | null
+  avg_mfe_pct?: number | null
+  sample_notes?: string | null
+  example_symbols?: string[]
+  match_strength?: string | null
+  live_market_phase?: string | null
+  live_setup_kind?: string | null
+  live_volatility_kind?: string | null
+  live_btc_phase?: string | null
+}
+
 type ScanSignalItem = {
   symbol: string
   side: 'LONG' | 'SHORT'
@@ -124,6 +152,7 @@ type ScanSignalItem = {
   btc_following?: boolean | null
   reference_win_symbol?: string | null
   reference_win_at?: string | null
+  candle_pattern_sample?: CandlePatternSample | null
   liq_zone_price?: number
   liq_zone_value?: number
   ml_candles?: {
@@ -160,6 +189,7 @@ type PaperTrade = {
   symbol: string
   side: 'LONG' | 'SHORT'
   btc_following?: boolean | null
+  candle_pattern_sample?: CandlePatternSample | null
   entry_type?: 'LIMIT' | 'MARKET' | string
   signal_win_probability: number
   effective_win_probability: number
@@ -409,6 +439,14 @@ type OpenSortKey =
   | 'stop_loss'
   | 'signal_win_probability'
   | 'effective_win_probability'
+
+type MlCandlesOpenSortKey =
+  | OpenSortKey
+  | 'pattern'
+  | 'btc_following'
+  | 'reference_win'
+  | 'sl_pct'
+
 type HistorySortKey =
   | 'id'
   | 'symbol'
@@ -459,7 +497,7 @@ const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const ML_CANDLES_DISPLAY_MIN_WIN = 0.7
 const ML_CANDLES_ENTRY_MIN_WIN = 0.75
-const ML_CANDLES_SCAN_MAX_SYMBOLS = 50
+const ML_CANDLES_SCAN_MAX_SYMBOLS = 400
 const AUTO_LIQ_MAX_ORDERS_PER_CYCLE = 3
 const PAPER_REPO_MAIN = 'main' as const
 const PAPER_REPO_CANDLES = 'candles' as const
@@ -477,6 +515,7 @@ const ML_STATUS_POLL_MS = 15 * 1000
 const HIGH_WIN_SIGNAL_POLL_MS = 20 * 1000
 const ML_CANDLES_SIGNAL_POLL_MS = 20 * 1000
 const HIGH_WIN_WS_MAX_HIGH_WIN_SYMBOLS = 80
+const HIGH_WIN_SCAN_MAX_SYMBOLS = 80
 const HIGH_WIN_WS_MAX_ML_CANDLES_SYMBOLS = 40
 const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
@@ -673,6 +712,29 @@ function formatSignalSource(source?: string | null): string {
   return normalized
 }
 
+function renderCandlePatternSample(sample?: CandlePatternSample | null) {
+  if (!sample) return '-'
+  const avgPnlText = typeof sample.avg_pnl_pct === 'number'
+    ? `${sample.avg_pnl_pct >= 0 ? '+' : ''}${sample.avg_pnl_pct.toFixed(2)}%`
+    : null
+  return (
+    <div className="signal-model-stack">
+      <span className={`badge ${sample.good_pattern ? 'success' : 'neutral'}`}>
+        {sample.sample_code} {sample.quality_tier}
+      </span>
+      <span className="signal-model-meta">{sample.market_phase}</span>
+      <span className="signal-model-meta">{sample.setup_kind} / {sample.volatility_kind}</span>
+      <span className="signal-model-meta">
+        {sample.wins}/{sample.total_signals} | {sample.win_rate_pct.toFixed(1)}%
+        {avgPnlText ? ` | ${avgPnlText}` : ''}
+      </span>
+      {sample.live_btc_phase ? (
+        <span className="signal-model-meta">BTC: {sample.live_btc_phase}</span>
+      ) : null}
+    </div>
+  )
+}
+
 function tradeModelSource(entryType?: string | null): 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST' {
   const normalized = (entryType ?? '').trim().toUpperCase()
   if (normalized === 'ML_CANDLES_TEST' || normalized === 'ML_CANDLES_BG') return 'ML_CANDLES_TEST'
@@ -690,6 +752,11 @@ function tradeMlCandlesVariant(entryType?: string | null): MlCandlesVariant | nu
 
 function tradeMlCandlesCompareLabel(entryType?: string | null): MlCandlesCompareTarget {
   return tradeMlCandlesVariant(entryType) ?? 'ML'
+}
+
+function isMlCandlesCompareOpenTrade(entryType?: string | null): boolean {
+  const normalized = (entryType ?? '').trim().toUpperCase()
+  return normalized === 'LIMIT' || tradeMlCandlesVariant(normalized) != null
 }
 
 function tradeModelBadge(source: 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
@@ -1185,6 +1252,7 @@ function App() {
   const [mlCompareDate, setMlCompareDate] = useState<string>(currentVnDateString)
   const [mlComparePage, setMlComparePage] = useState(1)
   const [mlComparePageSize, setMlComparePageSize] = useState(20)
+  const [mlCandlesOpenModelFilter, setMlCandlesOpenModelFilter] = useState<MlCompareModelFilter>('ALL')
   const [mlCompareModelFilter, setMlCompareModelFilter] = useState<MlCompareModelFilter>('ALL')
   const [historyPage, setHistoryPage] = useState(1)
   const [historyPageSize, setHistoryPageSize] = useState(30)
@@ -1229,6 +1297,10 @@ function App() {
     direction: 'desc',
   })
   const [openSort, setOpenSort] = useState<{ key: OpenSortKey; direction: SortDirection }>({
+    key: 'id',
+    direction: 'desc',
+  })
+  const [mlCandlesOpenSort, setMlCandlesOpenSort] = useState<{ key: MlCandlesOpenSortKey; direction: SortDirection }>({
     key: 'id',
     direction: 'desc',
   })
@@ -1641,10 +1713,102 @@ function App() {
     ],
     [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices, mlCompareDate],
   )
-  const mlCandlesOpenTrades = useMemo(
-    () => mlCandlesOpenTradesDb.filter((row) => tradeMlCandlesVariant(row.entry_type) != null),
-    [mlCandlesOpenTradesDb],
-  )
+  const mlCandlesOpenTrades = useMemo(() => {
+    const rows = [
+      ...paperOpenTrades.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === 'ML'),
+      ...mlCandlesOpenTradesDb.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) !== 'ML'),
+    ].filter((row) => isMlCandlesCompareOpenTrade(row.entry_type))
+    const deduped = new Map<string, PaperTrade>()
+    for (const row of rows) {
+      const key = `${row.id}:${(row.entry_type ?? '').trim().toUpperCase()}`
+      if (!deduped.has(key)) deduped.set(key, row)
+    }
+    return Array.from(deduped.values())
+  }, [paperOpenTrades, mlCandlesOpenTradesDb])
+  const filteredMlCandlesOpenTrades = useMemo(() => {
+    if (mlCandlesOpenModelFilter === 'ALL') return mlCandlesOpenTrades
+    return mlCandlesOpenTrades.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCandlesOpenModelFilter)
+  }, [mlCandlesOpenTrades, mlCandlesOpenModelFilter])
+  const sortedMlCandlesOpenTrades = useMemo(() => {
+    const rows = [...filteredMlCandlesOpenTrades]
+    const { key, direction } = mlCandlesOpenSort
+
+    const valueOf = (row: PaperTrade): string | number => {
+      const mark = resolveLivePrice(row.symbol)
+      const marginUsdt = typeof row.margin_usdt === 'number'
+        ? row.margin_usdt
+        : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+      const upnlPct = calcUnrealizedPnlPct(row, mark)
+      const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
+        ? (marginUsdt * upnlPct / 100)
+        : null
+      const modelLabel = tradeMlCandlesCompareLabel(row.entry_type)
+      const pattern = row.candle_pattern_sample
+      const patternLabel = pattern
+        ? `${pattern.sample_code}|${pattern.market_phase}|${pattern.setup_kind}|${pattern.quality_tier}`
+        : ''
+
+      switch (key) {
+        case 'id':
+          return row.id
+        case 'symbol':
+          return row.symbol
+        case 'pattern':
+          return patternLabel
+        case 'btc_following':
+          return typeof row.btc_following === 'boolean' ? (row.btc_following ? 1 : 0) : -1
+        case 'upnl_usdt':
+          return upnlUsdt ?? Number.NEGATIVE_INFINITY
+        case 'upnl_pct':
+          return upnlPct ?? Number.NEGATIVE_INFINITY
+        case 'mae_pct':
+          return row.mae_pct ?? Number.NEGATIVE_INFINITY
+        case 'mfe_pct':
+          return row.mfe_pct ?? Number.NEGATIVE_INFINITY
+        case 'entry_type':
+          return row.entry_type ?? ''
+        case 'model':
+          return modelLabel
+        case 'reference_win':
+          return row.reference_win_symbol ?? ''
+        case 'side':
+          return row.side
+        case 'margin_usdt':
+          return marginUsdt ?? Number.NEGATIVE_INFINITY
+        case 'take_profit':
+          return row.take_profit
+        case 'tp_pct':
+          return calcTargetPnlPct(row.side, row.entry_price, row.take_profit, row.leverage) ?? Number.NEGATIVE_INFINITY
+        case 'stop_loss':
+          return row.stop_loss
+        case 'sl_pct':
+          return calcTargetPnlPct(row.side, row.entry_price, row.stop_loss, row.leverage) ?? Number.NEGATIVE_INFINITY
+        case 'entry_price':
+          return row.entry_price
+        case 'mark_price':
+          return mark ?? Number.NEGATIVE_INFINITY
+        case 'signal_win_probability':
+          return row.signal_win_probability
+        case 'effective_win_probability':
+          return row.effective_win_probability
+        default:
+          return Number.NEGATIVE_INFINITY
+      }
+    }
+
+    rows.sort((a, b) => {
+      const av = valueOf(a)
+      const bv = valueOf(b)
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return direction === 'asc' ? av - bv : bv - av
+      }
+      return direction === 'asc'
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av))
+    })
+
+    return rows
+  }, [filteredMlCandlesOpenTrades, mlCandlesOpenSort, paperLivePrices, paperLivePriceTime])
   const recentMlCompareHistory = useMemo(
     () => mlCompareHistory
       .filter((row) => {
@@ -1660,6 +1824,19 @@ function App() {
       }),
     [mlCompareHistory],
   )
+  const mlCandlesOpenFilterCounts = useMemo(() => {
+    const counts: Record<MlCompareModelFilter, number> = {
+      ALL: mlCandlesOpenTrades.length,
+      ML: 0,
+      ML_CANDLES_BG: 0,
+      ML_CANDLES_TEST: 0,
+    }
+    for (const row of mlCandlesOpenTrades) {
+      const model = tradeMlCandlesCompareLabel(row.entry_type)
+      counts[model] += 1
+    }
+    return counts
+  }, [mlCandlesOpenTrades])
   const mlCompareFilterCounts = useMemo(() => {
     const counts: Record<MlCompareModelFilter, number> = {
       ALL: recentMlCompareHistory.length,
@@ -1741,6 +1918,15 @@ function App() {
 
   function toggleOpenSort(key: OpenSortKey) {
     setOpenSort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+      }
+      return { key, direction: 'desc' }
+    })
+  }
+
+  function toggleMlCandlesOpenSort(key: MlCandlesOpenSortKey) {
+    setMlCandlesOpenSort((prev) => {
       if (prev.key === key) {
         return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
       }
@@ -1988,7 +2174,7 @@ function App() {
 
   async function fetchHighWinSignals() {
     const response = await fetchResponseWithTimeout(
-      `${API_BASE}/api/v1/signals/scan?min_win=0.7`,
+      `${API_BASE}/api/v1/signals/scan?min_win=0.7&max_symbols=${HIGH_WIN_SCAN_MAX_SYMBOLS}`,
       API_HEAVY_TIMEOUT_MS,
     )
     if (!response.ok) throw new Error('Cannot scan high-win signals')
@@ -3111,7 +3297,7 @@ function App() {
   }, [selectedCoin, isOverlayScreenOpen])
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${isOverlayScreenOpen ? 'app-shell-wide' : ''}`}>
       <div className="trade-toast-stack">
         {tradeToasts.map((toast) => (
           <div key={toast.id} className={`trade-toast ${toast.closeReason === 'TP' ? 'trade-toast-tp' : 'trade-toast-sl'}`}>
@@ -3502,6 +3688,7 @@ function App() {
                       <tr key={`${row.id}-${row.status}`}>
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
                         <td>
                           {typeof row.btc_following === 'boolean' ? (
                             <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -3670,35 +3857,71 @@ function App() {
           </div>
 
           <h3 className="section-title">Open ML Candles Test Trades</h3>
+          <div className="history-header">
+            <div className="scan-actions">
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesOpenModelFilter === 'ALL' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesOpenModelFilter('ALL')}
+              >
+                ALL ({mlCandlesOpenFilterCounts.ALL})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesOpenModelFilter === 'ML' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesOpenModelFilter('ML')}
+              >
+                ML ({mlCandlesOpenFilterCounts.ML})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesOpenModelFilter === 'ML_CANDLES_BG' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesOpenModelFilter('ML_CANDLES_BG')}
+              >
+                CANDLES_BG ({mlCandlesOpenFilterCounts.ML_CANDLES_BG})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesOpenModelFilter === 'ML_CANDLES_TEST' ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesOpenModelFilter('ML_CANDLES_TEST')}
+              >
+                CANDLES_TEST ({mlCandlesOpenFilterCounts.ML_CANDLES_TEST})
+              </button>
+            </div>
+            <div className="scan-actions">
+              <span className="badge neutral">Rows: {filteredMlCandlesOpenTrades.length}</span>
+            </div>
+          </div>
           <div className="content table-wrap">
-            {mlCandlesOpenTrades.length === 0 ? (
+            {filteredMlCandlesOpenTrades.length === 0 ? (
               <p>No open ML Candles test trade.</p>
             ) : (
               <table>
                 <thead>
                   <tr>
-                    <th>ID</th>
-                    <th>Symbol</th>
-                    <th>BTC Follow</th>
-                    <th>uPnL (USDT)</th>
-                    <th>uPnL% (Margin)</th>
-                    <th>MAE%</th>
-                    <th>MFE%</th>
-                    <th>Type</th>
-                    <th>Model</th>
-                    <th>Ref Win</th>
-                    <th>Side</th>
-                    <th>Margin</th>
-                    <th>TP</th>
-                    <th>TP%</th>
-                    <th>SL</th>
-                    <th>SL%</th>
-                    <th>Entry</th>
-                    <th>Mark</th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('id')}>ID</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('symbol')}>Symbol</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('pattern')}>Pattern</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('btc_following')}>BTC Follow</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('mae_pct')}>MAE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('mfe_pct')}>MFE%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('entry_type')}>Type</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('model')}>Model</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('reference_win')}>Ref Win</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('side')}>Side</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('margin_usdt')}>Margin</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('take_profit')}>TP</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('tp_pct')}>TP%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('stop_loss')}>SL</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('sl_pct')}>SL%</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('entry_price')}>Entry</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('mark_price')}>Mark</button></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {mlCandlesOpenTrades.map((row) => {
+                  {sortedMlCandlesOpenTrades.map((row) => {
                     const modelLabel = tradeMlCandlesCompareLabel(row.entry_type)
                     const mark = resolveLivePrice(row.symbol)
                     const upnlPct = calcUnrealizedPnlPct(row, mark)
@@ -3717,6 +3940,7 @@ function App() {
                       <tr key={`ml-candles-open-${row.id}`} className={rowClassName}>
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
                         <td>
                           {typeof row.btc_following === 'boolean' ? (
                             <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -3882,6 +4106,7 @@ function App() {
                     <th>ID</th>
                     <th>Model</th>
                     <th>Symbol</th>
+                    <th>Pattern</th>
                     <th>Side</th>
                     <th>Ref Win</th>
                     <th>Entry</th>
@@ -3907,6 +4132,7 @@ function App() {
                         <td>{row.id}</td>
                         <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                         <td>
                           {row.reference_win_symbol ? (
@@ -3965,6 +4191,7 @@ function App() {
                     <th>Symbol</th>
                     <th>ML Candles</th>
                     <th>Base ML</th>
+                    <th>Pattern</th>
                     <th>Mark</th>
                     <th>Can Enter</th>
                     <th>Blocked</th>
@@ -4012,6 +4239,7 @@ function App() {
                             </div>
                           ) : '-'}
                         </td>
+                        <td>{renderCandlePatternSample(item.candle_pattern_sample)}</td>
                         <td>{typeof mark === 'number' ? mark : '-'}</td>
                         <td>
                           <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
@@ -4478,13 +4706,14 @@ function App() {
         </header>
         <div className="content table-wrap">
           {sortedHighWinSignals.length === 0 ? (
-            <p>No coin currently above 70% win probability.</p>
+            <p>No coin above 70% win probability in the top {scannedCount || HIGH_WIN_SCAN_MAX_SYMBOLS} active symbols.</p>
           ) : (
             <table>
               <thead>
                 <tr>
                   <th>Symbol</th>
                   <th>ML Candles</th>
+                  <th>Pattern</th>
                   <th>Side</th>
                   <th>Source</th>
                   <th>Win%</th>
@@ -4532,6 +4761,7 @@ function App() {
                         </div>
                       ) : '-'}
                     </td>
+                    <td>{renderCandlePatternSample(item.candle_pattern_sample)}</td>
                     <td>{item.side}</td>
                     <td>
                       <span className="badge neutral">{formatSignalSource(item.signal_source)}</span>

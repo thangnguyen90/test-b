@@ -35,6 +35,7 @@ class PaperTrade(BaseModel):
     mfe_pct: Optional[float] = None
     margin_usdt: Optional[float] = None
     result: Optional[int] = None
+    candle_pattern_sample: Optional[dict] = None
 
 
 class PaperTradeStats(BaseModel):
