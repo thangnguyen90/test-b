@@ -79,6 +79,7 @@ async def on_startup() -> None:
             paper_trade_api.bind_candle_repo(paper_trade_candle_repo)
             paper_trade_engine = PaperTradingEngine(
                 repo=paper_trade_repo,
+                candle_repo=paper_trade_candle_repo,
                 predictor=ml_predictor,
                 predictor_test=ml_test_predictor,
                 predictor_candles=ml_candles_predictor,
@@ -153,6 +154,14 @@ async def on_startup() -> None:
                 btc_reversal_loss_exit_enabled=settings.paper_trade_btc_reversal_loss_exit_enabled,
                 btc_reversal_loss_exit_days_vn=settings.paper_trade_btc_reversal_loss_exit_days_vn,
                 btc_reversal_loss_exit_min_loss_pct=settings.paper_trade_btc_reversal_loss_exit_min_loss_pct,
+                btc_short_rebound_ema99_block_enabled=settings.paper_trade_btc_short_rebound_ema99_block_enabled,
+                btc_long_pullback_ema99_block_enabled=settings.paper_trade_btc_long_pullback_ema99_block_enabled,
+                btc_long_top_fade_block_enabled=settings.paper_trade_btc_long_top_fade_block_enabled,
+                btc_short_rebound_ema99_tolerance_pct=settings.paper_trade_btc_short_rebound_ema99_tolerance_pct,
+                btc_short_rebound_ema99_rebound_pct=settings.paper_trade_btc_short_rebound_ema99_rebound_pct,
+                btc_long_top_fade_pullback_pct=settings.paper_trade_btc_long_top_fade_pullback_pct,
+                btc_short_rebound_ema99_green_candle_pct=settings.paper_trade_btc_short_rebound_ema99_green_candle_pct,
+                btc_short_rebound_ema99_lookback_candles=settings.paper_trade_btc_short_rebound_ema99_lookback_candles,
                 btc_profit_lock_enabled=settings.paper_trade_btc_profit_lock_enabled,
                 btc_profit_lock_min_confidence=settings.paper_trade_btc_profit_lock_min_confidence,
                 btc_follow_min_corr=settings.paper_trade_btc_follow_min_corr,
@@ -182,6 +191,13 @@ async def on_startup() -> None:
                 instant_sl_guard_short_top_test_tolerance_pct=settings.paper_trade_instant_sl_guard_short_top_test_tolerance_pct,
                 instant_sl_guard_short_rejection_min_upper_wick_ratio=settings.paper_trade_instant_sl_guard_short_rejection_min_upper_wick_ratio,
                 instant_sl_guard_short_rejection_min_wick_body_ratio=settings.paper_trade_instant_sl_guard_short_rejection_min_wick_body_ratio,
+                entry_long_pump_red_block_enabled=settings.paper_trade_entry_long_pump_red_block_enabled,
+                entry_long_pump_red_lookback_candles=settings.paper_trade_entry_long_pump_red_lookback_candles,
+                entry_long_pump_red_top_tolerance_pct=settings.paper_trade_entry_long_pump_red_top_tolerance_pct,
+                entry_long_pump_red_pump_min_body_pct=settings.paper_trade_entry_long_pump_red_pump_min_body_pct,
+                entry_long_pump_red_confirm_min_body_pct=settings.paper_trade_entry_long_pump_red_confirm_min_body_pct,
+                entry_short_inside_bar_breakdown_confirm_enabled=settings.paper_trade_entry_short_inside_bar_breakdown_confirm_enabled,
+                entry_long_inside_bar_breakout_confirm_enabled=settings.paper_trade_entry_long_inside_bar_breakout_confirm_enabled,
                 instant_sl_guard_short_top_test_cache_sec=settings.paper_trade_instant_sl_guard_short_top_test_cache_sec,
                 instant_sl_global_guard_enabled=settings.paper_trade_instant_sl_global_guard_enabled,
                 instant_sl_global_threshold=settings.paper_trade_instant_sl_global_threshold,
@@ -208,6 +224,11 @@ async def on_startup() -> None:
                 short_sl_streak_threshold=settings.paper_trade_short_sl_streak_threshold,
                 short_sl_streak_cooldown_minutes=settings.paper_trade_short_sl_streak_cooldown_minutes,
                 short_sl_streak_refresh_sec=settings.paper_trade_short_sl_streak_refresh_sec,
+                open_pressure_close_enabled=settings.paper_trade_open_pressure_close_enabled,
+                open_pressure_close_window_minutes=settings.paper_trade_open_pressure_close_window_minutes,
+                open_pressure_close_min_opens=settings.paper_trade_open_pressure_close_min_opens,
+                open_pressure_close_min_lead=settings.paper_trade_open_pressure_close_min_lead,
+                open_pressure_close_min_net_pnl_usdt=settings.paper_trade_open_pressure_close_min_net_pnl_usdt,
             )
             paper_trade_api.bind_major_symbol_resolver(paper_trade_engine.is_major_symbol)
             paper_trade_api.bind_btc_follow_resolver(paper_trade_engine.is_symbol_following_btc)

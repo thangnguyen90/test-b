@@ -126,6 +126,8 @@ type ScanSignalItem = {
   reference_win_at?: string | null
   liq_zone_price?: number
   liq_zone_value?: number
+  candle_pattern?: string | null
+  btc_trend?: 'LONG' | 'SHORT' | 'NEUTRAL' | string | null
   ml_candles?: {
     side: 'LONG' | 'SHORT'
     win_probability: number
@@ -186,6 +188,10 @@ type PaperTrade = {
   mfe_pct?: number | null
   margin_usdt?: number | null
   result?: number | null
+  current_candle_pattern?: string | null
+  current_btc_trend?: 'LONG' | 'SHORT' | 'NEUTRAL' | string | null
+  close_candle_pattern?: string | null
+  btc_trend_at_close?: 'LONG' | 'SHORT' | 'NEUTRAL' | string | null
 }
 
 type PaperTradeStats = {
@@ -228,6 +234,33 @@ type PaperTradeHistoryResponse = {
   page?: number
   page_size?: number
   total_pages?: number
+}
+
+type ClosedPatternStatsItem = {
+  candle_pattern: string
+  btc_trend: 'LONG' | 'SHORT' | 'NEUTRAL' | string
+  total_trades: number
+  wins: number
+  losses: number
+  win_rate_pct: number
+  loss_rate_pct: number
+  net_pnl: number
+  avg_pnl: number
+}
+
+type ClosedPatternStatsResponse = {
+  repo_scope: string
+  lookback: number
+  closed_trades: number
+  unknown_trades?: number
+  items: ClosedPatternStatsItem[]
+}
+
+type ClosedPatternBackfillResponse = {
+  repo_scope: string
+  batch_size: number
+  processed: number
+  updated: number
 }
 
 type DailyTradeSummary = {
@@ -388,6 +421,7 @@ type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 type MlCandlesScreenView = 'signals' | 'compare'
+type AppScreenView = 'main' | 'paper' | 'daily' | 'ml-candles-signals' | 'ml-candles-compare'
 
 type CompareBucket = {
   label: string
@@ -475,6 +509,18 @@ const PAPER_REPO_CANDLES = 'candles' as const
 const AUTO_LIQ_OPEN_COOLDOWN_MS = 30 * 60 * 1000
 const AUTO_ML_CANDLES_OPEN_COOLDOWN_MS = 30 * 1000
 const BACKEND_HEALTH_STALE_MS = 15 * 1000
+
+function resolveInitialScreenView(): AppScreenView {
+  if (typeof window === 'undefined') return 'main'
+  const params = new URLSearchParams(window.location.search)
+  const raw = (params.get('view') || '').trim().toLowerCase()
+  if (raw === 'paper') return 'paper'
+  if (raw === 'daily') return 'daily'
+  if (raw === 'ml-candles-signals') return 'ml-candles-signals'
+  if (raw === 'ml-candles-compare') return 'ml-candles-compare'
+  return 'main'
+}
+
 const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
@@ -786,6 +832,10 @@ function highWinSignalKey(symbol: string, side: 'LONG' | 'SHORT'): string {
   return `${canonicalSymbol(symbol)}:${side}`
 }
 
+function normalizePatternLabel(value?: string | null): string {
+  return String(value ?? '').trim().toUpperCase()
+}
+
 function calcTargetPnlPct(
   side: 'LONG' | 'SHORT',
   entryPrice: number,
@@ -1070,6 +1120,7 @@ function LiquidationMapCanvas({
 }
 
 function App() {
+  const initialScreenView = resolveInitialScreenView()
   const mapSectionRef = useRef<HTMLElement | null>(null)
   const selectedCoinRef = useRef<string>('BTC/USDT')
   const symbolReqIdRef = useRef(0)
@@ -1114,6 +1165,12 @@ function App() {
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
+  const [closedPatternStats, setClosedPatternStats] = useState<ClosedPatternStatsItem[]>([])
+  const [closedPatternStatsLookback, setClosedPatternStatsLookback] = useState(0)
+  const [closedPatternStatsCount, setClosedPatternStatsCount] = useState(0)
+  const [closedPatternUnknownCount, setClosedPatternUnknownCount] = useState(0)
+  const [closedPatternStatsTargetLookback, setClosedPatternStatsTargetLookback] = useState(1000)
+  const [isBackfillingPatternStats, setIsBackfillingPatternStats] = useState(false)
   const [mlCandlesStats, setMlCandlesStats] = useState<PaperTradeStats | null>(null)
   const [mlCandlesOpenTradesDb, setMlCandlesOpenTradesDb] = useState<PaperTrade[]>([])
   const [mlCandlesSignals, setMlCandlesSignals] = useState<ScanSignalItem[]>([])
@@ -1338,6 +1395,48 @@ function App() {
     })
     return rows
   }, [mlCandlesSignals])
+  const closedPatternStatsExactMap = useMemo(() => {
+    const out = new Map<string, ClosedPatternStatsItem>()
+    for (const item of closedPatternStats) {
+      const pattern = normalizePatternLabel(item.candle_pattern)
+      const btcTrend = normalizePatternLabel(item.btc_trend)
+      if (!pattern || !btcTrend) continue
+      out.set(`${pattern}|${btcTrend}`, item)
+    }
+    return out
+  }, [closedPatternStats])
+  const closedPatternStatsByPatternMap = useMemo(() => {
+    const grouped = new Map<string, ClosedPatternStatsItem>()
+    for (const item of closedPatternStats) {
+      const pattern = normalizePatternLabel(item.candle_pattern)
+      if (!pattern) continue
+      const prev = grouped.get(pattern)
+      if (!prev) {
+        grouped.set(pattern, { ...item, candle_pattern: pattern, btc_trend: 'ALL' })
+        continue
+      }
+      const totalTrades = prev.total_trades + item.total_trades
+      const wins = prev.wins + item.wins
+      const losses = prev.losses + item.losses
+      const netPnl = prev.net_pnl + item.net_pnl
+      grouped.set(pattern, {
+        ...prev,
+        btc_trend: 'ALL',
+        total_trades: totalTrades,
+        wins,
+        losses,
+        win_rate_pct: totalTrades > 0 ? (wins / totalTrades) * 100 : 0,
+        loss_rate_pct: totalTrades > 0 ? (losses / totalTrades) * 100 : 0,
+        net_pnl: netPnl,
+        avg_pnl: totalTrades > 0 ? netPnl / totalTrades : 0,
+      })
+    }
+    return grouped
+  }, [closedPatternStats])
+  const visibleClosedPatternStats = useMemo(
+    () => closedPatternStats.slice(0, 18),
+    [closedPatternStats],
+  )
   const highWinWsSymbols = useMemo(() => {
     const set = new Set<string>()
     for (const row of highWinSignals) {
@@ -1649,6 +1748,35 @@ function App() {
     if (mlCompareModelFilter === 'ALL') return recentMlCompareHistory
     return recentMlCompareHistory.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCompareModelFilter)
   }, [recentMlCompareHistory, mlCompareModelFilter])
+  const bestMlComparePatternRow = useMemo(() => {
+    let best: {
+      pattern: string
+      btcTrend: string
+      stat: ClosedPatternStatsItem
+    } | null = null
+    for (const row of filteredMlCompareHistory) {
+      const pattern = normalizePatternLabel(row.close_candle_pattern)
+      const btcTrend = normalizePatternLabel(row.btc_trend_at_close)
+      const stat = resolveClosedPatternStat(pattern, btcTrend)
+      if (!stat) continue
+      if (
+        best == null
+        || stat.win_rate_pct > best.stat.win_rate_pct
+        || (
+          stat.win_rate_pct === best.stat.win_rate_pct
+          && stat.total_trades > best.stat.total_trades
+        )
+        || (
+          stat.win_rate_pct === best.stat.win_rate_pct
+          && stat.total_trades === best.stat.total_trades
+          && stat.net_pnl > best.stat.net_pnl
+        )
+      ) {
+        best = { pattern, btcTrend, stat }
+      }
+    }
+    return best
+  }, [filteredMlCompareHistory, closedPatternStatsExactMap, closedPatternStatsByPatternMap])
   const mlCompareMaxPage = useMemo(
     () => Math.max(1, Math.ceil(filteredMlCompareHistory.length / mlComparePageSize)),
     [filteredMlCompareHistory.length, mlComparePageSize],
@@ -1679,6 +1807,41 @@ function App() {
     () => Math.max(1, Math.ceil((historyTotalItems || 0) / historyPageSize)),
     [historyTotalItems, historyPageSize],
   )
+
+  function resolveClosedPatternStat(
+    pattern?: string | null,
+    btcTrend?: string | null,
+  ): ClosedPatternStatsItem | null {
+    const safePattern = normalizePatternLabel(pattern)
+    if (!safePattern) return null
+    const safeTrend = normalizePatternLabel(btcTrend)
+    if (safeTrend) {
+      const exact = closedPatternStatsExactMap.get(`${safePattern}|${safeTrend}`)
+      if (exact) return exact
+    }
+    return closedPatternStatsByPatternMap.get(safePattern) ?? null
+  }
+
+  function renderSignalPatternSummary(
+    pattern?: string | null,
+    btcTrend?: string | null,
+  ) {
+    const stat = resolveClosedPatternStat(pattern, btcTrend)
+    const hasPattern = Boolean(normalizePatternLabel(pattern))
+    const hasTrend = Boolean(normalizePatternLabel(btcTrend))
+    if (!hasPattern && !hasTrend && !stat) return '-'
+    return (
+      <div className="signal-model-stack">
+        {hasPattern ? <span className="signal-model-meta">{pattern}</span> : null}
+        {hasTrend ? <span className="signal-model-meta">BTC {btcTrend}</span> : null}
+        {stat ? (
+          <span className="signal-model-meta">
+            DB {stat.wins}/{stat.losses} | {stat.win_rate_pct.toFixed(1)}%
+          </span>
+        ) : null}
+      </div>
+    )
+  }
 
   useEffect(() => {
     setMlComparePage((prev) => Math.min(prev, mlCompareMaxPage))
@@ -1984,7 +2147,7 @@ function App() {
     const [statsRes, openRes, historyRes] = await Promise.all([
       fetch(`${API_BASE}/api/v1/paper-trades/stats`),
       fetch(`${API_BASE}/api/v1/paper-trades/open`),
-      fetch(`${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}`),
+      fetch(`${API_BASE}/api/v1/paper-trades/history?page=${targetPage}&page_size=${targetPageSize}&include_patterns=true`),
     ])
     const errors: string[] = []
 
@@ -2022,6 +2185,52 @@ function App() {
       throw new Error(`Paper trading partial failure (${errors.join(', ')})`)
     }
     markBackendAlive()
+  }
+
+  async function fetchClosedPatternStats(targetLookback = closedPatternStatsTargetLookback) {
+    const response = await fetch(
+      `${API_BASE}/api/v1/paper-trades/pattern-stats?repo_scope=all&lookback=${targetLookback}&include_unknown=false`,
+    )
+    if (!response.ok) throw new Error('Closed pattern stats API unavailable')
+    const payload = (await response.json()) as ClosedPatternStatsResponse
+    markBackendAlive()
+    setClosedPatternStats(payload.items ?? [])
+    setClosedPatternStatsLookback(payload.lookback ?? 0)
+    setClosedPatternStatsCount(payload.closed_trades ?? 0)
+    setClosedPatternUnknownCount(payload.unknown_trades ?? 0)
+  }
+
+  async function backfillClosedPatternStats(batchSize = 500) {
+    setIsBackfillingPatternStats(true)
+    try {
+      let totalProcessed = 0
+      let totalUpdated = 0
+      for (let i = 0; i < 8; i += 1) {
+        const response = await fetch(
+          `${API_BASE}/api/v1/paper-trades/pattern-stats/backfill?repo_scope=all&batch_size=${batchSize}`,
+          { method: 'POST' },
+        )
+        if (!response.ok) {
+          const text = await response.text()
+          throw new Error(`Pattern backfill failed: ${text}`)
+        }
+        const payload = (await response.json()) as ClosedPatternBackfillResponse
+        markBackendAlive()
+        totalProcessed += payload.processed ?? 0
+        totalUpdated += payload.updated ?? 0
+        if ((payload.processed ?? 0) < batchSize || (payload.updated ?? 0) <= 0) {
+          break
+        }
+      }
+      await fetchClosedPatternStats()
+      if (totalProcessed === 0) {
+        setError('No old trades are waiting for pattern backfill')
+      } else if (totalUpdated === 0) {
+        setError(`Pattern backfill processed ${totalProcessed} rows but updated 0`)
+      }
+    } finally {
+      setIsBackfillingPatternStats(false)
+    }
   }
 
   async function fetchMlCandlesTradingStats() {
@@ -2244,8 +2453,14 @@ function App() {
           fetchMlCompareHistory().catch(() => {
             // no-op
           })
+          fetchClosedPatternStats().catch(() => {
+            // no-op
+          })
         } else {
           fetchPaperTradingStats().catch(() => {
+            // no-op
+          })
+          fetchClosedPatternStats().catch(() => {
             // no-op
           })
         }
@@ -2267,9 +2482,15 @@ function App() {
         fetchMlCompareHistory().catch(() => {
           // Keep UI responsive even if compare refresh fails once.
         })
+        fetchClosedPatternStats().catch(() => {
+          // Keep UI responsive if closed-pattern refresh fails once.
+        })
       } else {
         fetchPaperTradingStats().catch(() => {
           // Keep UI responsive even if stats refresh fails once.
+        })
+        fetchClosedPatternStats().catch(() => {
+          // Keep UI responsive if closed-pattern refresh fails once.
         })
       }
     } catch (err) {
@@ -2296,6 +2517,7 @@ function App() {
         throw new Error(`Close trade failed: ${text}`)
       }
       await fetchPaperTradingStats()
+      await fetchClosedPatternStats()
     } finally {
       setClosingTradeId(null)
     }
@@ -2807,6 +3029,20 @@ function App() {
   }, [])
 
   useEffect(() => {
+    fetchClosedPatternStats().catch(() => {
+      // Keep previous closed-pattern stats if request fails.
+    })
+    const timer = window.setInterval(() => {
+      fetchClosedPatternStats().catch(() => {
+        // Keep previous closed-pattern stats on periodic refresh failure.
+      })
+    }, 60000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [])
+
+  useEffect(() => {
     if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
     fetchMlCandlesSignals().catch(() => {
       // Initial fetch.
@@ -3028,6 +3264,154 @@ function App() {
     }
   }, [selectedCoin])
 
+  if (initialScreenView === 'ml-candles-signals') {
+    return (
+      <main className="app-shell">
+        <div className="trade-toast-stack">
+          {tradeToasts.map((toast) => (
+            <div key={toast.id} className={`trade-toast ${toast.closeReason === 'TP' ? 'trade-toast-tp' : 'trade-toast-sl'}`}>
+              <strong>{toast.closeReason === 'TP' ? 'TP Hit' : 'SL Hit'}</strong>
+              <span>{toast.symbol} #{toast.tradeId}</span>
+              <span>
+                {typeof toast.pnlPct === 'number'
+                  ? `${toast.pnlPct >= 0 ? '+' : ''}${toast.pnlPct.toFixed(2)}%`
+                  : '-'}
+              </span>
+            </div>
+          ))}
+        </div>
+        <section className="card">
+          <header className="card-header">
+            <h2>ML Candles Signals</h2>
+            <div className="scan-actions">
+              <span className="badge neutral">Signals: {sortedMlCandlesSignals.length}</span>
+              <span className="badge neutral">Scanned: {mlCandlesScannedCount}</span>
+              <span className="badge neutral">Display: {(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%+</span>
+              <span className="badge neutral">Entry: {(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%+</span>
+              <span className={`badge ${signalsWsStatus === 'live' ? 'success' : signalsWsStatus === 'connecting' ? 'warn' : 'neutral'}`}>
+                {signalsWsStatus === 'live' ? 'WS Live' : signalsWsStatus === 'connecting' ? 'WS Connecting' : 'REST Fallback'}
+              </span>
+            </div>
+          </header>
+          <div className="content">
+            <p>
+              Man nay chi hien cac `ML Candles` tu {`${(ML_CANDLES_DISPLAY_MIN_WIN * 100).toFixed(0)}%`}
+              {' '}tro len de giam render tren browser. Dieu kien vao lenh thuc te van bi gate boi
+              {' '}{`${(ML_CANDLES_ENTRY_MIN_WIN * 100).toFixed(0)}%`} va cac bo loc risk/duplicate.
+            </p>
+          </div>
+          <h3 className="section-title">ML Candles High Win Signals</h3>
+          <div className="content table-wrap">
+            {sortedMlCandlesSignals.length === 0 ? (
+              <p>No ml-candles signal currently above 70%.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>ML Candles</th>
+                    <th>Base ML</th>
+                    <th>Pattern / DB</th>
+                    <th>Mark</th>
+                    <th>Can Enter</th>
+                    <th>Blocked</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedMlCandlesSignals.map((item) => {
+                    const mark = resolveHighWinPrice(item.symbol) ?? item.mark_price
+                    const canEnter = typeof item.can_enter === 'boolean'
+                      ? item.can_enter
+                      : isEntryTouchedNow(item.side, item.predicted_entry_price, mark)
+                    return (
+                      <tr key={`candles-standalone-${item.symbol}-${item.side}`}>
+                        <td>{renderSymbolJump(item.symbol, item.predicted_entry_price)}</td>
+                        <td>
+                          <div className="signal-model-stack">
+                            <span className="badge success">
+                              {item.side} {(item.win_probability * 100).toFixed(1)}%
+                            </span>
+                            <span className="signal-model-meta">E {item.predicted_entry_price}</span>
+                            <span className="signal-model-meta">TP {item.take_profit}</span>
+                            {item.reference_win_symbol ? (
+                              <span className="signal-model-meta">
+                                Ref win: {item.reference_win_symbol}
+                                {item.reference_win_at ? ` @ ${formatVnTimestamp(item.reference_win_at)}` : ''}
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td>
+                          {item.baseline_ml ? (
+                            <div className="signal-model-stack">
+                              <span className={`badge ${item.baseline_ml.aligned ? 'success' : 'neutral'}`}>
+                                {item.baseline_ml.side} {(item.baseline_ml.win_probability * 100).toFixed(1)}%
+                              </span>
+                              <span className="signal-model-meta">E {item.baseline_ml.predicted_entry_price}</span>
+                              <span className="signal-model-meta">TP {item.baseline_ml.take_profit}</span>
+                              {item.baseline_ml.reference_win_symbol ? (
+                                <span className="signal-model-meta">
+                                  Ref win: {item.baseline_ml.reference_win_symbol}
+                                  {item.baseline_ml.reference_win_at ? ` @ ${formatVnTimestamp(item.baseline_ml.reference_win_at)}` : ''}
+                                </span>
+                              ) : null}
+                            </div>
+                          ) : '-'}
+                        </td>
+                        <td>{renderSignalPatternSummary(item.candle_pattern, item.btc_trend)}</td>
+                        <td>{typeof mark === 'number' ? mark : '-'}</td>
+                        <td>
+                          <span className={`badge ${canEnter ? 'success' : 'warn'}`}>
+                            {canEnter ? 'READY' : 'WAIT'}
+                          </span>
+                        </td>
+                        <td>{item.blocked_reason ?? '-'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn-inline"
+                            disabled={
+                              isOpeningMarketOrder
+                              || mlCandlesOpenTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
+                            }
+                            onClick={() => {
+                              openPaperMarketOrder({
+                                symbol: item.symbol,
+                                side: item.side,
+                                signal_win_probability: item.win_probability,
+                                effective_win_probability: item.effective_win_probability,
+                                repo_scope: PAPER_REPO_CANDLES,
+                                entry_type: 'ML_CANDLES_TEST',
+                                entry_price: item.predicted_entry_price,
+                                reference_win_symbol: item.reference_win_symbol ?? undefined,
+                                reference_win_at: item.reference_win_at ?? undefined,
+                                take_profit: item.take_profit,
+                                stop_loss: item.stop_loss,
+                              }).then(() => {
+                                fetchMlCompareHistory().catch(() => {
+                                  // no-op
+                                })
+                              }).catch((err) => {
+                                setError(err instanceof Error ? err.message : 'Unknown error')
+                              })
+                            }}
+                          >
+                            {isOpeningMarketOrder ? 'Opening...' : 'Open ML Candles Test'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="app-shell">
       <div className="trade-toast-stack">
@@ -3215,6 +3599,7 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
+                    <th>Pattern / DB</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
@@ -3262,6 +3647,7 @@ function App() {
                           </span>
                         ) : '-'}
                       </td>
+                      <td>{renderSignalPatternSummary(row.current_candle_pattern, row.current_btc_trend)}</td>
                       <td>
                         {typeof upnlUsdt === 'number' ? (
                           <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -3339,6 +3725,95 @@ function App() {
           </div>
 
           <div className="history-header">
+            <h3 className="section-title">Closed Candle Pattern Stats</h3>
+            <div className="scan-actions">
+              <span className="badge neutral">Lookback: {closedPatternStatsLookback}</span>
+              <span className="badge neutral">Known Rows: {closedPatternStatsCount}</span>
+              <span className="badge neutral">Unknown: {closedPatternUnknownCount}</span>
+              <span className="badge neutral">Buckets: {closedPatternStats.length}</span>
+              <select
+                className="select-control history-size-select"
+                value={closedPatternStatsTargetLookback}
+                onChange={(event) => {
+                  const nextValue = Number(event.target.value)
+                  if (!Number.isFinite(nextValue) || nextValue < 0) return
+                  setClosedPatternStatsTargetLookback(nextValue)
+                }}
+              >
+                <option value={180}>180</option>
+                <option value={1000}>1000</option>
+                <option value={5000}>5000</option>
+                <option value={20000}>20000</option>
+              </select>
+              <button
+                type="button"
+                className="btn-secondary btn-inline"
+                onClick={() => {
+                  fetchClosedPatternStats(closedPatternStatsTargetLookback).catch((err) => {
+                    setError(err instanceof Error ? err.message : 'Unknown error')
+                  })
+                }}
+              >
+                Load Stats
+              </button>
+              <button
+                type="button"
+                className="btn-inline"
+                disabled={isBackfillingPatternStats}
+                onClick={() => {
+                  backfillClosedPatternStats(500).catch((err) => {
+                    setError(err instanceof Error ? err.message : 'Unknown error')
+                  })
+                }}
+              >
+                {isBackfillingPatternStats ? 'Backfilling...' : 'Backfill Old Data'}
+              </button>
+            </div>
+          </div>
+          <div className="content table-wrap">
+            {visibleClosedPatternStats.length === 0 ? (
+              <p>No closed pattern stats yet.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Pattern</th>
+                    <th>BTC Trend</th>
+                    <th>Trades</th>
+                    <th>Win</th>
+                    <th>Loss</th>
+                    <th>Win Rate</th>
+                    <th>Net PnL</th>
+                    <th>Avg PnL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleClosedPatternStats.map((row) => (
+                    <tr key={`${row.candle_pattern}-${row.btc_trend}`}>
+                      <td>{row.candle_pattern}</td>
+                      <td>{row.btc_trend}</td>
+                      <td>{row.total_trades}</td>
+                      <td>{row.wins}</td>
+                      <td>{row.losses}</td>
+                      <td>{row.win_rate_pct.toFixed(2)}%</td>
+                      <td>
+                        <span className={row.net_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                          {`${row.net_pnl >= 0 ? '+' : ''}${row.net_pnl.toFixed(4)}`}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={row.avg_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                          {`${row.avg_pnl >= 0 ? '+' : ''}${row.avg_pnl.toFixed(4)}`}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="history-header">
             <h3 className="section-title">Closed Trade History</h3>
             <div className="scan-actions">
               <span className="badge neutral">Page {historyPage}/{historyMaxPage}</span>
@@ -3403,6 +3878,8 @@ function App() {
                     <th>Zone Score</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_price')}>Close</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('close_reason')}>Close Reason</button></th>
+                    <th>Close Candle</th>
+                    <th>BTC Trend</th>
                     <th>Fee (USDT)</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('result')}>Result</button></th>
                   </tr>
@@ -3475,6 +3952,8 @@ function App() {
                         <td>{typeof row.liq_zone_score === 'number' ? row.liq_zone_score.toFixed(4) : '-'}</td>
                         <td>{row.close_price ?? '-'}</td>
                         <td>{row.close_reason ?? '-'}</td>
+                        <td>{row.close_candle_pattern ?? '-'}</td>
+                        <td>{row.btc_trend_at_close ?? '-'}</td>
                         <td>
                           {typeof row.commission_usdt === 'number' ? (
                             <span className="pnl-neg">{`-${row.commission_usdt.toFixed(4)}`}</span>
@@ -3906,6 +4385,11 @@ function App() {
             <div className="scan-actions">
               <span className="badge neutral">Page {mlComparePage}/{mlCompareMaxPage}</span>
               <span className="badge neutral">Rows: {filteredMlCompareHistory.length}</span>
+              {bestMlComparePatternRow ? (
+                <span className="badge success">
+                  Best DB: {bestMlComparePatternRow.pattern} / BTC {bestMlComparePatternRow.btcTrend} / {bestMlComparePatternRow.stat.win_rate_pct.toFixed(1)}%
+                </span>
+              ) : null}
               <select
                 className="select-control history-size-select"
                 value={mlComparePageSize}
@@ -3950,6 +4434,7 @@ function App() {
                     <th>Model</th>
                     <th>Symbol</th>
                     <th>Side</th>
+                    <th>Pattern / DB</th>
                     <th>Ref Win</th>
                     <th>Entry</th>
                     <th>Close</th>
@@ -3975,6 +4460,7 @@ function App() {
                         <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
+                        <td>{renderSignalPatternSummary(row.close_candle_pattern, row.btc_trend_at_close)}</td>
                         <td>
                           {row.reference_win_symbol ? (
                             <div className="signal-model-stack">
@@ -4439,6 +4925,7 @@ function App() {
                 <tr>
                   <th>Symbol</th>
                   <th>ML Candles</th>
+                  <th>Pattern / DB</th>
                   <th>Side</th>
                   <th>Source</th>
                   <th>Win%</th>
@@ -4486,6 +4973,7 @@ function App() {
                         </div>
                       ) : '-'}
                     </td>
+                    <td>{renderSignalPatternSummary(item.candle_pattern, item.btc_trend)}</td>
                     <td>{item.side}</td>
                     <td>
                       <span className="badge neutral">{formatSignalSource(item.signal_source)}</span>

@@ -25,9 +25,10 @@ body {
 }
 
 .app-shell {
-  max-width: 1120px;
+  width: min(96vw, 1680px);
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 2.1rem 0.9rem 3rem;
+  padding: 2.1rem 1rem 3rem;
 }
 
 .hero {
@@ -109,7 +110,7 @@ h1 {
   background: linear-gradient(160deg, #fffdfa, #f8f4ed);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1rem;
+  padding: 1rem 1.1rem;
   box-shadow: 0 8px 24px rgba(39, 31, 19, 0.06);
 }
 
@@ -517,12 +518,15 @@ button:hover:not(:disabled) {
 
 .table-wrap {
   overflow-x: auto;
+  margin-inline: -0.15rem;
+  padding-inline: 0.15rem;
 }
 
 table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: collapse;
-  font-size: 0.9rem;
+  font-size: 0.87rem;
 }
 
 th,
@@ -694,5 +698,20 @@ td {
 @media (min-width: 920px) {
   .two-col {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (min-width: 1280px) {
+  .card {
+    padding: 1rem 1.2rem;
+  }
+
+  table {
+    font-size: 0.9rem;
+  }
+
+  th,
+  td {
+    padding: 0.48rem 0.26rem;
   }
 }

@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable
+import warnings
 
 import numpy as np
 import pandas as pd
 
 from app.services.binance_client import BinanceFuturesClient
+
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message=r".*ChainedAssignmentError: behaviour will change in pandas 3\.0!.*",
+)
 
 
 DEFAULT_SYMBOLS = [

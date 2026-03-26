@@ -73,9 +73,9 @@ class Settings(BaseModel):
     ml_candles_use_liquidation_features: bool = os.getenv("ML_CANDLES_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     ml_candles_profile_min_samples: int = int(os.getenv("ML_CANDLES_PROFILE_MIN_SAMPLES", "18"))
     signals_active_symbols_cache_sec: int = int(os.getenv("SIGNALS_ACTIVE_SYMBOLS_CACHE_SEC", "180"))
-    signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "200"))
+    signals_scan_default_max_symbols: int = int(os.getenv("SIGNALS_SCAN_DEFAULT_MAX_SYMBOLS", "300"))
     signals_candles_scan_default_max_symbols: int = int(
-        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "350")
+        os.getenv("SIGNALS_CANDLES_SCAN_DEFAULT_MAX_SYMBOLS", "300")
     )
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
@@ -109,6 +109,12 @@ class Settings(BaseModel):
     paper_trade_margin_usdt: float = float(os.getenv("PAPER_TRADE_MARGIN_USDT", "0"))
     paper_trade_maint_margin_rate: float = float(os.getenv("PAPER_TRADE_MAINT_MARGIN_RATE", "0.02"))
     paper_trade_leverage: int = int(os.getenv("PAPER_TRADE_LEVERAGE", "5"))
+    paper_trade_perfect_pattern_leverage_enabled: bool = os.getenv(
+        "PAPER_TRADE_PERFECT_PATTERN_LEVERAGE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_perfect_pattern_leverage: int = int(os.getenv("PAPER_TRADE_PERFECT_PATTERN_LEVERAGE", "10"))
+    paper_trade_perfect_pattern_lookback: int = int(os.getenv("PAPER_TRADE_PERFECT_PATTERN_LOOKBACK", "180"))
     paper_trade_major_symbols: list[str] = _csv_list(os.getenv("PAPER_TRADE_MAJOR_SYMBOLS", "BTC/USDT,ETH/USDT,BNB/USDT,SOL/USDT"))
     paper_trade_major_dynamic_enabled: bool = os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_ENABLED", "true").lower() == "true"
     paper_trade_major_dynamic_refresh_sec: int = int(os.getenv("PAPER_TRADE_MAJOR_DYNAMIC_REFRESH_SEC", "180"))
@@ -198,20 +204,47 @@ class Settings(BaseModel):
     paper_trade_btc_reversal_loss_exit_min_loss_pct: float = float(
         os.getenv("PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_MIN_LOSS_PCT", "0.1")
     )
+    paper_trade_btc_short_rebound_ema99_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_SHORT_REBOUND_EMA99_BLOCK_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_long_pullback_ema99_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_LONG_PULLBACK_EMA99_BLOCK_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_long_top_fade_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_LONG_TOP_FADE_BLOCK_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_short_rebound_ema99_tolerance_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_SHORT_REBOUND_EMA99_TOLERANCE_PCT", "0.004")
+    )
+    paper_trade_btc_short_rebound_ema99_rebound_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_SHORT_REBOUND_EMA99_REBOUND_PCT", "0.9")
+    )
+    paper_trade_btc_long_top_fade_pullback_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_LONG_TOP_FADE_PULLBACK_PCT", "0.45")
+    )
+    paper_trade_btc_short_rebound_ema99_green_candle_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_SHORT_REBOUND_EMA99_GREEN_CANDLE_PCT", "0.35")
+    )
+    paper_trade_btc_short_rebound_ema99_lookback_candles: int = int(
+        os.getenv("PAPER_TRADE_BTC_SHORT_REBOUND_EMA99_LOOKBACK_CANDLES", "12")
+    )
     paper_trade_btc_profit_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED", "true").lower() == "true"
     paper_trade_btc_profit_lock_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE", "0.6"))
     paper_trade_btc_follow_min_corr: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_CORR", "0.45"))
     paper_trade_btc_follow_min_beta: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_BETA", "0.2"))
     paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
     paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
-    paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "200"))
+    paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "300"))
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
-    paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "350"))
+    paper_trade_test_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_SYMBOLS", "300"))
     paper_trade_test_ml_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_TEST_ML_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_candles_bg_enabled: bool = os.getenv("PAPER_TRADE_CANDLES_BG_ENABLED", "true").lower() == "true"
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
-    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "350"))
+    paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "300"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
@@ -245,6 +278,30 @@ class Settings(BaseModel):
     paper_trade_instant_sl_guard_short_rejection_min_wick_body_ratio: float = float(
         os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_REJECTION_MIN_WICK_BODY_RATIO", "1.2")
     )
+    paper_trade_entry_long_pump_red_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_ENTRY_LONG_PUMP_RED_BLOCK_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_entry_long_pump_red_lookback_candles: int = int(
+        os.getenv("PAPER_TRADE_ENTRY_LONG_PUMP_RED_LOOKBACK_CANDLES", "12")
+    )
+    paper_trade_entry_long_pump_red_top_tolerance_pct: float = float(
+        os.getenv("PAPER_TRADE_ENTRY_LONG_PUMP_RED_TOP_TOLERANCE_PCT", "0.0015")
+    )
+    paper_trade_entry_long_pump_red_pump_min_body_pct: float = float(
+        os.getenv("PAPER_TRADE_ENTRY_LONG_PUMP_RED_PUMP_MIN_BODY_PCT", "0.6")
+    )
+    paper_trade_entry_long_pump_red_confirm_min_body_pct: float = float(
+        os.getenv("PAPER_TRADE_ENTRY_LONG_PUMP_RED_CONFIRM_MIN_BODY_PCT", "0.2")
+    )
+    paper_trade_entry_short_inside_bar_breakdown_confirm_enabled: bool = os.getenv(
+        "PAPER_TRADE_ENTRY_SHORT_INSIDE_BAR_BREAKDOWN_CONFIRM_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_entry_long_inside_bar_breakout_confirm_enabled: bool = os.getenv(
+        "PAPER_TRADE_ENTRY_LONG_INSIDE_BAR_BREAKOUT_CONFIRM_ENABLED",
+        "true",
+    ).lower() == "true"
     paper_trade_instant_sl_guard_short_top_test_cache_sec: float = float(
         os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_SHORT_TOP_TEST_CACHE_SEC", "8")
     )
@@ -290,6 +347,22 @@ class Settings(BaseModel):
         os.getenv("PAPER_TRADE_SHORT_SL_STREAK_COOLDOWN_MINUTES", "45")
     )
     paper_trade_short_sl_streak_refresh_sec: int = int(os.getenv("PAPER_TRADE_SHORT_SL_STREAK_REFRESH_SEC", "15"))
+    paper_trade_open_pressure_close_enabled: bool = os.getenv(
+        "PAPER_TRADE_OPEN_PRESSURE_CLOSE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_open_pressure_close_window_minutes: int = int(
+        os.getenv("PAPER_TRADE_OPEN_PRESSURE_CLOSE_WINDOW_MINUTES", "12")
+    )
+    paper_trade_open_pressure_close_min_opens: int = int(
+        os.getenv("PAPER_TRADE_OPEN_PRESSURE_CLOSE_MIN_OPENS", "3")
+    )
+    paper_trade_open_pressure_close_min_lead: int = int(
+        os.getenv("PAPER_TRADE_OPEN_PRESSURE_CLOSE_MIN_LEAD", "1")
+    )
+    paper_trade_open_pressure_close_min_net_pnl_usdt: float = float(
+        os.getenv("PAPER_TRADE_OPEN_PRESSURE_CLOSE_MIN_NET_PNL_USDT", "0")
+    )
 
     ml_feedback_hourly_weight_enabled: bool = os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_ENABLED", "true").lower() == "true"
     ml_feedback_hourly_weight_min_samples: int = int(os.getenv("ML_FEEDBACK_HOURLY_WEIGHT_MIN_SAMPLES", "60"))

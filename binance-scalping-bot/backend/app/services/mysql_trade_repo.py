@@ -97,6 +97,8 @@ class MySQLTradeRepository:
                         pnl DOUBLE NULL,
                         commission_usdt DOUBLE NULL,
                         result TINYINT NULL,
+                        close_candle_pattern VARCHAR(32) NULL,
+                        btc_trend_at_close VARCHAR(16) NULL,
                         created_at DATETIME(6) NOT NULL,
                         updated_at DATETIME(6) NOT NULL,
                         INDEX idx_symbol_status(symbol, status),
@@ -393,6 +395,32 @@ class MySQLTradeRepository:
                 if int(row.get("cnt") or 0) == 0:
                     cur.execute(
                         "ALTER TABLE paper_trades ADD COLUMN commission_usdt DOUBLE NULL AFTER pnl"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='close_candle_pattern'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN close_candle_pattern VARCHAR(32) NULL AFTER result"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='btc_trend_at_close'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN btc_trend_at_close VARCHAR(16) NULL AFTER close_candle_pattern"
                     )
                 cur.execute(
                     """
@@ -799,6 +827,8 @@ class MySQLTradeRepository:
         result: int,
         close_reason: str | None = None,
         commission_usdt: float | None = None,
+        close_candle_pattern: str | None = None,
+        btc_trend_at_close: str | None = None,
     ) -> None:
         now = _now_vn()
         with self._conn() as conn:
@@ -807,10 +837,23 @@ class MySQLTradeRepository:
                     """
                     UPDATE paper_trades
                     SET status='CLOSED', closed_at=%s, close_price=%s, close_reason=%s,
-                        pnl=%s, commission_usdt=%s, result=%s, updated_at=%s
+                        pnl=%s, commission_usdt=%s, result=%s,
+                        close_candle_pattern=%s, btc_trend_at_close=%s,
+                        updated_at=%s
                     WHERE id=%s AND status='OPEN'
                     """,
-                    (now, close_price, close_reason, pnl, commission_usdt, result, now, trade_id),
+                    (
+                        now,
+                        close_price,
+                        close_reason,
+                        pnl,
+                        commission_usdt,
+                        result,
+                        close_candle_pattern,
+                        btc_trend_at_close,
+                        now,
+                        trade_id,
+                    ),
                 )
                 cur.execute(
                     "SELECT * FROM paper_trades WHERE id=%s LIMIT 1",
@@ -909,6 +952,71 @@ class MySQLTradeRepository:
                     f"SELECT * FROM paper_trades ORDER BY opened_at DESC LIMIT {safe_limit}"
                 )
                 return list(cur.fetchall())
+
+    def list_recent_closed_trades(self, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(limit, 50000))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM paper_trades
+                    WHERE status='CLOSED'
+                    ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC
+                    LIMIT {safe_limit}
+                    """
+                )
+                return list(cur.fetchall())
+
+    def list_closed_trades_for_pattern_stats(self, limit: int = 0) -> list[dict[str, Any]]:
+        safe_limit = max(0, min(int(limit), 50000))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                sql = """
+                    SELECT *
+                    FROM paper_trades
+                    WHERE status='CLOSED'
+                    ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC
+                """
+                if safe_limit > 0:
+                    sql = f"{sql}\nLIMIT {safe_limit}"
+                cur.execute(sql)
+                return list(cur.fetchall())
+
+    def list_closed_trades_missing_close_context(self, limit: int = 500) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 5000))
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, symbol, closed_at, opened_at
+                    FROM paper_trades
+                    WHERE status='CLOSED'
+                      AND (close_candle_pattern IS NULL OR btc_trend_at_close IS NULL)
+                    ORDER BY COALESCE(closed_at, opened_at) DESC, id DESC
+                    LIMIT {safe_limit}
+                    """
+                )
+                return list(cur.fetchall())
+
+    def update_trade_close_context(
+        self,
+        trade_id: int,
+        *,
+        close_candle_pattern: str | None,
+        btc_trend_at_close: str | None,
+    ) -> None:
+        now = _now_vn()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE paper_trades
+                    SET close_candle_pattern=%s, btc_trend_at_close=%s, updated_at=%s
+                    WHERE id=%s
+                    """,
+                    (close_candle_pattern, btc_trend_at_close, now, trade_id),
+                )
 
     def list_recent_trades_paged(self, page: int = 1, page_size: int = 50) -> tuple[list[dict[str, Any]], int]:
         safe_page = max(1, int(page))

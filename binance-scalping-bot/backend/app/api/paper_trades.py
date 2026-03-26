@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.config import settings
+from app.deps import get_paper_trade_runtime
 from app.models.event_windows import (
     MarketEventWindow,
     MarketEventWindowCreateRequest,
@@ -27,12 +28,17 @@ from app.models.paper_trades import (
     PaperMarketOpenRequest,
     PaperTrade,
     PaperTradeListResponse,
+    PaperTradePatternStatsItem,
+    PaperTradePatternStatsResponse,
+    PaperTradePatternBackfillResponse,
     PaperTradeStats,
     PaperTradeStatsResponse,
 )
 from app.services.binance_client import BinanceFuturesClient
+from app.services.candle_pattern_analyzer import CandlePatternAnalyzer
 from app.services.data_pipeline import DataPipeline
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.pattern_performance import PatternPerformanceResolver
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
     calc_estimated_margin_ratio_pct,
@@ -64,6 +70,7 @@ class PaperTradeAPI:
         self.major_symbol_resolver = None
         self.btc_follow_resolver = None
         self.market_client = BinanceFuturesClient()
+        self.pattern_analyzer = CandlePatternAnalyzer(client=self.market_client)
         self.data_pipeline = DataPipeline()
 
         self.router.add_api_route("/open", self.get_open, methods=["GET"], response_model=PaperTradeListResponse)
@@ -71,6 +78,8 @@ class PaperTradeAPI:
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
         self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
+        self.router.add_api_route("/pattern-stats", self.get_pattern_stats, methods=["GET"], response_model=PaperTradePatternStatsResponse)
+        self.router.add_api_route("/pattern-stats/backfill", self.backfill_pattern_stats, methods=["POST"], response_model=PaperTradePatternBackfillResponse)
         self.router.add_api_route("/event-windows", self.list_event_windows, methods=["GET"], response_model=MarketEventWindowListResponse)
         self.router.add_api_route("/event-windows", self.create_event_window, methods=["POST"], response_model=MarketEventWindow)
         self.router.add_api_route("/event-windows/import", self.import_event_windows, methods=["POST"], response_model=MarketEventImportResponse)
@@ -112,10 +121,52 @@ class PaperTradeAPI:
             return max(1, int(settings.paper_trade_major_leverage))
         return max(1, int(settings.paper_trade_leverage))
 
+    def _pattern_performance_resolver(self) -> PatternPerformanceResolver:
+        return PatternPerformanceResolver(
+            analyzer=self.pattern_analyzer,
+            repos=[self.repo, self.candle_repo],
+            lookback=settings.paper_trade_perfect_pattern_lookback,
+        )
+
+    def _has_perfect_pattern_win_rate(self, symbol: str) -> bool:
+        if not settings.paper_trade_perfect_pattern_leverage_enabled:
+            return False
+        try:
+            resolver = self._pattern_performance_resolver()
+            return bool(
+                resolver.has_perfect_live_pattern(
+                    symbol,
+                    min_win_rate_pct=100.0,
+                    min_trades=1,
+                )
+            )
+        except Exception:
+            return False
+
+    def _resolve_open_leverage(self, symbol: str, requested_leverage: int | None = None) -> int:
+        leverage = int(requested_leverage or self._resolve_default_leverage(symbol))
+        if requested_leverage is not None:
+            return max(1, leverage)
+        if self._has_perfect_pattern_win_rate(symbol):
+            leverage = max(leverage, int(settings.paper_trade_perfect_pattern_leverage))
+        return max(1, leverage)
+
     def _resolve_max_risk_pct(self, symbol: str) -> float:
         if self._is_major_symbol(symbol):
             return max(float(settings.paper_trade_max_risk_pct), float(settings.paper_trade_major_max_risk_pct))
         return float(settings.paper_trade_max_risk_pct)
+
+    def _resolve_open_max_risk_pct(self, symbol: str, leverage: int) -> float:
+        base = self._resolve_max_risk_pct(symbol)
+        if self._has_perfect_pattern_win_rate(symbol):
+            base = max(
+                float(base),
+                calc_estimated_margin_ratio_pct(
+                    leverage=max(1, int(leverage)),
+                    maint_margin_rate=settings.paper_trade_maint_margin_rate,
+                ),
+            )
+        return float(base)
 
     @staticmethod
     def _normalize_repo_scope(value: str | None) -> str:
@@ -144,6 +195,27 @@ class PaperTradeAPI:
         if self.repo is None:
             raise HTTPException(status_code=503, detail="Paper trading DB is not configured")
         return self.repo
+
+    def _resolve_close_context(self, row: dict) -> tuple[str | None, str | None]:
+        closed_at = _parse_dt(row.get("closed_at")) or _parse_dt(row.get("opened_at"))
+        if closed_at is None:
+            return None, None
+        pattern = str(row.get("close_candle_pattern") or "").strip().upper() or None
+        btc_trend = str(row.get("btc_trend_at_close") or "").strip().upper() or None
+        if pattern is None:
+            try:
+                pattern = self.pattern_analyzer.symbol_pattern_at(
+                    symbol=str(row.get("symbol") or ""),
+                    at_dt=closed_at,
+                )
+            except Exception:
+                pattern = None
+        if btc_trend is None:
+            try:
+                btc_trend = self.pattern_analyzer.btc_trend_at(closed_at)
+            except Exception:
+                btc_trend = None
+        return pattern, btc_trend
 
     def _require_repo(self) -> MySQLTradeRepository:
         return self._resolve_repo(repo_scope="main")
@@ -280,14 +352,87 @@ class PaperTradeAPI:
             mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
             margin_usdt=margin_usdt,
             result=int(row["result"]) if row.get("result") is not None else None,
+            current_candle_pattern=str(row["current_candle_pattern"]) if row.get("current_candle_pattern") is not None else None,
+            current_btc_trend=str(row["current_btc_trend"]) if row.get("current_btc_trend") is not None else None,
+            close_candle_pattern=str(row["close_candle_pattern"]) if row.get("close_candle_pattern") is not None else None,
+            btc_trend_at_close=str(row["btc_trend_at_close"]) if row.get("btc_trend_at_close") is not None else None,
         )
+
+    def _enrich_live_context(self, row: dict) -> dict:
+        out = dict(row)
+        symbol = str(out.get("symbol") or "").strip()
+        if not symbol:
+            return out
+        if out.get("current_candle_pattern") is None:
+            try:
+                out["current_candle_pattern"] = self.pattern_analyzer.current_symbol_pattern(symbol)
+            except Exception:
+                out["current_candle_pattern"] = None
+        if out.get("current_btc_trend") is None:
+            try:
+                out["current_btc_trend"] = self.pattern_analyzer.btc_trend_now()
+            except Exception:
+                out["current_btc_trend"] = None
+        return out
+
+    def _enrich_close_context(self, row: dict) -> dict:
+        out = dict(row)
+        if str(out.get("status") or "").upper() != "CLOSED":
+            return out
+        pattern, btc_trend = self._resolve_close_context(out)
+        if out.get("close_candle_pattern") is None:
+            out["close_candle_pattern"] = pattern
+        if out.get("btc_trend_at_close") is None:
+            out["btc_trend_at_close"] = btc_trend
+        if (pattern or btc_trend) and out.get("id") is not None and (
+            row.get("close_candle_pattern") is None or row.get("btc_trend_at_close") is None
+        ):
+            try:
+                repo_scope = "candles" if str(out.get("entry_type") or "").upper() == "ML_CANDLES_TEST" else "main"
+                repo = self._resolve_repo(repo_scope=repo_scope, entry_type=str(out.get("entry_type") or ""))
+                repo.update_trade_close_context(
+                    int(out["id"]),
+                    close_candle_pattern=pattern,
+                    btc_trend_at_close=btc_trend,
+                )
+            except Exception:
+                pass
+        return out
+
+    @staticmethod
+    def _dedupe_pattern_rows(rows: list[dict]) -> list[dict]:
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        for row in rows:
+            key = (
+                str(row.get("symbol") or ""),
+                str(row.get("side") or ""),
+                str(row.get("entry_type") or ""),
+                str(row.get("opened_at") or ""),
+                str(row.get("closed_at") or ""),
+                str(row.get("close_price") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out
+
+    @staticmethod
+    def _row_sort_ts(row: dict) -> float:
+        dt = _parse_dt(row.get("closed_at")) or _parse_dt(row.get("opened_at"))
+        if dt is None:
+            return 0.0
+        if dt.tzinfo is None:
+            return dt.timestamp()
+        return dt.astimezone(timezone.utc).timestamp()
 
     def get_open(
         self,
         repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
     ) -> PaperTradeListResponse:
         repo = self._resolve_repo(repo_scope=repo_scope)
-        rows = repo.list_open_trades()
+        rows = [self._enrich_live_context(row) for row in repo.list_open_trades()]
         btc_follow_map = self._resolve_btc_follow_map(rows)
         return PaperTradeListResponse(
             items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
@@ -299,10 +444,13 @@ class PaperTradeAPI:
         page: int | None = Query(default=None, ge=1),
         page_size: int | None = Query(default=None, ge=1, le=200),
         repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
+        include_patterns: bool = Query(default=False),
     ) -> PaperTradeListResponse:
         repo = self._resolve_repo(repo_scope=repo_scope)
         if page is None and page_size is None:
             rows = repo.list_recent_trades(limit=limit)
+            if include_patterns:
+                rows = [self._enrich_close_context(row) for row in rows]
             btc_follow_map = self._resolve_btc_follow_map(rows)
             return PaperTradeListResponse(
                 items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
@@ -311,6 +459,8 @@ class PaperTradeAPI:
         target_page = page or 1
         target_page_size = page_size or min(limit, 200)
         rows, total = repo.list_recent_trades_paged(page=target_page, page_size=target_page_size)
+        if include_patterns:
+            rows = [self._enrich_close_context(row) for row in rows]
         btc_follow_map = self._resolve_btc_follow_map(rows)
         total_pages = max(1, math.ceil(total / target_page_size)) if total > 0 else 1
         return PaperTradeListResponse(
@@ -341,6 +491,151 @@ class PaperTradeAPI:
         repo = self._require_repo()
         rows = repo.daily_summary(days=days)
         return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
+
+    def get_pattern_stats(
+        self,
+        lookback: int = Query(default=1000, ge=0, le=50000),
+        repo_scope: str = Query(default="all", pattern="^(main|candles|all)$"),
+        include_unknown: bool = Query(default=False),
+    ) -> PaperTradePatternStatsResponse:
+        safe_scope = str(repo_scope or "all").lower()
+        rows: list[dict] = []
+        if safe_scope in {"main", "candles"}:
+            repo = self._resolve_repo(repo_scope=safe_scope)
+            rows = repo.list_closed_trades_for_pattern_stats(limit=lookback)
+        else:
+            main_rows: list[dict] = []
+            candle_rows: list[dict] = []
+            try:
+                main_rows = self._resolve_repo(repo_scope="main").list_closed_trades_for_pattern_stats(limit=lookback)
+            except Exception:
+                main_rows = []
+            try:
+                candle_rows = self._resolve_repo(repo_scope="candles").list_closed_trades_for_pattern_stats(limit=lookback)
+            except Exception:
+                candle_rows = []
+            rows = self._dedupe_pattern_rows(main_rows + candle_rows)
+            rows.sort(
+                key=lambda row: (self._row_sort_ts(row), int(row.get("id") or 0)),
+                reverse=True,
+            )
+            if lookback > 0:
+                rows = rows[:lookback]
+
+        enriched_rows = [self._enrich_close_context(row) for row in rows]
+        buckets: dict[tuple[str, str], dict[str, float | int | str]] = {}
+        included_rows = 0
+        unknown_rows = 0
+        for row in enriched_rows:
+            pattern = str(row.get("close_candle_pattern") or "").upper().strip()
+            btc_trend = str(row.get("btc_trend_at_close") or "").upper().strip()
+            if not pattern or not btc_trend:
+                unknown_rows += 1
+                if not include_unknown:
+                    continue
+            pattern = pattern or "UNKNOWN"
+            btc_trend = btc_trend or "UNKNOWN"
+            included_rows += 1
+            key = (pattern, btc_trend)
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "candle_pattern": pattern,
+                    "btc_trend": btc_trend,
+                    "total_trades": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "net_pnl": 0.0,
+                },
+            )
+            bucket["total_trades"] = int(bucket["total_trades"]) + 1
+            if int(row.get("result") or 0) == 1:
+                bucket["wins"] = int(bucket["wins"]) + 1
+            elif row.get("result") is not None:
+                bucket["losses"] = int(bucket["losses"]) + 1
+            bucket["net_pnl"] = float(bucket["net_pnl"]) + float(row.get("pnl") or 0.0)
+
+        items: list[PaperTradePatternStatsItem] = []
+        for bucket in buckets.values():
+            total_trades = int(bucket["total_trades"])
+            wins = int(bucket["wins"])
+            losses = int(bucket["losses"])
+            net_pnl = float(bucket["net_pnl"])
+            items.append(
+                PaperTradePatternStatsItem(
+                    candle_pattern=str(bucket["candle_pattern"]),
+                    btc_trend=str(bucket["btc_trend"]),
+                    total_trades=total_trades,
+                    wins=wins,
+                    losses=losses,
+                    win_rate_pct=(wins / total_trades * 100.0) if total_trades > 0 else 0.0,
+                    loss_rate_pct=(losses / total_trades * 100.0) if total_trades > 0 else 0.0,
+                    net_pnl=net_pnl,
+                    avg_pnl=(net_pnl / total_trades) if total_trades > 0 else 0.0,
+                )
+            )
+        items.sort(
+            key=lambda item: (item.total_trades, item.win_rate_pct, item.net_pnl),
+            reverse=True,
+        )
+        return PaperTradePatternStatsResponse(
+            repo_scope=safe_scope,
+            lookback=int(lookback),
+            closed_trades=included_rows,
+            unknown_trades=unknown_rows,
+            items=items,
+        )
+
+    def backfill_pattern_stats(
+        self,
+        repo_scope: str = Query(default="all", pattern="^(main|candles|all)$"),
+        batch_size: int = Query(default=500, ge=1, le=5000),
+    ) -> PaperTradePatternBackfillResponse:
+        safe_scope = str(repo_scope or "all").lower()
+        repos: list[MySQLTradeRepository] = []
+        if safe_scope in {"main", "candles"}:
+            repos.append(self._resolve_repo(repo_scope=safe_scope))
+        else:
+            try:
+                repos.append(self._resolve_repo(repo_scope="main"))
+            except Exception:
+                pass
+            try:
+                candle_repo = self._resolve_repo(repo_scope="candles")
+                if candle_repo not in repos:
+                    repos.append(candle_repo)
+            except Exception:
+                pass
+
+        remaining = int(batch_size)
+        processed = 0
+        updated = 0
+        for repo in repos:
+            if remaining <= 0:
+                break
+            rows = repo.list_closed_trades_missing_close_context(limit=remaining)
+            for row in rows:
+                processed += 1
+                pattern, btc_trend = self._resolve_close_context(row)
+                if not pattern and not btc_trend:
+                    continue
+                try:
+                    repo.update_trade_close_context(
+                        int(row["id"]),
+                        close_candle_pattern=pattern,
+                        btc_trend_at_close=btc_trend,
+                    )
+                    updated += 1
+                except Exception:
+                    continue
+            remaining = max(0, int(batch_size) - processed)
+
+        return PaperTradePatternBackfillResponse(
+            repo_scope=safe_scope,
+            batch_size=int(batch_size),
+            processed=processed,
+            updated=updated,
+        )
 
     def get_hourly_windows(
         self,
@@ -833,7 +1128,7 @@ class PaperTradeAPI:
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
-        leverage = req.leverage or self._resolve_default_leverage(req.symbol)
+        leverage = self._resolve_open_leverage(req.symbol, req.leverage)
         atr_value = self._resolve_symbol_atr(req.symbol)
         normalized_tp, normalized_sl = normalize_tp_sl(
             side=req.side,
@@ -856,7 +1151,7 @@ class PaperTradeAPI:
             leverage=leverage,
             maint_margin_rate=settings.paper_trade_maint_margin_rate,
         )
-        max_risk_pct = self._resolve_max_risk_pct(req.symbol)
+        max_risk_pct = self._resolve_open_max_risk_pct(req.symbol, leverage)
         if risk_pct > max_risk_pct:
             raise HTTPException(
                 status_code=422,
@@ -910,6 +1205,13 @@ class PaperTradeAPI:
                 "feature_snapshot": feature_snapshot,
             }
         )
+        runtime_repo, runtime_engine = get_paper_trade_runtime()
+        if runtime_engine is not None and runtime_repo is repo:
+            try:
+                runtime_engine.register_open_pressure_event(side=req.side)
+                await runtime_engine.apply_open_pressure_profit_exit()
+            except Exception:
+                pass
         rows = repo.list_recent_trades(limit=1)
         if not rows:
             raise HTTPException(status_code=500, detail=f"Cannot read created trade {trade_id}")
@@ -976,6 +1278,12 @@ class PaperTradeAPI:
         rate = fee_taker if entry_type.upper() == "MARKET" else fee_maker
         commission = notional * rate * 2
         net_pnl = pnl - commission
+        close_candle_pattern, btc_trend_at_close = self._resolve_close_context(
+            {
+                "symbol": symbol,
+                "closed_at": datetime.now(tz=timezone.utc),
+            }
+        )
         repo.close_trade(
             trade_id=trade_id,
             close_price=close_price,
@@ -983,6 +1291,8 @@ class PaperTradeAPI:
             result=int(result),
             close_reason=manual_reason,
             commission_usdt=commission,
+            close_candle_pattern=close_candle_pattern,
+            btc_trend_at_close=btc_trend_at_close,
         )
 
         recent = repo.list_recent_trades(limit=200)

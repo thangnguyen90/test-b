@@ -8,10 +8,12 @@ from fastapi import APIRouter, Query
 from app.core.config import settings
 from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor
 from app.services.binance_client import BinanceFuturesClient
+from app.services.candle_pattern_analyzer import CandlePatternAnalyzer
 from app.services.risk_manager import calc_estimated_margin_ratio_pct
 
 router = APIRouter(prefix="/api/v1/signals", tags=["signals"])
 market_client = BinanceFuturesClient()
+pattern_analyzer = CandlePatternAnalyzer(client=market_client)
 
 _SYMBOLS_CACHE: dict = {"symbols": [], "expires_at": 0.0}
 _LAST_SCAN_CACHE: dict | None = None
@@ -143,9 +145,9 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
         try:
-            instant_sl_guard_reason = engine._instant_sl_guard_reason(symbol=symbol, side=side)
-            if instant_sl_guard_reason:
-                return False, str(instant_sl_guard_reason), raw_win_probability, None
+            entry_guard_reason = engine._entry_guard_reason(symbol=symbol, side=side)
+            if entry_guard_reason:
+                return False, str(entry_guard_reason), raw_win_probability, None
         except Exception:
             pass
 
@@ -333,6 +335,27 @@ def _evaluate_paper_entry_gate(
                     return False, "BTC up-shock long block", effective_probability, btc_following
                 if follows_btc and str(side).upper() == "SHORT" and shock_direction == "DOWN":
                     return False, "BTC down-shock short block", effective_probability, btc_following
+                try:
+                    short_rebound_reason = engine._btc_short_rebound_ema99_reason(
+                        side=side,
+                        btc_guard=btc_guard,
+                    )
+                    if short_rebound_reason:
+                        return False, str(short_rebound_reason), effective_probability, btc_following
+                    long_pullback_reason = engine._btc_long_pullback_ema99_reason(
+                        side=side,
+                        btc_guard=btc_guard,
+                    )
+                    if long_pullback_reason:
+                        return False, str(long_pullback_reason), effective_probability, btc_following
+                    long_top_fade_reason = engine._btc_long_top_fade_reason(
+                        side=side,
+                        btc_guard=btc_guard,
+                    )
+                    if long_top_fade_reason:
+                        return False, str(long_top_fade_reason), effective_probability, btc_following
+                except Exception:
+                    pass
 
                 trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
                 confidence = _safe_float((btc_guard or {}).get("confidence")) or 0.0
@@ -356,7 +379,7 @@ def _evaluate_paper_entry_gate(
 
         try:
             leverage = max(1, int(engine._resolve_symbol_leverage(symbol)))
-            max_risk_pct = max(0.0, float(engine._resolve_symbol_max_risk_pct(symbol)))
+            max_risk_pct = max(0.0, float(engine._resolve_symbol_max_risk_pct(symbol, leverage)))
             maint_margin_rate = max(0.0, float(getattr(engine, "maint_margin_rate", 0.02)))
             risk_pct = calc_estimated_margin_ratio_pct(
                 leverage=leverage,
@@ -444,6 +467,8 @@ def _build_scan_match(
         "liq_zone_value": liq_zone_value,
         "reference_win_symbol": getattr(signal, "reference_win_symbol", None),
         "reference_win_at": getattr(signal, "reference_win_at", None),
+        "candle_pattern": pattern_analyzer.current_symbol_pattern(signal.symbol),
+        "btc_trend": pattern_analyzer.btc_trend_now(),
     }
     if compare_field:
         payload[compare_field] = compare_payload

@@ -35,6 +35,10 @@ class PaperTrade(BaseModel):
     mfe_pct: Optional[float] = None
     margin_usdt: Optional[float] = None
     result: Optional[int] = None
+    current_candle_pattern: Optional[str] = None
+    current_btc_trend: Optional[str] = None
+    close_candle_pattern: Optional[str] = None
+    btc_trend_at_close: Optional[str] = None
 
 
 class PaperTradeStats(BaseModel):
@@ -126,6 +130,33 @@ class PaperTradeHourlyWindowResponse(BaseModel):
     weekday_vn: Optional[int] = None
     trend_key: str = "ALL"
     items: list[PaperTradeHourlyWindow]
+
+
+class PaperTradePatternStatsItem(BaseModel):
+    candle_pattern: str
+    btc_trend: str
+    total_trades: int
+    wins: int
+    losses: int
+    win_rate_pct: float
+    loss_rate_pct: float
+    net_pnl: float
+    avg_pnl: float
+
+
+class PaperTradePatternStatsResponse(BaseModel):
+    repo_scope: str
+    lookback: int
+    closed_trades: int
+    unknown_trades: int = 0
+    items: list[PaperTradePatternStatsItem]
+
+
+class PaperTradePatternBackfillResponse(BaseModel):
+    repo_scope: str
+    batch_size: int
+    processed: int
+    updated: int
 
 
 class PaperMarketOpenRequest(BaseModel):

@@ -85,8 +85,14 @@ class BinanceFuturesClient:
         self._set_ban_until(ban_until)
         raise BinanceRateLimitBanError(message, ban_until_ms=ban_until) from exc
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 1000) -> list[list[Any]]:
-        key = f"ohlcv:{symbol}:{timeframe}:{limit}"
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 1000,
+        since: int | None = None,
+    ) -> list[list[Any]]:
+        key = f"ohlcv:{symbol}:{timeframe}:{limit}:{since or 'latest'}"
         ttl = 10.0 if timeframe in {"1m", "3m", "5m"} else 30.0
         cached = self._cache_get(key, ttl_sec=ttl)
         if cached is not None:
@@ -98,7 +104,7 @@ class BinanceFuturesClient:
             raise BinanceRateLimitBanError("Binance REST is temporarily banned", self._get_ban_until())
         exchange = self._get_exchange()
         try:
-            rows = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+            rows = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=since, limit=limit)
             self._cache_set(key, rows)
             return rows
         except Exception as exc:
