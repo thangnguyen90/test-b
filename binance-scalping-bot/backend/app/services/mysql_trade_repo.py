@@ -1639,14 +1639,21 @@ class MySQLTradeRepository:
         return out
 
 
-    def daily_hourly_summary(self, days: int = 30) -> list[dict[str, Any]]:
+    def daily_hourly_summary(self, days: int = 30, entry_type: str | None = None) -> list[dict[str, Any]]:
         safe_days = max(1, min(days, 365))
         now = _now_vn()
         from_dt = now - timedelta(days=safe_days - 1)
+        where_extra = ""
+        params: list[Any] = [from_dt]
+        if entry_type:
+            normalized = str(entry_type).strip().upper()
+            if normalized:
+                where_extra = " AND UPPER(TRIM(entry_type)) LIKE %s"
+                params.append(f"{normalized}%")
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         DATE(opened_at) AS trade_date,
                         HOUR(opened_at) AS trade_hour,
@@ -1656,11 +1663,11 @@ class MySQLTradeRepository:
                         COALESCE(SUM(pnl), 0) AS total_pnl,
                         COALESCE(AVG(pnl), 0) AS avg_pnl
                     FROM paper_trades
-                    WHERE status='CLOSED' AND opened_at >= %s
+                    WHERE status='CLOSED' AND opened_at >= %s{where_extra}
                     GROUP BY DATE(opened_at), HOUR(opened_at)
                     ORDER BY trade_date DESC, trade_hour DESC
                     """,
-                    (from_dt,),
+                    tuple(params),
                 )
                 rows = cur.fetchall()
 

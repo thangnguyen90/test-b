@@ -131,6 +131,9 @@ class PaperTradingEngine:
         btc_shock_up_require_pullback: bool = True,
         btc_shock_pullback_ema_period: int = 21,
         btc_shock_pullback_tolerance_pct: float = 0.0015,
+        btc_kill_short_guard_enabled: bool = True,
+        btc_kill_short_pump_min_body_pct: float = 0.7,
+        btc_kill_short_ema_tolerance_pct: float = 0.0025,
         btc_reversal_profit_exit_enabled: bool = True,
         btc_reversal_threshold_pct: float = 0.8,
         btc_reversal_min_confidence: float = 0.55,
@@ -138,6 +141,8 @@ class PaperTradingEngine:
         btc_reversal_loss_exit_enabled: bool = False,
         btc_reversal_loss_exit_days_vn: str = "MON,TUE,WED,THU,FRI,SAT,SUN",
         btc_reversal_loss_exit_min_loss_pct: float = 0.1,
+        btc_reversal_entry_block_enabled: bool = True,
+        btc_reversal_entry_cooldown_minutes: int = 60,
         btc_profit_lock_enabled: bool = True,
         btc_profit_lock_min_confidence: float = 0.6,
         btc_follow_min_corr: float = 0.45,
@@ -322,6 +327,9 @@ class PaperTradingEngine:
         self.btc_shock_up_require_pullback = bool(btc_shock_up_require_pullback)
         self.btc_shock_pullback_ema_period = int(btc_shock_pullback_ema_period)
         self.btc_shock_pullback_tolerance_pct = max(0.0, float(btc_shock_pullback_tolerance_pct))
+        self.btc_kill_short_guard_enabled = bool(btc_kill_short_guard_enabled)
+        self.btc_kill_short_pump_min_body_pct = max(0.1, float(btc_kill_short_pump_min_body_pct))
+        self.btc_kill_short_ema_tolerance_pct = max(0.0, float(btc_kill_short_ema_tolerance_pct))
         self.btc_reversal_profit_exit_enabled = bool(btc_reversal_profit_exit_enabled)
         self.btc_reversal_threshold_pct = max(0.0, float(btc_reversal_threshold_pct))
         self.btc_reversal_min_confidence = max(0.0, min(float(btc_reversal_min_confidence), 0.99))
@@ -330,6 +338,8 @@ class PaperTradingEngine:
         self.btc_reversal_loss_exit_days_vn = str(btc_reversal_loss_exit_days_vn or "").strip()
         self._btc_reversal_loss_exit_days_set = self._parse_weekday_set(self.btc_reversal_loss_exit_days_vn)
         self.btc_reversal_loss_exit_min_loss_pct = max(0.0, float(btc_reversal_loss_exit_min_loss_pct))
+        self.btc_reversal_entry_block_enabled = bool(btc_reversal_entry_block_enabled)
+        self.btc_reversal_entry_cooldown_minutes = max(0, int(btc_reversal_entry_cooldown_minutes))
         self.btc_profit_lock_enabled = bool(btc_profit_lock_enabled)
         self.btc_profit_lock_min_confidence = max(0.5, min(float(btc_profit_lock_min_confidence), 0.99))
         self.btc_follow_min_corr = max(0.0, min(float(btc_follow_min_corr), 0.99))
@@ -443,6 +453,8 @@ class PaperTradingEngine:
         self._btc_long_regime_short_lock_until_ts: float = 0.0
         self._btc_short_regime_long_lock_until_ts: float = 0.0
         self._btc_trend_hour_lock_trend_side: str = "NEUTRAL"
+        self._btc_reversal_block_until_ts: float = 0.0
+        self._btc_reversal_block_side: str = "NEUTRAL"
         self._btc_up_shock_long_block_until_ts: float = 0.0
         self._btc_down_shock_short_block_until_ts: float = 0.0
         self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
@@ -606,6 +618,7 @@ class PaperTradingEngine:
             market_prices.update(stream_prices)
         btc_guard = await asyncio.to_thread(self._resolve_btc_trend_guard)
         self._apply_btc_trend_hour_lock(btc_guard)
+        self._apply_btc_reversal_entry_cooldown(btc_guard)
         self._apply_btc_shock_pause(btc_guard)
         await asyncio.to_thread(self._refresh_short_sl_streak_guard_if_needed)
         open_paused = self._is_open_paused()
@@ -620,7 +633,7 @@ class PaperTradingEngine:
 
                 symbol = str(item.get("symbol"))
                 side = str(item.get("side"))
-                if self._entry_block_reason(symbol=symbol, side=side, entry_type="LIMIT"):
+                if self._entry_block_reason(symbol=symbol, side=side, entry_type="LIMIT", btc_guard=btc_guard):
                     continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
@@ -694,6 +707,33 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+
+                entry, tp, sl = self._adjust_entry_for_btc_kill_short(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
+
+                entry, tp, sl = self._adjust_entry_for_btc_kill_short(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
+
+                entry, tp, sl = self._adjust_entry_for_btc_kill_short(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
 
                 # Trigger condition: market touches/gets through entry.
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
@@ -850,6 +890,8 @@ class PaperTradingEngine:
                 if raw_prob < self.test_ml_min_win_probability:
                     continue
                 side = str(test_signal.side)
+                if self._btc_reversal_entry_block_reason(side=side, btc_guard=btc_guard):
+                    continue
                 effective_prob = self._apply_hourly_profile_to_probability(
                     effective_prob=raw_prob,
                     side=side,
@@ -1049,6 +1091,8 @@ class PaperTradingEngine:
                 if raw_prob < self.candles_bg_min_win_probability:
                     continue
                 side = str(candles_signal.side)
+                if self._btc_reversal_entry_block_reason(side=side, btc_guard=btc_guard):
+                    continue
                 skip_btc_guards = self._skip_btc_guards_for_entry_type(candles_entry_type)
                 effective_prob = self._apply_hourly_profile_to_probability(
                     effective_prob=raw_prob,
@@ -2547,7 +2591,7 @@ class PaperTradingEngine:
     def _pattern_sample_should_block_c(cls, sample: dict[str, Any] | None) -> bool:
         tier = cls._pattern_sample_quality_tier(sample)
         win_rate_pct = cls._pattern_sample_win_rate_pct(sample)
-        return tier == "C" and win_rate_pct < 100.0
+        return tier == "C" and win_rate_pct < 90.0
 
     def _resolve_ml_pattern_sample(
         self,
@@ -2559,16 +2603,17 @@ class PaperTradingEngine:
     ) -> tuple[dict[str, Any] | None, dict[str, float] | None]:
         sample = self._coerce_pattern_sample(candle_pattern_sample)
         snapshot = feature_snapshot
-        if sample is None:
-            if snapshot is None:
-                snapshot = self._capture_feature_snapshot(symbol, side)
-            if snapshot is not None:
-                sample = signal_candle_pattern_service.match_signal(
-                    signal_source="ML",
-                    side=side,
-                    feature_snapshot=snapshot,
-                )
-                sample = self._coerce_pattern_sample(sample)
+        if snapshot is None:
+            snapshot = self._capture_feature_snapshot(symbol, side)
+        if snapshot is not None:
+            rematched_sample = signal_candle_pattern_service.match_signal(
+                signal_source="ML",
+                side=side,
+                feature_snapshot=snapshot,
+            )
+            rematched_sample = self._coerce_pattern_sample(rematched_sample)
+            if rematched_sample is not None:
+                sample = rematched_sample
         return sample, snapshot
 
     @classmethod
@@ -2983,7 +3028,14 @@ class PaperTradingEngine:
             commission_usdt=commission,
         )
 
-    def _entry_block_reason(self, *, symbol: str, side: str, entry_type: str) -> str | None:
+    def _entry_block_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
         del symbol
         hard_block_reason = self._entry_hard_block_reason()
         if hard_block_reason:
@@ -2991,6 +3043,9 @@ class PaperTradingEngine:
         limit_long_block_reason = self._limit_long_block_reason(side=side, entry_type=entry_type)
         if limit_long_block_reason:
             return limit_long_block_reason
+        btc_reversal_reason = self._btc_reversal_entry_block_reason(side=side, btc_guard=btc_guard)
+        if btc_reversal_reason:
+            return btc_reversal_reason
         return self._guard_entry_block_reason(entry_type=entry_type)
 
     def _resolve_profile_trend_key(self, btc_guard: dict[str, Any] | None) -> str:
@@ -3479,6 +3534,9 @@ class PaperTradingEngine:
             "trend_1h_score": 0.0,
             "trend_1h_prev_side": "NEUTRAL",
             "trend_1h_reversal": False,
+            "kill_short_15m_active": False,
+            "kill_short_15m_confirmation_ready": False,
+            "kill_short_15m_entry_buffer_pct": 0.0,
         }
         if not self.btc_filter_enabled and not self.btc_shock_pause_enabled:
             return neutral
@@ -3552,6 +3610,7 @@ class PaperTradingEngine:
                 else:
                     shock_direction = "FLAT"
 
+                kill_short_15m = self._analyze_btc_kill_short_15m(rows)
                 payload = {
                     "side": trend_side,
                     "confidence": float(confidence),
@@ -3574,6 +3633,9 @@ class PaperTradingEngine:
                     "trend_1h_score": float(trend_1h_score),
                     "trend_1h_prev_side": trend_1h_prev_side,
                     "trend_1h_reversal": bool(trend_1h_reversal),
+                    "kill_short_15m_active": bool(kill_short_15m.get("active")),
+                    "kill_short_15m_confirmation_ready": bool(kill_short_15m.get("confirmation_ready")),
+                    "kill_short_15m_entry_buffer_pct": float(kill_short_15m.get("entry_buffer_pct") or 0.0),
                 }
         except Exception:
             payload = cached[1] if cached is not None else neutral
@@ -3617,6 +3679,8 @@ class PaperTradingEngine:
 
     def _pass_btc_filter(self, symbol: str, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
         if not self._pass_btc_trend_hour_lock(symbol=symbol, side=side):
+            return False
+        if self._btc_kill_short_guard_reason(side=side, btc_guard=btc_guard):
             return False
         if not self._pass_btc_shock_directional_guard(symbol=symbol, side=side, btc_guard=btc_guard):
             return False
@@ -3744,6 +3808,64 @@ class PaperTradingEngine:
         if side_key == "LONG":
             return f"BTC bearish lock LONG ({remain_minutes}m left)"
         return f"BTC trend hour lock ({remain_minutes}m left)"
+
+    def _resolve_btc_1h_reversal_block_side(self, *, btc_guard: dict[str, Any] | None) -> str:
+        trend_1h_side = str((btc_guard or {}).get("trend_1h_side") or "NEUTRAL").upper()
+        trend_1h_prev_side = str((btc_guard or {}).get("trend_1h_prev_side") or "NEUTRAL").upper()
+        try:
+            trend_1h_confidence = float((btc_guard or {}).get("trend_1h_confidence") or 0.0)
+        except Exception:
+            trend_1h_confidence = 0.0
+        reversal_1h = bool((btc_guard or {}).get("trend_1h_reversal"))
+        if not reversal_1h:
+            reversal_1h = (
+                trend_1h_side in {"LONG", "SHORT"}
+                and trend_1h_prev_side in {"LONG", "SHORT"}
+                and trend_1h_side != trend_1h_prev_side
+                and trend_1h_confidence >= self.btc_reversal_min_confidence
+            )
+        if not reversal_1h:
+            return "NEUTRAL"
+        if trend_1h_side not in {"LONG", "SHORT"}:
+            return "NEUTRAL"
+        if trend_1h_confidence < self.btc_reversal_min_confidence:
+            return "NEUTRAL"
+        return "SHORT" if trend_1h_side == "LONG" else "LONG"
+
+    def _apply_btc_reversal_entry_cooldown(self, btc_guard: dict[str, Any] | None) -> None:
+        now_ts = time.time()
+        if self._btc_reversal_block_until_ts > 0 and now_ts >= self._btc_reversal_block_until_ts:
+            self._btc_reversal_block_until_ts = 0.0
+            self._btc_reversal_block_side = "NEUTRAL"
+        if self.btc_reversal_entry_cooldown_minutes <= 0:
+            return
+        block_side = self._resolve_btc_1h_reversal_block_side(btc_guard=btc_guard)
+        if block_side not in {"LONG", "SHORT"}:
+            return
+        cooldown_until_ts = now_ts + (self.btc_reversal_entry_cooldown_minutes * 60.0)
+        if block_side != self._btc_reversal_block_side or cooldown_until_ts > self._btc_reversal_block_until_ts:
+            self._btc_reversal_block_side = block_side
+            self._btc_reversal_block_until_ts = cooldown_until_ts
+
+    def _btc_reversal_entry_block_reason(self, *, side: str, btc_guard: dict[str, Any] | None = None) -> str | None:
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        if btc_guard is not None:
+            self._apply_btc_reversal_entry_cooldown(btc_guard)
+        block_side_now = self._resolve_btc_1h_reversal_block_side(btc_guard=btc_guard)
+        if self.btc_reversal_entry_block_enabled and side_key == block_side_now:
+            return f"BTC 1H reversal block {side_key}"
+        now_ts = time.time()
+        if self._btc_reversal_block_until_ts > 0 and now_ts >= self._btc_reversal_block_until_ts:
+            self._btc_reversal_block_until_ts = 0.0
+            self._btc_reversal_block_side = "NEUTRAL"
+        if side_key != self._btc_reversal_block_side:
+            return None
+        if self._btc_reversal_block_until_ts <= now_ts:
+            return None
+        remain_minutes = max(1, int(math.ceil((self._btc_reversal_block_until_ts - now_ts) / 60.0)))
+        return f"BTC 1H reversal cooldown {side_key} ({remain_minutes}m left)"
 
     def _should_close_profit_on_btc_trend(
         self,
@@ -3982,6 +4104,217 @@ class PaperTradingEngine:
             return False
 
         return True
+
+    def _analyze_btc_kill_short_15m(self, rows: list[list[Any]]) -> dict[str, bool]:
+        payload = {
+            "active": False,
+            "confirmation_ready": False,
+            "entry_buffer_pct": 0.0,
+        }
+        if not self.btc_kill_short_guard_enabled:
+            return payload
+        candles = [row for row in rows if len(row) >= 5]
+        if len(candles) < 6:
+            return payload
+
+        current_row = candles[-1]
+        closed_rows = candles[:-1]
+        if len(closed_rows) < 4:
+            return payload
+
+        closes = [float(row[4]) for row in closed_rows]
+        if len(closes) < 100:
+            return payload
+
+        last_closed = closed_rows[-1]
+        prev_closed = closed_rows[-2]
+        recent_closed_rows = closed_rows[-4:]
+        ema99_last_closed = self._ema_last(closes[-160:], period=99)
+        ema99_prev_closed = self._ema_last(closes[:-1][-160:], period=99) if len(closes) > 100 else ema99_last_closed
+        current_closes = closes + [float(current_row[4])]
+        ema99_current = self._ema_last(current_closes[-160:], period=99)
+
+        prev_pump = self._is_btc_kill_short_pump_candle(
+            candle=prev_closed,
+            ema99=ema99_prev_closed,
+            prior_rows=recent_closed_rows[:-2],
+        )
+        last_closed_pump = self._is_btc_kill_short_pump_candle(
+            candle=last_closed,
+            ema99=ema99_last_closed,
+            prior_rows=recent_closed_rows[:-1],
+        )
+        closed_confirmation = prev_pump and self._is_btc_kill_short_confirmation_candle(
+            candle=last_closed,
+            pump_candle=prev_closed,
+        )
+        live_pump = self._is_btc_kill_short_live_pump_candle(
+            candle=current_row,
+            ema99=ema99_current,
+            prior_rows=recent_closed_rows,
+        )
+
+        if live_pump:
+            payload["entry_buffer_pct"] = self._resolve_btc_kill_short_entry_buffer_pct(
+                candle=current_row,
+                ema99=ema99_current,
+            )
+        elif last_closed_pump:
+            payload["entry_buffer_pct"] = self._resolve_btc_kill_short_entry_buffer_pct(
+                candle=last_closed,
+                ema99=ema99_last_closed,
+            )
+        elif closed_confirmation:
+            payload["entry_buffer_pct"] = self._resolve_btc_kill_short_entry_buffer_pct(
+                candle=prev_closed,
+                ema99=ema99_prev_closed,
+            )
+
+        payload["confirmation_ready"] = bool(closed_confirmation)
+        payload["active"] = bool(live_pump or last_closed_pump or (prev_pump and not closed_confirmation))
+        return payload
+
+    def _is_btc_kill_short_pump_candle(self, *, candle: list[Any], ema99: float, prior_rows: list[list[Any]]) -> bool:
+        if ema99 <= 0:
+            return False
+        try:
+            open_px = float(candle[1])
+            high_px = float(candle[2])
+            low_px = float(candle[3])
+            close_px = float(candle[4])
+        except Exception:
+            return False
+        if open_px <= 0 or close_px <= open_px:
+            return False
+        body_pct = ((close_px - open_px) / open_px) * 100.0
+        if body_pct < self.btc_kill_short_pump_min_body_pct:
+            return False
+        tol = self.btc_kill_short_ema_tolerance_pct
+        touched_ema_zone = low_px <= (ema99 * (1.0 + tol))
+        reclaimed_ema = close_px >= (ema99 * (1.0 + (tol * 0.2)))
+        swept_above = high_px >= max(close_px, ema99 * (1.0 + tol))
+        if not (touched_ema_zone and reclaimed_ema and swept_above):
+            return False
+        had_recent_red = False
+        had_recent_ema_pressure = False
+        for row in prior_rows:
+            if len(row) < 5:
+                continue
+            try:
+                prev_open = float(row[1])
+                prev_low = float(row[3])
+                prev_close = float(row[4])
+            except Exception:
+                continue
+            if prev_close < prev_open:
+                had_recent_red = True
+            if prev_low <= (ema99 * (1.0 + tol)) or prev_close <= (ema99 * (1.0 + tol)):
+                had_recent_ema_pressure = True
+        return had_recent_red or had_recent_ema_pressure
+
+    def _is_btc_kill_short_live_pump_candle(self, *, candle: list[Any], ema99: float, prior_rows: list[list[Any]]) -> bool:
+        if ema99 <= 0:
+            return False
+        try:
+            open_px = float(candle[1])
+            high_px = float(candle[2])
+            low_px = float(candle[3])
+            close_px = float(candle[4])
+        except Exception:
+            return False
+        if open_px <= 0:
+            return False
+        tol = self.btc_kill_short_ema_tolerance_pct
+        range_pct = ((high_px - low_px) / open_px) * 100.0
+        if range_pct < self.btc_kill_short_pump_min_body_pct:
+            return False
+        touched_ema_zone = low_px <= (ema99 * (1.0 + tol))
+        swept_above = high_px >= (ema99 * (1.0 + tol))
+        held_above_zone = max(open_px, close_px) >= (ema99 * (1.0 + (tol * 0.2)))
+        if not (touched_ema_zone and swept_above and held_above_zone):
+            return False
+        had_recent_red = False
+        had_recent_ema_pressure = False
+        for row in prior_rows:
+            if len(row) < 5:
+                continue
+            try:
+                prev_open = float(row[1])
+                prev_low = float(row[3])
+                prev_close = float(row[4])
+            except Exception:
+                continue
+            if prev_close < prev_open:
+                had_recent_red = True
+            if prev_low <= (ema99 * (1.0 + tol)) or prev_close <= (ema99 * (1.0 + tol)):
+                had_recent_ema_pressure = True
+        return had_recent_red or had_recent_ema_pressure
+
+    @staticmethod
+    def _is_btc_kill_short_confirmation_candle(*, candle: list[Any], pump_candle: list[Any]) -> bool:
+        if len(candle) < 5 or len(pump_candle) < 5:
+            return False
+        try:
+            open_px = float(candle[1])
+            close_px = float(candle[4])
+            pump_close = float(pump_candle[4])
+        except Exception:
+            return False
+        return close_px < open_px and close_px < pump_close
+
+    def _resolve_btc_kill_short_entry_buffer_pct(self, *, candle: list[Any], ema99: float) -> float:
+        if len(candle) < 5 or ema99 <= 0:
+            return 0.0
+        try:
+            open_px = float(candle[1])
+            high_px = float(candle[2])
+            low_px = float(candle[3])
+        except Exception:
+            return 0.0
+        if open_px <= 0:
+            return 0.0
+        tol = self.btc_kill_short_ema_tolerance_pct
+        sweep_pct = max(0.0, (high_px / max(ema99, 1e-12)) - 1.0)
+        range_pct = max(0.0, (high_px - low_px) / open_px)
+        return self._clamp(max(0.0012, sweep_pct + (range_pct * 0.25) + (tol * 0.5)), 0.0012, 0.0045)
+
+    def _adjust_entry_for_btc_kill_short(
+        self,
+        *,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        market_price: float,
+        btc_guard: dict[str, Any] | None,
+    ) -> tuple[float, float, float]:
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return entry, take_profit, stop_loss
+        if bool((btc_guard or {}).get("kill_short_15m_active")):
+            return entry, take_profit, stop_loss
+        if not bool((btc_guard or {}).get("kill_short_15m_confirmation_ready")):
+            return entry, take_profit, stop_loss
+        try:
+            buffer_pct = float((btc_guard or {}).get("kill_short_15m_entry_buffer_pct") or 0.0)
+        except Exception:
+            buffer_pct = 0.0
+        if buffer_pct <= 0.0 or entry <= 0 or take_profit <= 0 or stop_loss <= 0 or market_price <= 0:
+            return entry, take_profit, stop_loss
+        adjusted_entry = max(entry * (1.0 + buffer_pct), market_price * (1.0 + max(0.0008, buffer_pct * 0.5)))
+        scale = adjusted_entry / max(entry, 1e-12)
+        adjusted_tp = take_profit * scale
+        adjusted_sl = stop_loss * scale
+        return float(adjusted_entry), float(adjusted_tp), float(adjusted_sl)
+
+    def _btc_kill_short_guard_reason(self, *, side: str, btc_guard: dict[str, Any]) -> str | None:
+        if not self.btc_kill_short_guard_enabled:
+            return None
+        if str(side or "").upper() != "SHORT":
+            return None
+        if not bool((btc_guard or {}).get("kill_short_15m_active")):
+            return None
+        return "BTC 15m kill-short guard (wait red confirmation)"
 
     def _pass_btc_up_shock_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
         # Backward-compatible helper used by external precheck code.

@@ -364,9 +364,10 @@ class PaperTradeAPI:
     def get_daily_hourly_summary(
         self,
         days: int = Query(default=30, ge=1, le=365),
+        entry_type: str | None = Query(default=None),
     ) -> PaperTradeDailyHourlySummaryResponse:
         repo = self._require_repo()
-        rows = repo.daily_hourly_summary(days=days)
+        rows = repo.daily_hourly_summary(days=days, entry_type=entry_type or None)
         return PaperTradeDailyHourlySummaryResponse(items=[PaperTradeDailyHourlySummary(**row) for row in rows])
 
 

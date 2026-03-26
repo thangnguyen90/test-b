@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query
 
 from app.core.config import settings
-from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor
+from app.deps import get_paper_trade_runtime, ml_candles_predictor, ml_predictor, ml_test_predictor
 from app.services.binance_client import BinanceFuturesClient
 from app.services.risk_manager import calc_estimated_margin_ratio_pct
 from app.services.signal_candle_pattern_service import signal_candle_pattern_service
@@ -313,6 +313,16 @@ def _evaluate_paper_entry_gate(
                 pass
 
             try:
+                kill_short_reason = engine._btc_kill_short_guard_reason(
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if kill_short_reason:
+                    return False, str(kill_short_reason), effective_probability, btc_following
+            except Exception:
+                pass
+
+            try:
                 required_min_win = float(min_win)
                 required_min_win = float(
                     engine._apply_bullish_short_nonfollow_min_win_bonus(
@@ -379,6 +389,18 @@ def _evaluate_paper_entry_gate(
                 ):
                     return False, f"BTC trend {trend_side}", effective_probability, btc_following
                 return False, "BTC filter", effective_probability, btc_following
+
+        try:
+            entry, take_profit, stop_loss = engine._adjust_entry_for_btc_kill_short(
+                side=side,
+                entry=entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                market_price=market_price,
+                btc_guard=btc_guard,
+            )
+        except Exception:
+            pass
 
         try:
             touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
@@ -616,7 +638,14 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
     return payload
 
 
-def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
+def _scan_candles_signals_impl(
+    min_win: float,
+    max_symbols: int,
+    symbols: list[str] | None = None,
+    *,
+    response_signal_source: str = "ML_CANDLES",
+    gate_entry_type: str = "ML_CANDLES_TEST",
+) -> dict:
     if symbols:
         scan_symbols = symbols[:max_symbols]
     else:
@@ -667,13 +696,77 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
             matches.append(
                 _build_scan_match(
                     signal=signal,
-                    signal_source="ML_CANDLES",
+                    signal_source=response_signal_source,
                     last_price=float(last_price),
                     ticker=ticker if isinstance(ticker, dict) else {},
                     compare_field="baseline_ml",
                     compare_payload=baseline_ml_payload,
-                    gate_entry_type="ML_CANDLES_TEST",
+                    gate_entry_type=gate_entry_type,
                     force_entry_type_scope=True,
+                    candle_pattern_sample=candle_pattern_sample,
+                )
+            )
+
+    matches.sort(key=lambda item: item["win_probability"], reverse=True)
+    return {
+        "min_win": min_win,
+        "scanned": len(scan_symbols),
+        "count": len(matches),
+        "signals": matches,
+        "source": "live",
+        "timestamp": now_iso,
+    }
+
+
+def _scan_test_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
+    if symbols:
+        scan_symbols = symbols[:max_symbols]
+    else:
+        try:
+            scan_symbols = _get_usdt_swap_symbols(max_symbols=max_symbols)
+        except Exception:
+            scan_symbols = _SYMBOLS_CACHE["symbols"][:max_symbols] if _SYMBOLS_CACHE["symbols"] else []
+
+    matches: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    live_btc_phase = _resolve_live_btc_phase()
+    try:
+        tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
+    except Exception:
+        tickers_map = {}
+
+    for symbol in scan_symbols:
+        try:
+            ticker = tickers_map.get(symbol, {}) if isinstance(tickers_map, dict) else {}
+            last_price = _safe_float(ticker.get("last"))
+            if last_price is None:
+                last_price = _safe_float(ticker.get("close"))
+            if last_price is None:
+                bid = _safe_float(ticker.get("bid"))
+                ask = _safe_float(ticker.get("ask"))
+                if bid is not None and ask is not None:
+                    last_price = (bid + ask) / 2
+            if last_price is None:
+                continue
+
+            signal = ml_test_predictor.predict(symbol=symbol, mark_price=last_price)
+        except Exception:
+            continue
+
+        if signal.win_probability >= min_win:
+            candle_pattern_sample = signal_candle_pattern_service.match_signal(
+                signal_source="ML",
+                side=signal.side,
+                feature_snapshot=getattr(signal, "feature_snapshot", None),
+                live_btc_phase=live_btc_phase,
+            )
+            matches.append(
+                _build_scan_match(
+                    signal=signal,
+                    signal_source="ML_TEST",
+                    last_price=float(last_price),
+                    ticker=ticker if isinstance(ticker, dict) else {},
+                    gate_entry_type="ML_TEST",
                     candle_pattern_sample=candle_pattern_sample,
                 )
             )
@@ -705,6 +798,30 @@ def get_candles_scan_snapshot(
 ) -> dict:
     parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
     return _scan_candles_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
+
+
+def get_candles_bg_scan_snapshot(
+    min_win: float = settings.paper_trade_candles_bg_min_win,
+    max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
+    symbols: str | None = None,
+) -> dict:
+    parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    return _scan_candles_signals_impl(
+        min_win=min_win,
+        max_symbols=max_symbols,
+        symbols=parsed_symbols,
+        response_signal_source="ML_CANDLES_BG",
+        gate_entry_type="ML_CANDLES_BG",
+    )
+
+
+def get_test_scan_snapshot(
+    min_win: float = settings.paper_trade_test_ml_min_win,
+    max_symbols: int = settings.paper_trade_test_ml_max_symbols,
+    symbols: str | None = None,
+) -> dict:
+    parsed_symbols = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    return _scan_test_signals_impl(min_win=min_win, max_symbols=max_symbols, symbols=parsed_symbols)
 
 
 @router.get("/latest")
@@ -792,6 +909,24 @@ def scan_candles_signals(
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_candles_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
+
+
+@router.get("/candles/bg/scan")
+def scan_candles_bg_signals(
+    min_win: float = Query(default=settings.paper_trade_candles_bg_min_win, ge=0.0, le=1.0),
+    max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
+    symbols: str | None = Query(default=None),
+) -> dict:
+    return get_candles_bg_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
+
+
+@router.get("/test/scan")
+def scan_test_signals(
+    min_win: float = Query(default=settings.paper_trade_test_ml_min_win, ge=0.0, le=1.0),
+    max_symbols: int = Query(default=settings.paper_trade_test_ml_max_symbols, ge=1, le=600),
+    symbols: str | None = Query(default=None),
+) -> dict:
+    return get_test_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
 
 
 @router.get("/candle-pattern-samples")

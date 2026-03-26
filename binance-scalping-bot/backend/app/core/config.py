@@ -278,6 +278,9 @@ class Settings(BaseModel):
     paper_trade_btc_shock_up_require_pullback: bool = os.getenv("PAPER_TRADE_BTC_SHOCK_UP_REQUIRE_PULLBACK", "true").lower() == "true"
     paper_trade_btc_shock_pullback_ema_period: int = int(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_EMA_PERIOD", "21"))
     paper_trade_btc_shock_pullback_tolerance_pct: float = float(os.getenv("PAPER_TRADE_BTC_SHOCK_PULLBACK_TOLERANCE_PCT", "0.0015"))
+    paper_trade_btc_kill_short_guard_enabled: bool = os.getenv("PAPER_TRADE_BTC_KILL_SHORT_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_btc_kill_short_pump_min_body_pct: float = float(os.getenv("PAPER_TRADE_BTC_KILL_SHORT_PUMP_MIN_BODY_PCT", "0.7"))
+    paper_trade_btc_kill_short_ema_tolerance_pct: float = float(os.getenv("PAPER_TRADE_BTC_KILL_SHORT_EMA_TOLERANCE_PCT", "0.0025"))
     paper_trade_btc_reversal_profit_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED", "false").lower() == "true"
     paper_trade_btc_reversal_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT", "0.8"))
     paper_trade_btc_reversal_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE", "0.55"))
@@ -289,6 +292,13 @@ class Settings(BaseModel):
     )
     paper_trade_btc_reversal_loss_exit_min_loss_pct: float = float(
         os.getenv("PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_MIN_LOSS_PCT", "0.1")
+    )
+    paper_trade_btc_reversal_entry_block_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_REVERSAL_ENTRY_BLOCK_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_reversal_entry_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_BTC_REVERSAL_ENTRY_COOLDOWN_MINUTES", "60")
     )
     paper_trade_btc_profit_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED", "true").lower() == "true"
     paper_trade_btc_profit_lock_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE", "0.6"))
