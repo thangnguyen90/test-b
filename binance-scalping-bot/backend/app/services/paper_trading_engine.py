@@ -132,6 +132,7 @@ class PaperTradingEngine:
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
+        symbol_sl_block_minutes: int = 180,
         instant_sl_guard_enabled: bool = True,
         instant_sl_guard_max_hold_minutes: int = 25,
         instant_sl_guard_min_abs_pnl_pct: float = 10.0,
@@ -308,6 +309,7 @@ class PaperTradingEngine:
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
+        self.symbol_sl_block_minutes = max(0, int(symbol_sl_block_minutes))
         self.instant_sl_guard_enabled = bool(instant_sl_guard_enabled)
         self.instant_sl_guard_max_hold_minutes = max(1, int(instant_sl_guard_max_hold_minutes))
         self.instant_sl_guard_min_abs_pnl_pct = max(0.0, float(instant_sl_guard_min_abs_pnl_pct))
@@ -1684,6 +1686,35 @@ class PaperTradingEngine:
     def _instant_sl_guard_key(self, symbol: str, side: str) -> str:
         return f"{self._normalize_symbol_key(symbol)}|{str(side or '').upper()}"
 
+    def _recent_symbol_sl_guard_reason(self, *, symbol: str, side: str) -> str | None:
+        if self.symbol_sl_block_minutes <= 0:
+            return None
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        try:
+            rows = self.repo.list_recent_closed_trades_for_symbol(symbol=symbol, limit=6)
+        except Exception:
+            return None
+        latest_same_side = next(
+            (row for row in rows if str(row.get("side") or "").upper() == side_key),
+            None,
+        )
+        if latest_same_side is None:
+            return None
+        close_reason = str(latest_same_side.get("close_reason") or "").upper()
+        if not self._is_sl_close_reason(close_reason):
+            return None
+        closed_at = latest_same_side.get("closed_at") or latest_same_side.get("updated_at")
+        elapsed = self._elapsed_seconds_since(closed_at)
+        if elapsed is None:
+            return None
+        remain_seconds = float(self.symbol_sl_block_minutes * 60) - elapsed
+        if remain_seconds <= 0:
+            return None
+        remain_minutes = max(1, int(math.ceil(remain_seconds / 60.0)))
+        return f"Recent SL block {side_key} ({remain_minutes}m left)"
+
     def _instant_sl_guard_reason(self, *, symbol: str, side: str) -> str | None:
         if not self.instant_sl_guard_enabled:
             return None
@@ -1737,6 +1768,9 @@ class PaperTradingEngine:
         return None
 
     def _entry_guard_reason(self, *, symbol: str, side: str) -> str | None:
+        recent_sl_reason = self._recent_symbol_sl_guard_reason(symbol=symbol, side=side)
+        if recent_sl_reason:
+            return recent_sl_reason
         instant_reason = self._instant_sl_guard_reason(symbol=symbol, side=side)
         if instant_reason:
             return instant_reason

@@ -181,6 +181,7 @@ async def on_startup() -> None:
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
                 reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
                 reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,
+                symbol_sl_block_minutes=settings.paper_trade_symbol_sl_block_minutes,
                 instant_sl_guard_enabled=settings.paper_trade_instant_sl_guard_enabled,
                 instant_sl_guard_max_hold_minutes=settings.paper_trade_instant_sl_guard_max_hold_minutes,
                 instant_sl_guard_min_abs_pnl_pct=settings.paper_trade_instant_sl_guard_min_abs_pnl_pct,

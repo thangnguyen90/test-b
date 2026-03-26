@@ -249,6 +249,7 @@ class Settings(BaseModel):
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
+    paper_trade_symbol_sl_block_minutes: int = int(os.getenv("PAPER_TRADE_SYMBOL_SL_BLOCK_MINUTES", "180"))
     paper_trade_instant_sl_guard_enabled: bool = os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_ENABLED", "true").lower() == "true"
     paper_trade_instant_sl_guard_max_hold_minutes: int = int(
         os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES", "25")

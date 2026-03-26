@@ -1098,8 +1098,23 @@ class PaperTradeAPI:
 
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._resolve_repo(repo_scope=req.repo_scope, entry_type=req.entry_type)
+        entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
         if repo.has_open_trade(symbol=req.symbol, side=req.side):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
+        runtime_repo, runtime_engine = get_paper_trade_runtime()
+        if runtime_engine is not None and runtime_repo is repo:
+            hard_block_reason = runtime_engine._entry_hard_block_reason()
+            if hard_block_reason:
+                raise HTTPException(status_code=409, detail=str(hard_block_reason))
+            entry_guard_reason = runtime_engine._entry_guard_reason(symbol=req.symbol, side=req.side)
+            if entry_guard_reason:
+                raise HTTPException(status_code=409, detail=str(entry_guard_reason))
+            if runtime_engine._is_reentry_cooldown_active(
+                symbol=req.symbol,
+                side=req.side,
+                entry_type=entry_type,
+            ):
+                raise HTTPException(status_code=409, detail="Reentry cooldown")
 
         market_price = req.entry_price
         if market_price is None:
@@ -1184,7 +1199,6 @@ class PaperTradeAPI:
                 btc_following = bool(self.btc_follow_resolver(req.symbol))
             except Exception:
                 btc_following = None
-        entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
 
         trade_id = repo.create_open_trade(
             {
@@ -1205,7 +1219,6 @@ class PaperTradeAPI:
                 "feature_snapshot": feature_snapshot,
             }
         )
-        runtime_repo, runtime_engine = get_paper_trade_runtime()
         if runtime_engine is not None and runtime_repo is repo:
             try:
                 runtime_engine.register_open_pressure_event(side=req.side)

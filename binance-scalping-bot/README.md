@@ -251,6 +251,7 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true
 PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE=5
+PAPER_TRADE_SYMBOL_SL_BLOCK_MINUTES=180
 PAPER_TRADE_INSTANT_SL_GUARD_ENABLED=true
 PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES=25
 PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT=10
@@ -377,6 +378,7 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES` xác định thế nào là "SL nhanh".
 - `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT` / `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_MAE_PCT` là ngưỡng phạt.
 - `PAPER_TRADE_INSTANT_SL_GUARD_COOLDOWN_MINUTES` là thời gian khóa `symbol+side` sau tín hiệu xấu.
+- `PAPER_TRADE_SYMBOL_SL_BLOCK_MINUTES` khóa mọi lệnh mới cùng `symbol+side` sau khi lệnh gần nhất đóng bởi `SL`, kể cả khi chưa chạm ngưỡng "instant SL" nặng.
 - `PAPER_TRADE_INSTANT_SL_GLOBAL_*` là tầng bảo vệ toàn cục: nếu SL nhanh/sâu dồn dập thì tạm dừng mở lệnh mới.
 - `PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN` chặn cứng giờ mở lệnh theo giờ VN (không ảnh hưởng quản lý lệnh đang mở).  
 : hỗ trợ `20`, `20,21`, `20-22`, `22-2`.
