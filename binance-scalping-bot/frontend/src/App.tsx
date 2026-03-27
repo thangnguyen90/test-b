@@ -306,6 +306,63 @@ type HourlyWindowResponse = {
   items: HourlyWindowRow[]
 }
 
+type EntryHourMatrixCell = {
+  hour_vn: number
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
+type EntryHourMatrixRow = {
+  trade_date: string
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+  cells: EntryHourMatrixCell[]
+}
+
+type EntryHourMatrixSummary = {
+  active_days: number
+  total_trades: number
+  win_trades: number
+  loss_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
+type EntryHourMatrixTypeOption = {
+  key: string
+  label: string
+  total_trades: number
+}
+
+type EntryHourMatrixResponse = {
+  lookback_days: number
+  entry_type_key: string
+  entry_type_label: string
+  summary: EntryHourMatrixSummary
+  total_row: EntryHourMatrixRow
+  entry_type_options: EntryHourMatrixTypeOption[]
+  items: EntryHourMatrixRow[]
+}
+
+const ENTRY_HOUR_DAY_OPTIONS: Array<{ value: number; label: string }> = [
+  { value: 7, label: '7 Days' },
+  { value: 14, label: '14 Days' },
+  { value: 30, label: '30 Days' },
+  { value: 60, label: '60 Days' },
+  { value: 90, label: '90 Days' },
+  { value: 180, label: '180 Days' },
+  { value: 365, label: 'All (365d)' },
+]
+
 type MarketEventWindowItem = {
   id: number
   title: string
@@ -421,7 +478,7 @@ type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 type MlCandlesScreenView = 'signals' | 'compare'
-type AppScreenView = 'main' | 'paper' | 'daily' | 'ml-candles-signals' | 'ml-candles-compare'
+type AppScreenView = 'main' | 'paper' | 'daily' | 'entry-hour-matrix' | 'liq-map' | 'ml-candles-signals' | 'ml-candles-compare'
 
 type CompareBucket = {
   label: string
@@ -516,6 +573,8 @@ function resolveInitialScreenView(): AppScreenView {
   const raw = (params.get('view') || '').trim().toLowerCase()
   if (raw === 'paper') return 'paper'
   if (raw === 'daily') return 'daily'
+  if (raw === 'entry-hour-matrix') return 'entry-hour-matrix'
+  if (raw === 'liq-map') return 'liq-map'
   if (raw === 'ml-candles-signals') return 'ml-candles-signals'
   if (raw === 'ml-candles-compare') return 'ml-candles-compare'
   return 'main'
@@ -821,6 +880,11 @@ function formatCompactMoney(value?: number | null): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
   const rounded = Math.round(value)
   return rounded.toLocaleString()
+}
+
+function formatSignedNumber(value?: number | null, digits = 2): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
 }
 
 function calcUnrealizedPnlPct(trade: PaperTrade, markPrice?: number): number | null {
@@ -1158,10 +1222,16 @@ function App() {
   const [symbolsSource, setSymbolsSource] = useState<'binance' | 'fallback'>('fallback')
   const [symbolsStatus, setSymbolsStatus] = useState<string>('Using fallback symbols')
   const [priceWsStatus, setPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
-  const [showPaperScreen, setShowPaperScreen] = useState(false)
-  const [showDailyScreen, setShowDailyScreen] = useState(false)
-  const [showMlCandlesScreen, setShowMlCandlesScreen] = useState(false)
-  const [mlCandlesScreenView, setMlCandlesScreenView] = useState<MlCandlesScreenView>('signals')
+  const [showPaperScreen, setShowPaperScreen] = useState(initialScreenView === 'paper')
+  const [showDailyScreen, setShowDailyScreen] = useState(initialScreenView === 'daily')
+  const [showEntryHourMatrixScreen, setShowEntryHourMatrixScreen] = useState(initialScreenView === 'entry-hour-matrix')
+  const [showLiqMapScreen, setShowLiqMapScreen] = useState(initialScreenView === 'liq-map')
+  const [showMlCandlesScreen, setShowMlCandlesScreen] = useState(
+    initialScreenView === 'ml-candles-signals' || initialScreenView === 'ml-candles-compare',
+  )
+  const [mlCandlesScreenView, setMlCandlesScreenView] = useState<MlCandlesScreenView>(
+    initialScreenView === 'ml-candles-compare' ? 'compare' : 'signals',
+  )
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
@@ -1189,6 +1259,9 @@ function App() {
   const [hourlyWindowMeta, setHourlyWindowMeta] = useState<Omit<HourlyWindowResponse, 'items'> | null>(null)
   const [hourlyWeekdayFilter, setHourlyWeekdayFilter] = useState<'ALL' | number>('ALL')
   const [hourlyTrendFilter, setHourlyTrendFilter] = useState<'ALL' | 'LONG' | 'SHORT' | 'NEUTRAL'>('ALL')
+  const [entryHourMatrix, setEntryHourMatrix] = useState<EntryHourMatrixResponse | null>(null)
+  const [entryHourMatrixType, setEntryHourMatrixType] = useState<string>('ALL')
+  const [entryHourMatrixDays, setEntryHourMatrixDays] = useState<number>(30)
   const [eventWindows, setEventWindows] = useState<MarketEventWindowItem[]>([])
   const [eventPhase, setEventPhase] = useState<'UPCOMING' | 'ONGOING' | 'ALL'>('UPCOMING')
   const [eventServerTime, setEventServerTime] = useState<string | null>(null)
@@ -1239,6 +1312,13 @@ function App() {
     && healthLastOkAt != null
     && (Date.now() - healthLastOkAt) <= BACKEND_HEALTH_STALE_MS,
   )
+  const mainDashboardActive = !showPaperScreen
+    && !showDailyScreen
+    && !showEntryHourMatrixScreen
+    && !showLiqMapScreen
+    && !showMlCandlesScreen
+  const marketPriceScreenActive = mainDashboardActive || showLiqMapScreen
+  const paperPatternStatsActive = showPaperScreen || (showMlCandlesScreen && mlCandlesScreenView === 'compare')
 
   useEffect(() => {
     selectedCoinRef.current = selectedCoin
@@ -1265,12 +1345,27 @@ function App() {
     return marketPrice ?? signal?.predicted_entry_price ?? 62000
   }, [marketPrice, signal?.predicted_entry_price])
 
+  const liqMapActive = showLiqMapScreen
+
   const heatmapData = useMemo(
-    () => buildHeatmap(selectedCoin, chartBasePrice, threshold, timeframe, klineSeries),
-    [selectedCoin, chartBasePrice, threshold, timeframe, klineSeries],
+    () => (
+      liqMapActive
+        ? buildHeatmap(selectedCoin, chartBasePrice, threshold, timeframe, klineSeries)
+        : {
+            rows: 1,
+            cols: 2,
+            currentCol: 0,
+            values: new Float32Array(2),
+            priceSeries: [chartBasePrice, chartBasePrice],
+            minPrice: chartBasePrice,
+            maxPrice: chartBasePrice,
+          }
+    ),
+    [liqMapActive, selectedCoin, chartBasePrice, threshold, timeframe, klineSeries],
   )
 
   const emaLines = useMemo(() => {
+    if (!liqMapActive) return []
     const config: Array<{ period: number; color: string }> = [
       { period: 9, color: '#ffd166' },
       { period: 21, color: '#7cf7ff' },
@@ -1290,9 +1385,10 @@ function App() {
       lines.push({ period: item.period, color: item.color, points })
     }
     return lines
-  }, [klineSeries, heatmapData.currentCol, heatmapData.cols, heatmapData.priceSeries, emaVisible])
+  }, [liqMapActive, klineSeries, heatmapData.currentCol, heatmapData.cols, heatmapData.priceSeries, emaVisible])
 
   const priceTicks = useMemo(() => {
+    if (!liqMapActive) return []
     const ticks: number[] = []
     const total = 8
     for (let i = 0; i < total; i += 1) {
@@ -1301,10 +1397,10 @@ function App() {
       ticks.push(value)
     }
     return ticks
-  }, [heatmapData.maxPrice, heatmapData.minPrice])
+  }, [liqMapActive, heatmapData.maxPrice, heatmapData.minPrice])
 
   const hoverSummary = useMemo(() => {
-    if (!hoverInfo) return null
+    if (!liqMapActive || !hoverInfo) return null
     const current = marketPrice ?? chartBasePrice
     const distancePct = ((hoverInfo.price - current) / current) * 100
     const side = hoverInfo.price >= current ? 'Shorts At Risk' : 'Longs At Risk'
@@ -1331,7 +1427,7 @@ function App() {
       timeText: new Date(hoveredMs).toLocaleString(),
       deltaHours,
     }
-  }, [hoverInfo, marketPrice, chartBasePrice, timeframe, heatmapData.cols, heatmapData.currentCol])
+  }, [liqMapActive, hoverInfo, marketPrice, chartBasePrice, timeframe, heatmapData.cols, heatmapData.currentCol])
 
   const sortedVolatility = useMemo(() => {
     const rows = [...topVolatility]
@@ -1619,6 +1715,20 @@ function App() {
     }
     return { open, closed }
   }, [paperOpenTrades, paperHistory])
+  const entryHourMatrixMaxAbsPnl = useMemo(() => {
+    if (!entryHourMatrix) return 0
+    let maxAbs = Math.abs(entryHourMatrix.total_row.total_pnl)
+    for (const cell of entryHourMatrix.total_row.cells) {
+      maxAbs = Math.max(maxAbs, Math.abs(cell.total_pnl))
+    }
+    for (const row of entryHourMatrix.items) {
+      maxAbs = Math.max(maxAbs, Math.abs(row.total_pnl))
+      for (const cell of row.cells) {
+        maxAbs = Math.max(maxAbs, Math.abs(cell.total_pnl))
+      }
+    }
+    return maxAbs
+  }, [entryHourMatrix])
   const mlCompareBuckets = useMemo(() => {
     const buildBucket = (
       label: string,
@@ -1892,6 +2002,11 @@ function App() {
     setError('')
     setHoverInfo(null)
     setKlineSeries([])
+    setShowLiqMapScreen(true)
+    setShowPaperScreen(false)
+    setShowDailyScreen(false)
+    setShowEntryHourMatrixScreen(false)
+    setShowMlCandlesScreen(false)
     if (typeof hintPrice === 'number' && Number.isFinite(hintPrice) && hintPrice > 0) {
       setMarketPrice(hintPrice)
     }
@@ -2187,6 +2302,14 @@ function App() {
     markBackendAlive()
   }
 
+  async function fetchPaperOpenTrades() {
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_MAIN}`)
+    if (!response.ok) throw new Error('Paper open trades API unavailable')
+    const payload = await response.json() as { items: PaperTrade[] }
+    setPaperOpenTrades(payload.items ?? [])
+    markBackendAlive()
+  }
+
   async function fetchClosedPatternStats(targetLookback = closedPatternStatsTargetLookback) {
     const response = await fetch(
       `${API_BASE}/api/v1/paper-trades/pattern-stats?repo_scope=all&lookback=${targetLookback}&include_unknown=false`,
@@ -2334,6 +2457,19 @@ function App() {
       weekday_vn: payload.weekday_vn ?? null,
       trend_key: payload.trend_key ?? 'ALL',
     })
+  }
+
+  async function fetchEntryHourMatrix(nextEntryTypeKey?: string, nextDays?: number) {
+    const selectedType = (nextEntryTypeKey ?? entryHourMatrixType).trim().toUpperCase() || 'ALL'
+    const selectedDays = Math.max(1, Number(nextDays ?? entryHourMatrixDays) || 30)
+    const params = new URLSearchParams({
+      days: String(selectedDays),
+      entry_type_key: selectedType,
+    })
+    const response = await fetch(`${API_BASE}/api/v1/paper-trades/entry-hour-matrix?${params.toString()}`)
+    if (!response.ok) throw new Error('Entry hour matrix API unavailable')
+    const payload = await response.json() as EntryHourMatrixResponse
+    setEntryHourMatrix(payload)
   }
 
   async function fetchEventWindows(
@@ -2614,6 +2750,7 @@ function App() {
   }
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     const bootstrap = async () => {
       try {
         setError('')
@@ -2639,7 +2776,7 @@ function App() {
 
     bootstrap()
     return () => undefined
-  }, [])
+  }, [mainDashboardActive])
 
   useEffect(() => {
     return () => {
@@ -2651,6 +2788,7 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     fetchHealth().catch(() => {
       // Keep previous health if backend is briefly unavailable.
     })
@@ -2662,9 +2800,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mainDashboardActive])
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     fetchMlStatus().catch(() => {
       // Keep previous ML status when endpoint is temporarily unavailable.
     })
@@ -2676,9 +2815,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mainDashboardActive])
 
   useEffect(() => {
+    if (!(mainDashboardActive || showLiqMapScreen)) return () => undefined
     const timer = window.setInterval(() => {
       fetchFuturesSymbols().catch(() => {
         setSymbolsSource('fallback')
@@ -2689,17 +2829,22 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mainDashboardActive, showLiqMapScreen])
 
   useEffect(() => {
     const reqId = ++symbolReqIdRef.current
+    if (!(mainDashboardActive || showLiqMapScreen)) return () => undefined
     const refreshForSymbol = async () => {
       try {
         const symbol = selectedCoin
-        await Promise.all([
-          fetchSignal(symbol, marketPrice ?? chartBasePrice),
-          fetchKlines(symbol),
-        ])
+        const tasks: Array<Promise<unknown>> = []
+        if (mainDashboardActive) {
+          tasks.push(fetchSignal(symbol, marketPrice ?? chartBasePrice))
+        }
+        if (showLiqMapScreen) {
+          tasks.push(fetchKlines(symbol))
+        }
+        await Promise.all(tasks)
         if (reqId !== symbolReqIdRef.current) return
         setError('')
       } catch (err) {
@@ -2709,7 +2854,8 @@ function App() {
       }
     }
     refreshForSymbol()
-  }, [selectedCoin])
+    return () => undefined
+  }, [selectedCoin, mainDashboardActive, showLiqMapScreen])
 
   useEffect(() => {
     if (!showPaperScreen) return
@@ -2737,6 +2883,9 @@ function App() {
         // Keep previous signals if refresh fails.
       })
     } else {
+      fetchPaperOpenTrades().catch((err) => {
+        setError(err instanceof Error ? err.message : 'Unknown error')
+      })
       fetchMlCandlesTradingStats().catch((err) => {
         setError(err instanceof Error ? err.message : 'Unknown error')
       })
@@ -2751,6 +2900,9 @@ function App() {
           // Keep previous signals on transient failures.
         })
       } else {
+        fetchPaperOpenTrades().catch(() => {
+          // Keep previous ML open trades on transient failures.
+        })
         fetchMlCandlesTradingStats().catch(() => {
           // Keep previous ML candles trading data on transient failures.
         })
@@ -2788,6 +2940,24 @@ function App() {
       window.clearInterval(timer)
     }
   }, [showDailyScreen, hourlyWeekdayFilter, hourlyTrendFilter])
+
+  useEffect(() => {
+    if (!showEntryHourMatrixScreen) return
+
+    fetchEntryHourMatrix().catch((err) => {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    })
+
+    const timer = window.setInterval(() => {
+      fetchEntryHourMatrix().catch(() => {
+        // Keep previous matrix on transient failures.
+      })
+    }, 12000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [showEntryHourMatrixScreen, entryHourMatrixType, entryHourMatrixDays])
 
   useEffect(() => {
     setHistoryPage(1)
@@ -2890,12 +3060,15 @@ function App() {
   }, [showPaperScreen, showMlCandlesScreen, mlCandlesScreenView, paperOpenTrades, mlCandlesOpenTradesDb])
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     fetchTopVolatility(volDays).catch(() => {
       // Keep previous volatility table on request failure.
     })
-  }, [volDays])
+    return () => undefined
+  }, [volDays, mainDashboardActive])
 
   useEffect(() => {
+    if (!(mainDashboardActive || showDailyScreen)) return () => undefined
     fetchBtcTrend().catch(() => {
       // Keep previous BTC trend block on request failure.
     })
@@ -2909,9 +3082,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mainDashboardActive, showDailyScreen])
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     fetchLiqOverview(liqPage).catch(() => {
       // Keep previous liquidation overview table on request failure.
     })
@@ -2925,9 +3099,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [liqPage, liqPageSize])
+  }, [liqPage, liqPageSize, mainDashboardActive])
 
   useEffect(() => {
+    if (!mainDashboardActive) return
     if (!autoLiqMarketEnabled) return
     if (isOpeningMarketOrder) return
 
@@ -2956,7 +3131,7 @@ function App() {
     run().catch(() => {
       // Do not block UI if auto-open cycle fails.
     })
-  }, [autoLiqMarketEnabled, sortedLiqOverview, isOpeningMarketOrder])
+  }, [autoLiqMarketEnabled, sortedLiqOverview, isOpeningMarketOrder, mainDashboardActive])
 
   useEffect(() => {
     if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
@@ -3015,6 +3190,12 @@ function App() {
   ])
 
   useEffect(() => {
+    if (!mainDashboardActive) {
+      setSignalsWsStatus('fallback')
+      setHighWinLivePrices({})
+      setHighWinLivePriceTime({})
+      return () => undefined
+    }
     fetchHighWinSignals().catch(() => {
       // Initial fetch.
     })
@@ -3026,9 +3207,10 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [mainDashboardActive])
 
   useEffect(() => {
+    if (!paperPatternStatsActive) return () => undefined
     fetchClosedPatternStats().catch(() => {
       // Keep previous closed-pattern stats if request fails.
     })
@@ -3040,7 +3222,7 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [])
+  }, [paperPatternStatsActive])
 
   useEffect(() => {
     if (!showMlCandlesScreen || mlCandlesScreenView !== 'signals') return
@@ -3058,6 +3240,7 @@ function App() {
   }, [showMlCandlesScreen, mlCandlesScreenView])
 
   useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
     fetchEventWindows(eventPhase).catch(() => {
       // Keep previous event windows on request failure.
     })
@@ -3069,9 +3252,15 @@ function App() {
     return () => {
       window.clearInterval(timer)
     }
-  }, [eventPhase])
+  }, [eventPhase, mainDashboardActive])
 
   useEffect(() => {
+    if (!mainDashboardActive) {
+      setSignalsWsStatus('fallback')
+      setHighWinLivePrices({})
+      setHighWinLivePriceTime({})
+      return () => undefined
+    }
     if (highWinWsSymbols.length === 0) {
       setSignalsWsStatus('fallback')
       setHighWinLivePrices({})
@@ -3180,9 +3369,10 @@ function App() {
       stopFallback()
       socket?.close()
     }
-  }, [highWinWsSymbols])
+  }, [highWinWsSymbols, mainDashboardActive])
 
   useEffect(() => {
+    if (!marketPriceScreenActive) return () => undefined
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
     let fallbackTimer: number | null = null
@@ -3262,7 +3452,176 @@ function App() {
       stopFallback()
       socket?.close()
     }
-  }, [selectedCoin])
+  }, [selectedCoin, marketPriceScreenActive])
+
+  const resolveEntryHourCellStyle = (cell: EntryHourMatrixCell | EntryHourMatrixRow) => {
+    if (cell.total_trades <= 0) return undefined
+    const intensity = clamp(Math.abs(cell.total_pnl) / Math.max(1, entryHourMatrixMaxAbsPnl), 0.12, 1)
+    if (cell.total_pnl > 0) {
+      return { background: `rgba(31, 122, 76, ${0.08 + (intensity * 0.18)})` }
+    }
+    if (cell.total_pnl < 0) {
+      return { background: `rgba(173, 48, 48, ${0.08 + (intensity * 0.18)})` }
+    }
+    return { background: 'rgba(71, 95, 122, 0.06)' }
+  }
+
+  const buildEntryHourCellTitle = (cell: EntryHourMatrixCell | EntryHourMatrixRow) => (
+    `Trades: ${cell.total_trades} | `
+    + `W: ${cell.win_trades} | `
+    + `L: ${cell.loss_trades} | `
+    + `WR: ${(cell.win_rate * 100).toFixed(1)}% | `
+    + `Avg: ${formatSignedNumber(cell.avg_pnl, 2)}`
+  )
+
+  const renderLiquidationMapCard = () => (
+    <section className="card liq-card" ref={mapSectionRef}>
+      <div className="search-row">
+        <input
+          value={searchCoin}
+          onChange={(e) => setSearchCoin(e.target.value)}
+          className="search-input"
+          placeholder="Search coin"
+        />
+        <select value={selectedCoin} onChange={(e) => setSelectedCoin(e.target.value)} className="select-control">
+          {displayedCoins.map((coin) => (
+            <option key={coin} value={coin}>{coin}</option>
+          ))}
+        </select>
+        <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="select-control">
+          <option value="1h">1h</option>
+          <option value="4h">4h</option>
+          <option value="12h">12h</option>
+          <option value="24h">24h</option>
+        </select>
+      </div>
+      <div className="symbols-meta">
+        <span className={`badge ${symbolsSource === 'binance' ? 'success' : 'warn'}`}>
+          {symbolsSource === 'binance' ? 'Binance Symbols' : 'Fallback Symbols'}
+        </span>
+        <span className="symbols-text">{symbolsStatus}</span>
+      </div>
+
+      <div className="coin-chip-row">
+        {displayedCoins.slice(0, 8).map((coin) => (
+          <button
+            key={coin}
+            className={`coin-chip ${selectedCoin === coin ? 'coin-chip-active' : ''}`}
+            onClick={() => setSelectedCoin(coin)}
+            type="button"
+          >
+            {coin}
+          </button>
+        ))}
+      </div>
+
+      <div className="control-row">
+        <div className="palette-group">
+          {PALETTES.map((palette) => (
+            <button
+              key={palette.id}
+              type="button"
+              onClick={() => setPaletteId(palette.id)}
+              className={`palette-btn ${paletteId === palette.id ? 'palette-btn-active' : ''}`}
+              title={palette.name}
+            >
+              <span
+                className="palette-swatch"
+                style={{
+                  background: `linear-gradient(90deg, rgb(${palette.stops[0][1]} ${palette.stops[0][2]} ${palette.stops[0][3]}), rgb(${palette.stops[palette.stops.length - 1][1]} ${palette.stops[palette.stops.length - 1][2]} ${palette.stops[palette.stops.length - 1][3]}))`,
+                }}
+              />
+            </button>
+          ))}
+        </div>
+
+        <div className="threshold-group">
+          <label htmlFor="threshold">Liquidity Threshold = {threshold.toFixed(2)}</label>
+          <input
+            id="threshold"
+            type="range"
+            min={0.2}
+            max={0.95}
+            step={0.01}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+          />
+        </div>
+      </div>
+      <div className="ema-row">
+        {[9, 21, 50, 200].map((period) => (
+          <label key={period} className="ema-toggle">
+            <input
+              type="checkbox"
+              checked={!!emaVisible[period]}
+              onChange={(e) => {
+                const checked = e.target.checked
+                setEmaVisible((prev) => ({ ...prev, [period]: checked }))
+              }}
+            />
+            <span>EMA {period}</span>
+          </label>
+        ))}
+      </div>
+
+      <div className="map-header">
+        <h2>
+          {selectedCoin} Liquidation Map
+          {' | Price: '}
+          {marketPrice != null ? marketPrice.toFixed(marketPrice >= 100 ? 2 : 6) : '...'}
+          {' | WS: '}
+          {priceWsStatus}
+          {' | TS: '}
+          {formatVnTimestamp(marketPriceTime)}
+        </h2>
+        <span className={`badge ${connectionStatus === 'Live' ? 'success' : 'warn'}`}>{connectionStatus}</span>
+      </div>
+
+      <div className="map-stage">
+        <div className="map-canvas-wrap">
+          <LiquidationMapCanvas
+            data={heatmapData}
+            palette={activePalette}
+            emaLines={emaLines}
+            onHover={(payload) => setHoverInfo(payload)}
+            onLeave={() => setHoverInfo(null)}
+          />
+          <div
+            className="now-marker"
+            style={{ left: `${(heatmapData.currentCol / Math.max(1, heatmapData.cols - 1)) * 100}%` }}
+          >
+            NOW
+          </div>
+          {hoverInfo ? (
+            <>
+              <div className="crosshair-v" style={{ left: `${hoverInfo.x}px` }} />
+              <div className="crosshair-h" style={{ top: `${hoverInfo.y}px` }} />
+            </>
+          ) : null}
+        </div>
+        <div className="price-axis">
+          {priceTicks.map((price, idx) => (
+            <span key={`${price}-${idx}`}>{price.toFixed(price >= 100 ? 2 : 6)}</span>
+          ))}
+        </div>
+      </div>
+      {hoverInfo && hoverSummary ? (
+        <div className="hover-panel">
+          <p><strong>Hovered Price:</strong> {hoverInfo.price.toFixed(hoverInfo.price >= 100 ? 2 : 6)}</p>
+          <p><strong>Distance:</strong> {hoverSummary.distancePct.toFixed(2)}%</p>
+          <p><strong>Zone:</strong> {hoverSummary.side}</p>
+          <p><strong>Liquidity Score:</strong> {hoverSummary.liqScore.toFixed(1)}</p>
+          <p><strong>Est. Liquidation:</strong> ${Math.round(hoverSummary.estUsd).toLocaleString()}</p>
+          <p><strong>Time Slice:</strong> {hoverSummary.timeText}</p>
+          <p><strong>Offset:</strong> {hoverSummary.deltaHours >= 0 ? '+' : ''}{hoverSummary.deltaHours.toFixed(1)}h</p>
+        </div>
+      ) : (
+        <div className="hover-panel muted">
+          <p>Hover on heatmap to inspect price zone and liquidation estimate.</p>
+        </div>
+      )}
+    </section>
+  )
 
   if (initialScreenView === 'ml-candles-signals') {
     return (
@@ -3412,8 +3771,46 @@ function App() {
     )
   }
 
+  if (showLiqMapScreen) {
+    return (
+      <main className="app-shell app-shell-wide">
+        <div className="trade-toast-stack">
+          {tradeToasts.map((toast) => (
+            <div key={toast.id} className={`trade-toast ${toast.closeReason === 'TP' ? 'trade-toast-tp' : 'trade-toast-sl'}`}>
+              <strong>{toast.closeReason === 'TP' ? 'TP Hit' : 'SL Hit'}</strong>
+              <span>{toast.symbol} #{toast.tradeId}</span>
+              <span>
+                {typeof toast.pnlPct === 'number'
+                  ? `${toast.pnlPct >= 0 ? '+' : ''}${toast.pnlPct.toFixed(2)}%`
+                  : '-'}
+              </span>
+            </div>
+          ))}
+        </div>
+        <section className="hero">
+          <p className="eyebrow">Liquidation Map</p>
+          <h1>Liquidation Map Standalone</h1>
+          <p className="subtext">
+            Man rieng cho heatmap de giam do render tren browser khi ban dang xem cac bang thong ke khac.
+          </p>
+          <div className="hero-actions">
+            <button
+              type="button"
+              onClick={() => {
+                setShowLiqMapScreen(false)
+              }}
+            >
+              Back To Main Screen
+            </button>
+          </div>
+        </section>
+        {renderLiquidationMapCard()}
+      </main>
+    )
+  }
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${showEntryHourMatrixScreen ? 'app-shell-wide' : ''}`.trim()}>
       <div className="trade-toast-stack">
         {tradeToasts.map((toast) => (
           <div key={toast.id} className={`trade-toast ${toast.closeReason === 'TP' ? 'trade-toast-tp' : 'trade-toast-sl'}`}>
@@ -3437,8 +3834,22 @@ function App() {
           <button
             type="button"
             onClick={() => {
-              setShowPaperScreen((v) => !v)
+              setShowLiqMapScreen(true)
+              setShowPaperScreen(false)
               setShowDailyScreen(false)
+              setShowEntryHourMatrixScreen(false)
+              setShowMlCandlesScreen(false)
+            }}
+          >
+            Open Liquidation Map
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setShowPaperScreen((v) => !v)
+              setShowLiqMapScreen(false)
+              setShowDailyScreen(false)
+              setShowEntryHourMatrixScreen(false)
               setShowMlCandlesScreen(false)
             }}
           >
@@ -3450,10 +3861,25 @@ function App() {
             onClick={() => {
               setShowDailyScreen((v) => !v)
               setShowPaperScreen(false)
+              setShowLiqMapScreen(false)
+              setShowEntryHourMatrixScreen(false)
               setShowMlCandlesScreen(false)
             }}
           >
             {showDailyScreen ? 'Back To Main Screen' : 'Open Daily Win/Loss'}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              setShowEntryHourMatrixScreen((v) => !v)
+              setShowPaperScreen(false)
+              setShowDailyScreen(false)
+              setShowLiqMapScreen(false)
+              setShowMlCandlesScreen(false)
+            }}
+          >
+            {showEntryHourMatrixScreen ? 'Back To Main Screen' : 'Open Entry Hour Matrix'}
           </button>
           <button
             type="button"
@@ -3464,6 +3890,8 @@ function App() {
               setShowMlCandlesScreen(nextOpen)
               setShowPaperScreen(false)
               setShowDailyScreen(false)
+              setShowEntryHourMatrixScreen(false)
+              setShowLiqMapScreen(false)
             }}
           >
             {showMlCandlesScreen && mlCandlesScreenView === 'signals' ? 'Back To Main Screen' : 'Open ML Candles Signals'}
@@ -3477,6 +3905,8 @@ function App() {
               setShowMlCandlesScreen(nextOpen)
               setShowPaperScreen(false)
               setShowDailyScreen(false)
+              setShowEntryHourMatrixScreen(false)
+              setShowLiqMapScreen(false)
             }}
           >
             {showMlCandlesScreen && mlCandlesScreenView === 'compare' ? 'Back To Main Screen' : 'Open ML Candles Compare'}
@@ -4661,152 +5091,152 @@ function App() {
         </section>
       ) : null}
 
-      <section className="card liq-card" ref={mapSectionRef}>
-        <div className="search-row">
-          <input
-            value={searchCoin}
-            onChange={(e) => setSearchCoin(e.target.value)}
-            className="search-input"
-            placeholder="Search coin"
-          />
-          <select value={selectedCoin} onChange={(e) => setSelectedCoin(e.target.value)} className="select-control">
-            {displayedCoins.map((coin) => (
-              <option key={coin} value={coin}>{coin}</option>
-            ))}
-          </select>
-          <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)} className="select-control">
-            <option value="1h">1h</option>
-            <option value="4h">4h</option>
-            <option value="12h">12h</option>
-            <option value="24h">24h</option>
-          </select>
-        </div>
-        <div className="symbols-meta">
-          <span className={`badge ${symbolsSource === 'binance' ? 'success' : 'warn'}`}>
-            {symbolsSource === 'binance' ? 'Binance Symbols' : 'Fallback Symbols'}
-          </span>
-          <span className="symbols-text">{symbolsStatus}</span>
-        </div>
-
-        <div className="coin-chip-row">
-          {displayedCoins.slice(0, 8).map((coin) => (
-            <button
-              key={coin}
-              className={`coin-chip ${selectedCoin === coin ? 'coin-chip-active' : ''}`}
-              onClick={() => setSelectedCoin(coin)}
-              type="button"
-            >
-              {coin}
-            </button>
-          ))}
-        </div>
-
-        <div className="control-row">
-          <div className="palette-group">
-            {PALETTES.map((palette) => (
-              <button
-                key={palette.id}
-                type="button"
-                onClick={() => setPaletteId(palette.id)}
-                className={`palette-btn ${paletteId === palette.id ? 'palette-btn-active' : ''}`}
-                title={palette.name}
-              >
-                <span
-                  className="palette-swatch"
-                  style={{
-                    background: `linear-gradient(90deg, rgb(${palette.stops[0][1]} ${palette.stops[0][2]} ${palette.stops[0][3]}), rgb(${palette.stops[palette.stops.length - 1][1]} ${palette.stops[palette.stops.length - 1][2]} ${palette.stops[palette.stops.length - 1][3]}))`,
-                  }}
-                />
-              </button>
-            ))}
-          </div>
-
-          <div className="threshold-group">
-            <label htmlFor="threshold">Liquidity Threshold = {threshold.toFixed(2)}</label>
-            <input
-              id="threshold"
-              type="range"
-              min={0.2}
-              max={0.95}
-              step={0.01}
-              value={threshold}
-              onChange={(e) => setThreshold(Number(e.target.value))}
-            />
-          </div>
-        </div>
-        <div className="ema-row">
-          {[9, 21, 50, 200].map((period) => (
-            <label key={period} className="ema-toggle">
-              <input
-                type="checkbox"
-                checked={!!emaVisible[period]}
-                onChange={(e) => {
-                  const checked = e.target.checked
-                  setEmaVisible((prev) => ({ ...prev, [period]: checked }))
-                }}
-              />
-              <span>EMA {period}</span>
-            </label>
-          ))}
-        </div>
-
-        <div className="map-header">
-          <h2>
-            {selectedCoin} Liquidation Map
-            {' | Price: '}
-            {marketPrice != null ? marketPrice.toFixed(marketPrice >= 100 ? 2 : 6) : '...'}
-            {' | WS: '}
-            {priceWsStatus}
-            {' | TS: '}
-            {formatVnTimestamp(marketPriceTime)}
-          </h2>
-          <span className={`badge ${connectionStatus === 'Live' ? 'success' : 'warn'}`}>{connectionStatus}</span>
-        </div>
-
-        <div className="map-stage">
-          <div className="map-canvas-wrap">
-            <LiquidationMapCanvas
-              data={heatmapData}
-              palette={activePalette}
-              emaLines={emaLines}
-              onHover={(payload) => setHoverInfo(payload)}
-              onLeave={() => setHoverInfo(null)}
-            />
-            <div
-              className="now-marker"
-              style={{ left: `${(heatmapData.currentCol / Math.max(1, heatmapData.cols - 1)) * 100}%` }}
-            >
-              NOW
+      {showEntryHourMatrixScreen ? (
+        <section className="card entry-hour-card">
+          <header className="card-header entry-hour-header">
+            <div>
+              <h2>Loi nhuan thong ke theo tung gio vao lenh cua {entryHourMatrix?.lookback_days ?? entryHourMatrixDays} ngay gan nhat.</h2>
+              <p className="entry-hour-subtext">
+                Bang nay gom cac lenh da dong, nhom theo ngay vao lenh va khung gio VN cua `opened_at`.
+              </p>
             </div>
-            {hoverInfo ? (
-              <>
-                <div className="crosshair-v" style={{ left: `${hoverInfo.x}px` }} />
-                <div className="crosshair-h" style={{ top: `${hoverInfo.y}px` }} />
-              </>
-            ) : null}
+            <span className="badge neutral">Entry Heatmap</span>
+          </header>
+          <div className="entry-hour-toolbar">
+            <div className="entry-hour-controls">
+              <div className="entry-hour-chip-row">
+                {(entryHourMatrix?.entry_type_options ?? [
+                  { key: 'ALL', label: 'ALL', total_trades: 0 },
+                  { key: 'LIMIT', label: 'ML (LIMIT)', total_trades: 0 },
+                  { key: 'ML_CANDLES_BG', label: 'ML Candles BG', total_trades: 0 },
+                  { key: 'ML_CANDLES_TEST', label: 'ML Candles Test', total_trades: 0 },
+                  { key: 'ML_TEST', label: 'ML Test', total_trades: 0 },
+                ]).map((option) => (
+                  <button
+                    key={`entry-hour-type-${option.key}`}
+                    type="button"
+                    className={`tab-btn ${entryHourMatrixType === option.key ? 'tab-btn-active' : ''}`}
+                    onClick={() => {
+                      setEntryHourMatrixType(option.key)
+                    }}
+                  >
+                    {option.label} ({option.total_trades})
+                  </button>
+                ))}
+              </div>
+              <div className="entry-hour-days-row">
+                <label htmlFor="entry-hour-days" className="entry-hour-days-label">Lookback</label>
+                <select
+                  id="entry-hour-days"
+                  value={String(entryHourMatrixDays)}
+                  onChange={(e) => {
+                    const next = Number.parseInt(e.target.value, 10)
+                    setEntryHourMatrixDays(Number.isFinite(next) ? next : 30)
+                  }}
+                  className="select-control entry-hour-days-select"
+                >
+                  {ENTRY_HOUR_DAY_OPTIONS.map((option) => (
+                    <option key={`entry-hour-days-${option.value}`} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="entry-hour-summary">
+              <span><strong>Days:</strong> {entryHourMatrix?.summary.active_days ?? 0}</span>
+              <span><strong>Trades:</strong> {entryHourMatrix?.summary.total_trades ?? 0}</span>
+              <span><strong>Win Rate:</strong> {entryHourMatrix ? `${(entryHourMatrix.summary.win_rate * 100).toFixed(1)}%` : '-'}</span>
+              <span className={(entryHourMatrix?.summary.total_pnl ?? 0) >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                <strong>Total PnL:</strong> {entryHourMatrix ? formatSignedNumber(entryHourMatrix.summary.total_pnl, 2) : '-'}
+              </span>
+            </div>
           </div>
-          <div className="price-axis">
-            {priceTicks.map((price, idx) => (
-              <span key={`${price}-${idx}`}>{price.toFixed(price >= 100 ? 2 : 6)}</span>
-            ))}
+          <div className="content table-wrap entry-hour-table-wrap">
+            {!entryHourMatrix || entryHourMatrix.items.length === 0 ? (
+              <p>No closed trades in this lookback window.</p>
+            ) : (
+              <table className="entry-hour-table">
+                <thead>
+                  <tr>
+                    <th className="entry-hour-sticky-col">Date</th>
+                    {Array.from({ length: 24 }, (_, hour) => (
+                      <th key={`entry-hour-head-${hour}`}>{`${String(hour).padStart(2, '0')}h`}</th>
+                    ))}
+                    <th>Day Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="entry-hour-total-row">
+                    <td
+                      className="entry-hour-sticky-col"
+                      style={resolveEntryHourCellStyle(entryHourMatrix.total_row)}
+                      title={buildEntryHourCellTitle(entryHourMatrix.total_row)}
+                    >
+                      TOTAL
+                    </td>
+                    {entryHourMatrix.total_row.cells.map((cell) => (
+                      <td
+                        key={`entry-hour-total-${cell.hour_vn}`}
+                        style={resolveEntryHourCellStyle(cell)}
+                        title={buildEntryHourCellTitle(cell)}
+                      >
+                        {cell.total_trades > 0 ? (
+                          <span className={cell.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                            {formatSignedNumber(cell.total_pnl, 2)}
+                          </span>
+                        ) : '-'}
+                      </td>
+                    ))}
+                    <td
+                      className="entry-hour-day-total"
+                      style={resolveEntryHourCellStyle(entryHourMatrix.total_row)}
+                      title={buildEntryHourCellTitle(entryHourMatrix.total_row)}
+                    >
+                      <span className={entryHourMatrix.total_row.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                        {formatSignedNumber(entryHourMatrix.total_row.total_pnl, 2)}
+                      </span>
+                    </td>
+                  </tr>
+                  {entryHourMatrix.items.map((row) => (
+                    <tr key={`entry-hour-row-${row.trade_date}`}>
+                      <td
+                        className="entry-hour-sticky-col"
+                        style={resolveEntryHourCellStyle(row)}
+                        title={buildEntryHourCellTitle(row)}
+                      >
+                        {row.trade_date}
+                      </td>
+                      {row.cells.map((cell) => (
+                        <td
+                          key={`entry-hour-${row.trade_date}-${cell.hour_vn}`}
+                          style={resolveEntryHourCellStyle(cell)}
+                          title={buildEntryHourCellTitle(cell)}
+                        >
+                          {cell.total_trades > 0 ? (
+                            <span className={cell.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                              {formatSignedNumber(cell.total_pnl, 2)}
+                            </span>
+                          ) : '-'}
+                        </td>
+                      ))}
+                      <td
+                        className="entry-hour-day-total"
+                        style={resolveEntryHourCellStyle(row)}
+                        title={buildEntryHourCellTitle(row)}
+                      >
+                        <span className={row.total_pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
+                          {formatSignedNumber(row.total_pnl, 2)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
-        </div>
-        {hoverInfo && hoverSummary ? (
-          <div className="hover-panel">
-            <p><strong>Hovered Price:</strong> {hoverInfo.price.toFixed(hoverInfo.price >= 100 ? 2 : 6)}</p>
-            <p><strong>Distance:</strong> {hoverSummary.distancePct.toFixed(2)}%</p>
-            <p><strong>Zone:</strong> {hoverSummary.side}</p>
-            <p><strong>Liquidity Score:</strong> {hoverSummary.liqScore.toFixed(1)}</p>
-            <p><strong>Est. Liquidation:</strong> ${Math.round(hoverSummary.estUsd).toLocaleString()}</p>
-            <p><strong>Time Slice:</strong> {hoverSummary.timeText}</p>
-            <p><strong>Offset:</strong> {hoverSummary.deltaHours >= 0 ? '+' : ''}{hoverSummary.deltaHours.toFixed(1)}h</p>
-          </div>
-        ) : (
-          <div className="hover-panel muted">
-            <p>Hover on heatmap to inspect price zone and liquidation estimate.</p>
-          </div>
-        )}
-      </section>
+        </section>
+      ) : null}
 
       <section className="grid two-col">
         <article className="card">

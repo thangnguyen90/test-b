@@ -185,6 +185,12 @@ def _evaluate_paper_entry_gate(
             open_rows = repo.list_open_trades()
         except Exception:
             open_rows = []
+        try:
+            portfolio_guard_reason = engine._portfolio_guard_reason(side=side, open_rows=open_rows)
+            if portfolio_guard_reason:
+                return False, str(portfolio_guard_reason), raw_win_probability, None
+        except Exception:
+            pass
         target_side = str(side or "").upper()
         opposite_rows: list[dict] = []
         for row in open_rows:

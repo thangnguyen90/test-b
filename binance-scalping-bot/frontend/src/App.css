@@ -31,6 +31,11 @@ body {
   padding: 2.1rem 1rem 3rem;
 }
 
+.app-shell-wide {
+  width: calc(100vw - 24px);
+  max-width: none;
+}
+
 .hero {
   margin-bottom: 1rem;
 }
@@ -141,6 +146,109 @@ h1 {
 
 .daily-filter-actions button {
   margin: 0;
+}
+
+.entry-hour-card {
+  overflow: hidden;
+}
+
+.entry-hour-header {
+  align-items: flex-start;
+}
+
+.entry-hour-subtext {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  max-width: 860px;
+  line-height: 1.45;
+}
+
+.entry-hour-toolbar {
+  display: grid;
+  gap: 0.8rem;
+  margin-bottom: 0.9rem;
+}
+
+.entry-hour-controls {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.entry-hour-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.entry-hour-days-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.entry-hour-days-label {
+  color: #4b5968;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.entry-hour-days-select {
+  min-width: 140px;
+  width: auto;
+  padding-right: 2rem;
+}
+
+.entry-hour-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  align-items: center;
+  justify-content: flex-end;
+  color: #324459;
+  font-size: 0.94rem;
+}
+
+.entry-hour-table-wrap {
+  padding-bottom: 0.2rem;
+}
+
+.entry-hour-table th,
+.entry-hour-table td {
+  min-width: 70px;
+  text-align: center;
+  padding: 0.75rem 0.4rem;
+}
+
+.entry-hour-table th {
+  background: rgba(255, 251, 245, 0.96);
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.entry-hour-sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  min-width: 148px !important;
+  text-align: left !important;
+  background: rgba(255, 251, 245, 0.97);
+  font-weight: 700;
+}
+
+.entry-hour-total-row td {
+  font-weight: 700;
+}
+
+.entry-hour-total-row .entry-hour-sticky-col,
+.entry-hour-total-row .entry-hour-day-total {
+  background: linear-gradient(180deg, rgba(243, 233, 200, 0.72), rgba(249, 242, 217, 0.88));
+}
+
+.entry-hour-day-total {
+  min-width: 104px !important;
+  font-weight: 700;
 }
 
 .search-input,
@@ -687,6 +795,15 @@ td {
   .daily-filter-row {
     grid-template-columns: 1fr 1fr auto;
     align-items: center;
+  }
+
+  .entry-hour-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .entry-hour-controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .control-row {

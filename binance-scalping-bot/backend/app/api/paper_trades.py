@@ -22,6 +22,11 @@ from app.models.paper_trades import (
     PaperManualCloseRequest,
     PaperTradeDailySummary,
     PaperTradeDailySummaryResponse,
+    PaperTradeEntryHourCell,
+    PaperTradeEntryHourMatrixResponse,
+    PaperTradeEntryHourRow,
+    PaperTradeEntryHourSummary,
+    PaperTradeEntryHourTypeOption,
     PaperTradeHourlySideStats,
     PaperTradeHourlyWindow,
     PaperTradeHourlyWindowResponse,
@@ -77,6 +82,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
+        self.router.add_api_route("/entry-hour-matrix", self.get_entry_hour_matrix, methods=["GET"], response_model=PaperTradeEntryHourMatrixResponse)
         self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
         self.router.add_api_route("/pattern-stats", self.get_pattern_stats, methods=["GET"], response_model=PaperTradePatternStatsResponse)
         self.router.add_api_route("/pattern-stats/backfill", self.backfill_pattern_stats, methods=["POST"], response_model=PaperTradePatternBackfillResponse)
@@ -143,10 +149,33 @@ class PaperTradeAPI:
         except Exception:
             return False
 
-    def _resolve_open_leverage(self, symbol: str, requested_leverage: int | None = None) -> int:
+    def _use_strong_bear_short_leverage(self, symbol: str, side: str | None = None) -> bool:
+        side_key = str(side or "").strip().upper()
+        if side_key and side_key != "SHORT":
+            return False
+        try:
+            pattern = str(self.pattern_analyzer.current_symbol_pattern(symbol) or "").strip().upper()
+        except Exception:
+            pattern = ""
+        if pattern != "STRONG_BEAR":
+            return False
+        try:
+            btc_trend = str(self.pattern_analyzer.btc_trend_now() or "").strip().upper()
+        except Exception:
+            btc_trend = ""
+        return btc_trend == "SHORT"
+
+    def _resolve_open_leverage(
+        self,
+        symbol: str,
+        requested_leverage: int | None = None,
+        side: str | None = None,
+    ) -> int:
         leverage = int(requested_leverage or self._resolve_default_leverage(symbol))
         if requested_leverage is not None:
             return max(1, leverage)
+        if self._use_strong_bear_short_leverage(symbol=symbol, side=side):
+            leverage = max(leverage, 10)
         if self._has_perfect_pattern_win_rate(symbol):
             leverage = max(leverage, int(settings.paper_trade_perfect_pattern_leverage))
         return max(1, leverage)
@@ -427,6 +456,104 @@ class PaperTradeAPI:
             return dt.timestamp()
         return dt.astimezone(timezone.utc).timestamp()
 
+    @staticmethod
+    def _entry_hour_type_specs() -> list[tuple[str, str]]:
+        return [
+            ("ALL", "ALL"),
+            ("LIMIT", "ML (LIMIT)"),
+            ("ML_CANDLES_BG", "ML Candles BG"),
+            ("ML_CANDLES_TEST", "ML Candles Test"),
+            ("ML_TEST", "ML Test"),
+        ]
+
+    @classmethod
+    def _entry_hour_type_label(cls, key: str) -> str:
+        normalized = str(key or "ALL").upper()
+        for item_key, label in cls._entry_hour_type_specs():
+            if item_key == normalized:
+                return label
+        return normalized
+
+    @classmethod
+    def _normalize_entry_hour_key(cls, value: str | None) -> str:
+        normalized = str(value or "ALL").strip().upper()
+        valid = {item_key for item_key, _ in cls._entry_hour_type_specs()}
+        return normalized if normalized in valid else "ALL"
+
+    @staticmethod
+    def _dedupe_entry_hour_rows(rows: list[dict]) -> list[dict]:
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        for row in rows:
+            key = (
+                str(row.get("symbol") or ""),
+                str(row.get("side") or ""),
+                str(row.get("entry_type") or ""),
+                str(row.get("opened_at") or ""),
+                str(row.get("closed_at") or ""),
+                str(row.get("pnl") or ""),
+                str(row.get("result") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+        return out
+
+    def _list_entry_hour_repos(self) -> list[MySQLTradeRepository]:
+        repos: list[MySQLTradeRepository] = []
+        seen: set[tuple[str, int, str]] = set()
+        for scope in ("main", "candles"):
+            try:
+                repo = self._resolve_repo(repo_scope=scope)
+            except Exception:
+                continue
+            identity = (str(repo.host), int(repo.port), str(repo.database))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            repos.append(repo)
+        return repos
+
+    @staticmethod
+    def _build_entry_hour_row(trade_date: str, buckets: dict[int, dict[str, float | int]]) -> PaperTradeEntryHourRow:
+        cells: list[PaperTradeEntryHourCell] = []
+        total_trades = 0
+        win_trades = 0
+        loss_trades = 0
+        total_pnl = 0.0
+        for hour_vn in range(24):
+            bucket = buckets.get(hour_vn) or {}
+            hour_total = int(bucket.get("total_trades") or 0)
+            hour_wins = int(bucket.get("win_trades") or 0)
+            hour_losses = int(bucket.get("loss_trades") or 0)
+            hour_pnl = float(bucket.get("total_pnl") or 0.0)
+            total_trades += hour_total
+            win_trades += hour_wins
+            loss_trades += hour_losses
+            total_pnl += hour_pnl
+            cells.append(
+                PaperTradeEntryHourCell(
+                    hour_vn=hour_vn,
+                    total_trades=hour_total,
+                    win_trades=hour_wins,
+                    loss_trades=hour_losses,
+                    win_rate=(hour_wins / hour_total) if hour_total > 0 else 0.0,
+                    total_pnl=hour_pnl,
+                    avg_pnl=(hour_pnl / hour_total) if hour_total > 0 else 0.0,
+                )
+            )
+        return PaperTradeEntryHourRow(
+            trade_date=trade_date,
+            total_trades=total_trades,
+            win_trades=win_trades,
+            loss_trades=loss_trades,
+            win_rate=(win_trades / total_trades) if total_trades > 0 else 0.0,
+            total_pnl=total_pnl,
+            avg_pnl=(total_pnl / total_trades) if total_trades > 0 else 0.0,
+            cells=cells,
+        )
+
     def get_open(
         self,
         repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
@@ -491,6 +618,119 @@ class PaperTradeAPI:
         repo = self._require_repo()
         rows = repo.daily_summary(days=days)
         return PaperTradeDailySummaryResponse(items=[PaperTradeDailySummary(**row) for row in rows])
+
+    def get_entry_hour_matrix(
+        self,
+        days: int = Query(default=30, ge=1, le=365),
+        entry_type_key: str = Query(default="ALL"),
+    ) -> PaperTradeEntryHourMatrixResponse:
+        safe_days = max(1, int(days))
+        safe_entry_type = self._normalize_entry_hour_key(entry_type_key)
+        from_dt = self._now_vn_naive() - timedelta(days=safe_days - 1)
+        repos = self._list_entry_hour_repos()
+        if not repos:
+            raise HTTPException(status_code=503, detail="Paper trading DB is not configured")
+
+        rows: list[dict] = []
+        for repo in repos:
+            try:
+                rows.extend(repo.list_closed_trades_since(from_dt=from_dt))
+            except Exception:
+                continue
+        rows = self._dedupe_entry_hour_rows(rows)
+
+        option_counts: dict[str, int] = {item_key: 0 for item_key, _ in self._entry_hour_type_specs()}
+        filtered_rows: list[dict] = []
+        for row in rows:
+            opened_at = _parse_dt(row.get("opened_at"))
+            if opened_at is None:
+                continue
+            if opened_at.tzinfo is not None:
+                opened_at = opened_at.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+            if opened_at < from_dt:
+                continue
+            normalized_entry_type = str(row.get("entry_type") or "LIMIT").upper().strip() or "LIMIT"
+            option_counts["ALL"] += 1
+            if normalized_entry_type in option_counts:
+                option_counts[normalized_entry_type] += 1
+            if safe_entry_type != "ALL" and normalized_entry_type != safe_entry_type:
+                continue
+            row["_opened_at_vn"] = opened_at
+            row["_entry_type_key"] = normalized_entry_type
+            filtered_rows.append(row)
+
+        daily_buckets: dict[str, dict[int, dict[str, float | int]]] = {}
+        total_buckets: dict[int, dict[str, float | int]] = {}
+        total_trades = 0
+        win_trades = 0
+        loss_trades = 0
+        total_pnl = 0.0
+
+        def touch(bucket_map: dict[int, dict[str, float | int]], hour_vn: int, pnl: float, result: object) -> None:
+            bucket = bucket_map.setdefault(
+                hour_vn,
+                {
+                    "total_trades": 0,
+                    "win_trades": 0,
+                    "loss_trades": 0,
+                    "total_pnl": 0.0,
+                },
+            )
+            bucket["total_trades"] = int(bucket["total_trades"]) + 1
+            if int(result or 0) == 1:
+                bucket["win_trades"] = int(bucket["win_trades"]) + 1
+            elif result is not None:
+                bucket["loss_trades"] = int(bucket["loss_trades"]) + 1
+            bucket["total_pnl"] = float(bucket["total_pnl"]) + pnl
+
+        for row in filtered_rows:
+            opened_at = row.get("_opened_at_vn")
+            if not isinstance(opened_at, datetime):
+                continue
+            trade_date = str(opened_at.date())
+            hour_vn = int(opened_at.hour)
+            pnl = float(row.get("pnl") or 0.0)
+            result = row.get("result")
+            total_trades += 1
+            if int(result or 0) == 1:
+                win_trades += 1
+            elif result is not None:
+                loss_trades += 1
+            total_pnl += pnl
+            touch(daily_buckets.setdefault(trade_date, {}), hour_vn, pnl, result)
+            touch(total_buckets, hour_vn, pnl, result)
+
+        items = [
+            self._build_entry_hour_row(trade_date, daily_buckets[trade_date])
+            for trade_date in sorted(daily_buckets.keys(), reverse=True)
+        ]
+        total_row = self._build_entry_hour_row("TOTAL", total_buckets)
+        summary = PaperTradeEntryHourSummary(
+            active_days=len(items),
+            total_trades=total_trades,
+            win_trades=win_trades,
+            loss_trades=loss_trades,
+            win_rate=(win_trades / total_trades) if total_trades > 0 else 0.0,
+            total_pnl=total_pnl,
+            avg_pnl=(total_pnl / total_trades) if total_trades > 0 else 0.0,
+        )
+        options = [
+            PaperTradeEntryHourTypeOption(
+                key=item_key,
+                label=label,
+                total_trades=int(option_counts.get(item_key) or 0),
+            )
+            for item_key, label in self._entry_hour_type_specs()
+        ]
+        return PaperTradeEntryHourMatrixResponse(
+            lookback_days=safe_days,
+            entry_type_key=safe_entry_type,
+            entry_type_label=self._entry_hour_type_label(safe_entry_type),
+            summary=summary,
+            total_row=total_row,
+            entry_type_options=options,
+            items=items,
+        )
 
     def get_pattern_stats(
         self,
@@ -1109,6 +1349,9 @@ class PaperTradeAPI:
             entry_guard_reason = runtime_engine._entry_guard_reason(symbol=req.symbol, side=req.side)
             if entry_guard_reason:
                 raise HTTPException(status_code=409, detail=str(entry_guard_reason))
+            portfolio_guard_reason = runtime_engine._portfolio_guard_reason(side=req.side)
+            if portfolio_guard_reason:
+                raise HTTPException(status_code=409, detail=str(portfolio_guard_reason))
             if runtime_engine._is_reentry_cooldown_active(
                 symbol=req.symbol,
                 side=req.side,
@@ -1143,7 +1386,7 @@ class PaperTradeAPI:
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
-        leverage = self._resolve_open_leverage(req.symbol, req.leverage)
+        leverage = self._resolve_open_leverage(req.symbol, req.leverage, req.side)
         atr_value = self._resolve_symbol_atr(req.symbol)
         normalized_tp, normalized_sl = normalize_tp_sl(
             side=req.side,

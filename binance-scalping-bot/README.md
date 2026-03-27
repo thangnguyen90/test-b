@@ -251,6 +251,11 @@ PAPER_TRADE_MOVE_SL_TO_ENTRY_PNL_PCT=5
 PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT=10
 PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true
 PAPER_TRADE_MOVE_SL_REFERENCE_LEVERAGE=5
+PAPER_TRADE_LIMIT_MAX_ORDERS_PER_CYCLE=4
+PAPER_TRADE_LIQUID_MAX_ORDERS_PER_CYCLE=2
+PAPER_TRADE_MAX_OPEN_TRADES=24
+PAPER_TRADE_MAX_OPEN_SHORTS=18
+PAPER_TRADE_MAX_SHORT_OPEN_RATIO=0.75
 PAPER_TRADE_SYMBOL_SL_BLOCK_MINUTES=180
 PAPER_TRADE_INSTANT_SL_GUARD_ENABLED=true
 PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES=25
@@ -374,6 +379,11 @@ Quy ước tránh conflict khi đổi máy:
 - `PAPER_TRADE_MOVE_SL_LOCK_PNL_PCT` là mức lợi nhuận giữ lại sau khi kích hoạt (ví dụ 10% ở 5x ~ dời SL về mức +2% giá theo hướng có lợi).
 - `PAPER_TRADE_MOVE_SL_SCALE_BY_LEVERAGE=true` sẽ tự scale ngưỡng theo leverage thực tế của lệnh.  
 : ví dụ cấu hình `trigger=5`, `reference_leverage=5` thì lệnh 10x sẽ kích hoạt ở `10%` PnL margin.
+- `PAPER_TRADE_LIMIT_MAX_ORDERS_PER_CYCLE` giới hạn số lệnh `LIMIT` mới trong mỗi vòng quét.
+- `PAPER_TRADE_LIQUID_MAX_ORDERS_PER_CYCLE` giới hạn số lệnh `LIQ_EMA99` mới trong mỗi vòng quét.
+- `PAPER_TRADE_MAX_OPEN_TRADES` chặn mở lệnh mới khi tổng số vị thế đang mở đã chạm trần.
+- `PAPER_TRADE_MAX_OPEN_SHORTS` chặn mở thêm `SHORT` khi số lệnh `SHORT` đang mở đã chạm trần.
+- `PAPER_TRADE_MAX_SHORT_OPEN_RATIO` chặn mở thêm `SHORT` nếu tỷ lệ `SHORT` trên toàn bộ vị thế mở vượt ngưỡng.
 - `PAPER_TRADE_INSTANT_SL_GUARD_ENABLED` khóa tái vào lệnh `symbol+side` nếu vừa bị SL nhanh và sâu.
 - `PAPER_TRADE_INSTANT_SL_GUARD_MAX_HOLD_MINUTES` xác định thế nào là "SL nhanh".
 - `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_PNL_PCT` / `PAPER_TRADE_INSTANT_SL_GUARD_MIN_ABS_MAE_PCT` là ngưỡng phạt.
