@@ -213,7 +213,7 @@ class Settings(BaseModel):
         "true",
     ).lower() == "true"
     paper_trade_btc_short_stall_profit_exit_lookback_candles: int = int(
-        os.getenv("PAPER_TRADE_BTC_SHORT_STALL_PROFIT_EXIT_LOOKBACK_CANDLES", "4")
+        os.getenv("PAPER_TRADE_BTC_SHORT_STALL_PROFIT_EXIT_LOOKBACK_CANDLES", "3")
     )
     paper_trade_btc_short_stall_profit_exit_min_pullback_pct: float = float(
         os.getenv("PAPER_TRADE_BTC_SHORT_STALL_PROFIT_EXIT_MIN_PULLBACK_PCT", "0.9")
@@ -418,7 +418,7 @@ class Settings(BaseModel):
     paper_trade_instant_sl_global_cooldown_minutes: int = int(
         os.getenv("PAPER_TRADE_INSTANT_SL_GLOBAL_COOLDOWN_MINUTES", "60")
     )
-    paper_trade_entry_hard_block_hours_vn: str = os.getenv("PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN", "20")
+    paper_trade_entry_hard_block_hours_vn: str = os.getenv("PAPER_TRADE_ENTRY_HARD_BLOCK_HOURS_VN", "6,7")
     paper_trade_hourly_profile_enabled: bool = os.getenv("PAPER_TRADE_HOURLY_PROFILE_ENABLED", "true").lower() == "true"
     paper_trade_hourly_profile_min_samples: int = int(os.getenv("PAPER_TRADE_HOURLY_PROFILE_MIN_SAMPLES", "60"))
     paper_trade_hourly_profile_prob_alpha: float = float(os.getenv("PAPER_TRADE_HOURLY_PROFILE_PROB_ALPHA", "0.25"))

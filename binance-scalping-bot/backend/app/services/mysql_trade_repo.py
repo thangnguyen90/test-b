@@ -1665,6 +1665,29 @@ class MySQLTradeRepository:
             }
         return out
 
+    def list_closed_trades_since(self, from_dt: datetime) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        symbol,
+                        side,
+                        entry_type,
+                        status,
+                        opened_at,
+                        closed_at,
+                        pnl,
+                        result
+                    FROM paper_trades
+                    WHERE status='CLOSED' AND opened_at >= %s
+                    ORDER BY opened_at DESC, id DESC
+                    """,
+                    (from_dt,),
+                )
+                return list(cur.fetchall() or [])
+
     def daily_summary(self, days: int = 30) -> list[dict[str, Any]]:
         safe_days = max(1, min(days, 365))
         now = _now_vn()

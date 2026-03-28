@@ -132,6 +132,53 @@ class PaperTradeHourlyWindowResponse(BaseModel):
     items: list[PaperTradeHourlyWindow]
 
 
+class PaperTradeEntryHourCell(BaseModel):
+    hour_vn: int
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl: float = 0.0
+    avg_pnl: float = 0.0
+
+
+class PaperTradeEntryHourRow(BaseModel):
+    trade_date: str
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl: float = 0.0
+    avg_pnl: float = 0.0
+    cells: list[PaperTradeEntryHourCell]
+
+
+class PaperTradeEntryHourSummary(BaseModel):
+    active_days: int = 0
+    total_trades: int = 0
+    win_trades: int = 0
+    loss_trades: int = 0
+    win_rate: float = 0.0
+    total_pnl: float = 0.0
+    avg_pnl: float = 0.0
+
+
+class PaperTradeEntryHourTypeOption(BaseModel):
+    key: str
+    label: str
+    total_trades: int = 0
+
+
+class PaperTradeEntryHourMatrixResponse(BaseModel):
+    lookback_days: int
+    entry_type_key: str
+    entry_type_label: str
+    summary: PaperTradeEntryHourSummary
+    total_row: PaperTradeEntryHourRow
+    entry_type_options: list[PaperTradeEntryHourTypeOption]
+    items: list[PaperTradeEntryHourRow]
+
+
 class PaperTradePatternStatsItem(BaseModel):
     candle_pattern: str
     btc_trend: str

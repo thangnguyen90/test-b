@@ -1935,6 +1935,7 @@ function App() {
   function renderSignalPatternSummary(
     pattern?: string | null,
     btcTrend?: string | null,
+    trendLabel = 'BTC',
   ) {
     const stat = resolveClosedPatternStat(pattern, btcTrend)
     const hasPattern = Boolean(normalizePatternLabel(pattern))
@@ -1943,7 +1944,7 @@ function App() {
     return (
       <div className="signal-model-stack">
         {hasPattern ? <span className="signal-model-meta">{pattern}</span> : null}
-        {hasTrend ? <span className="signal-model-meta">BTC {btcTrend}</span> : null}
+        {hasTrend ? <span className="signal-model-meta">{`${trendLabel} ${btcTrend}`}</span> : null}
         {stat ? (
           <span className="signal-model-meta">
             DB {stat.wins}/{stat.losses} | {stat.win_rate_pct.toFixed(1)}%
@@ -4077,7 +4078,7 @@ function App() {
                           </span>
                         ) : '-'}
                       </td>
-                      <td>{renderSignalPatternSummary(row.current_candle_pattern, row.current_btc_trend)}</td>
+                      <td>{renderSignalPatternSummary(row.current_candle_pattern, row.current_btc_trend, 'BTC Trend Hien Tai:')}</td>
                       <td>
                         {typeof upnlUsdt === 'number' ? (
                           <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
