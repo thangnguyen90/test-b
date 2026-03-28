@@ -3,9 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from app.services.analytics_service import AnalyticsService
+from app.services.pump_scanner_service import PumpScannerService
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 service = AnalyticsService()
+pump_service = PumpScannerService()
 
 
 @router.get("/top-volatility")
@@ -41,3 +43,27 @@ def get_liquidation_overview(
 @router.get("/btc-trend")
 def get_btc_trend() -> dict:
     return service.btc_trend_forecast()
+
+
+@router.get("/pump-hunter")
+def get_pump_hunter_scan(
+    max_symbols: int = Query(default=35, ge=0, le=500),
+    min_score: float = Query(default=58.0, ge=0.0, le=100.0),
+    limit: int = Query(default=18, ge=1, le=100),
+) -> dict:
+    payload = pump_service.scan(max_symbols=max_symbols, min_score=min_score, limit=limit)
+    return {
+        "scanned": payload["scanned"],
+        "count": payload["count"],
+        "min_score": payload["min_score"],
+        "max_symbols": payload["max_symbols"],
+        "items": payload["items"],
+        "updated_at": payload["updated_at"],
+        "note": payload["note"],
+    }
+
+
+@router.get("/pump-hunter/detail")
+def get_pump_hunter_detail(symbol: str = Query(..., min_length=3)) -> dict:
+    payload = pump_service.analyze_symbol(symbol=symbol, include_candles=True)
+    return payload

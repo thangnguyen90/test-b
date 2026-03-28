@@ -1738,6 +1738,8 @@ class PaperTradingEngine:
                 continue
             if status != "OPEN" or side != target_close_side or entry <= 0 or qty <= 0 or not symbol:
                 continue
+            if self._is_liquidation_style_entry_type(entry_type):
+                continue
 
             price = prices.get(symbol)
             if price is None:
@@ -2566,8 +2568,17 @@ class PaperTradingEngine:
         return None
 
     @staticmethod
+    def _is_liquidation_style_entry_type(entry_type: str | None) -> bool:
+        normalized = str(entry_type or "").strip().upper()
+        if not normalized:
+            return False
+        if normalized == "PUMP_ENTRY_TOUCH":
+            return True
+        return normalized.startswith("PUMP_")
+
+    @staticmethod
     def _skip_btc_guards_for_entry_type(entry_type: str | None) -> bool:
-        return False
+        return PaperTradingEngine._is_liquidation_style_entry_type(entry_type)
 
     def _apply_bullish_short_nonfollow_min_win_bonus(
         self,

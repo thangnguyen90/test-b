@@ -1,0 +1,222 @@
+.entry-touch-page {
+  --entry-bg: #081218;
+  --entry-surface: rgba(17, 28, 35, 0.92);
+  --entry-surface-alt: rgba(24, 37, 45, 0.96);
+  --entry-line: rgba(149, 174, 189, 0.12);
+  --entry-text: #edf7fb;
+  --entry-muted: #94abb9;
+  --entry-accent: #63ccff;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(94, 201, 255, 0.12), transparent 30%),
+    linear-gradient(180deg, #081218, #0d171d 35%, #0a1218 100%);
+  color: var(--entry-text);
+}
+
+.entry-touch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.entry-touch-tab-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.entry-touch-tab {
+  border: 1px solid rgba(149, 174, 189, 0.16);
+  background: rgba(8, 18, 24, 0.8);
+  color: var(--entry-text);
+}
+
+.entry-touch-tab.active {
+  border-color: rgba(99, 204, 255, 0.32);
+  background: linear-gradient(180deg, rgba(94, 201, 255, 0.22), rgba(94, 201, 255, 0.08));
+  color: #ffffff;
+}
+
+.entry-touch-top {
+  align-items: stretch;
+}
+
+.entry-touch-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 220px;
+}
+
+.entry-touch-field span {
+  color: var(--entry-muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.entry-touch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--entry-text);
+  font-weight: 600;
+}
+
+.entry-touch-toggle input {
+  width: 18px;
+  height: 18px;
+}
+
+.entry-touch-price-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.entry-touch-meta {
+  color: var(--entry-muted);
+  font-size: 0.78rem;
+}
+
+.entry-touch-table tbody td strong {
+  color: #ffffff;
+}
+
+.entry-touch-page .hero,
+.entry-touch-page .grid,
+.entry-touch-page .card,
+.entry-touch-page .table-wrap,
+.entry-touch-page .content,
+.entry-touch-page .stats-grid,
+.entry-touch-page .daily-filter-row {
+  color: var(--entry-text);
+}
+
+.entry-touch-page .hero h1,
+.entry-touch-page .card-header h2,
+.entry-touch-page .stats-item strong,
+.entry-touch-page .content p,
+.entry-touch-page .table-wrap p {
+  color: #ffffff;
+}
+
+.entry-touch-page .eyebrow {
+  color: var(--entry-accent);
+}
+
+.entry-touch-page .subtext,
+.entry-touch-page .stats-item,
+.entry-touch-open-note {
+  color: var(--entry-muted);
+}
+
+.entry-touch-page .stats-grid {
+  gap: 12px;
+}
+
+.entry-touch-page .stats-item {
+  background: rgba(8, 18, 24, 0.9);
+  border: 1px solid rgba(149, 174, 189, 0.14);
+  color: #dbeaf1;
+}
+
+.entry-touch-page .stats-item strong {
+  color: #ffffff;
+}
+
+.entry-touch-page .card {
+  background: var(--entry-surface);
+  border: 1px solid var(--entry-line);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.22);
+}
+
+.entry-touch-page .card-header {
+  border-bottom: 1px solid rgba(149, 174, 189, 0.08);
+}
+
+.entry-touch-page .search-input,
+.entry-touch-page input[type='number'] {
+  background: rgba(8, 18, 24, 0.9);
+  border: 1px solid rgba(149, 174, 189, 0.18);
+  color: #ffffff;
+}
+
+.entry-touch-page table {
+  background: transparent;
+}
+
+.entry-touch-page thead th {
+  color: #dbeaf1;
+  background: rgba(24, 37, 45, 0.98);
+}
+
+.entry-touch-table tbody tr td {
+  color: rgba(236, 246, 251, 0.92);
+}
+
+.entry-touch-page tbody td {
+  border-top: 1px solid rgba(149, 174, 189, 0.08);
+}
+
+.entry-touch-page .btn-inline {
+  background: linear-gradient(180deg, rgba(94, 201, 255, 0.24), rgba(94, 201, 255, 0.1));
+  border: 1px solid rgba(94, 201, 255, 0.2);
+  color: #ffffff;
+}
+
+.entry-touch-page .btn-inline:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.entry-touch-open-note {
+  color: var(--entry-muted);
+  margin: 0 0 14px;
+}
+
+.entry-touch-status-stack {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.entry-touch-manage-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.entry-touch-page .card {
+  border-color: rgba(149, 174, 189, 0.12);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.22);
+}
+
+.entry-touch-page .table-wrap::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.entry-touch-page .table-wrap::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 999px;
+}
+
+.entry-touch-page .table-wrap::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(94, 201, 255, 0.72), rgba(42, 129, 214, 0.78));
+  border-radius: 999px;
+  border: 2px solid rgba(7, 16, 22, 0.9);
+}
+
+.entry-touch-page .table-wrap::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(120, 215, 255, 0.88), rgba(67, 156, 233, 0.92));
+}
+
+@media (max-width: 980px) {
+  .entry-touch-field {
+    min-width: 100%;
+  }
+
+  .entry-touch-actions {
+    width: 100%;
+  }
+}

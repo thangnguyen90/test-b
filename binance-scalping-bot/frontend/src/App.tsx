@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
+import EntryTouchSignalsPage from './pages/EntryTouchSignalsPage'
+import PumpHunterPage from './pages/PumpHunterPage'
 
 type Health = {
   status: string
@@ -478,7 +480,16 @@ type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 type MlCandlesScreenView = 'signals' | 'compare'
-type AppScreenView = 'main' | 'paper' | 'daily' | 'entry-hour-matrix' | 'liq-map' | 'ml-candles-signals' | 'ml-candles-compare'
+type AppScreenView =
+  | 'main'
+  | 'paper'
+  | 'daily'
+  | 'entry-hour-matrix'
+  | 'liq-map'
+  | 'ml-candles-signals'
+  | 'ml-candles-compare'
+  | 'entry-touch-signals'
+  | 'pump-hunter'
 
 type CompareBucket = {
   label: string
@@ -571,6 +582,8 @@ function resolveInitialScreenView(): AppScreenView {
   if (typeof window === 'undefined') return 'main'
   const params = new URLSearchParams(window.location.search)
   const raw = (params.get('view') || '').trim().toLowerCase()
+  if (raw === 'pump-hunter') return 'pump-hunter'
+  if (raw === 'entry-touch-signals') return 'entry-touch-signals'
   if (raw === 'paper') return 'paper'
   if (raw === 'daily') return 'daily'
   if (raw === 'entry-hour-matrix') return 'entry-hour-matrix'
@@ -1183,8 +1196,7 @@ function LiquidationMapCanvas({
   )
 }
 
-function App() {
-  const initialScreenView = resolveInitialScreenView()
+function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenView }) {
   const mapSectionRef = useRef<HTMLElement | null>(null)
   const selectedCoinRef = useRef<string>('BTC/USDT')
   const symbolReqIdRef = useRef(0)
@@ -3886,6 +3898,24 @@ function App() {
             type="button"
             className="btn-secondary"
             onClick={() => {
+              window.location.search = '?view=entry-touch-signals'
+            }}
+          >
+            Open Entry Touch Signals
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              window.location.search = '?view=pump-hunter'
+            }}
+          >
+            Open Pump Hunter
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
               const nextOpen = !(showMlCandlesScreen && mlCandlesScreenView === 'signals')
               setMlCandlesScreenView('signals')
               setShowMlCandlesScreen(nextOpen)
@@ -5953,4 +5983,13 @@ function App() {
   )
 }
 
-export default App
+export default function App() {
+  const screenView = resolveInitialScreenView()
+  if (screenView === 'entry-touch-signals') {
+    return <EntryTouchSignalsPage />
+  }
+  if (screenView === 'pump-hunter') {
+    return <PumpHunterPage />
+  }
+  return <LegacyDashboard initialScreenView={screenView} />
+}

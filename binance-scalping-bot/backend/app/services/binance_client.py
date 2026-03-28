@@ -15,31 +15,46 @@ class BinanceRateLimitBanError(Exception):
 
 
 class BinanceFuturesClient:
-    _ban_until_ms: int = 0
+    _provider_order: tuple[str, ...] = ("binanceusdm", "okx", "bybit")
+    _provider_labels: dict[str, str] = {
+        "binanceusdm": "Binance",
+        "okx": "OKX",
+        "bybit": "Bybit",
+    }
+    _provider_ban_until_ms: dict[str, int] = {provider: 0 for provider in _provider_order}
     _cache: dict[str, tuple[float, Any]] = {}
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        self.exchange = None
+        self.exchanges: dict[str, Any] = {}
 
-    def _get_exchange(self) -> ccxt.binanceusdm:
-        if self.exchange is None:
-            self.exchange = ccxt.binanceusdm({"enableRateLimit": True})
-        return self.exchange
+    def _get_exchange(self, provider: str) -> Any:
+        exchange = self.exchanges.get(provider)
+        if exchange is not None:
+            return exchange
+        exchange_cls = getattr(ccxt, provider)
+        options: dict[str, Any] = {"enableRateLimit": True}
+        if provider == "okx":
+            options["options"] = {"defaultType": "swap"}
+        elif provider == "bybit":
+            options["options"] = {"defaultType": "swap"}
+        exchange = exchange_cls(options)
+        self.exchanges[provider] = exchange
+        return exchange
 
     @classmethod
-    def _set_ban_until(cls, ban_until_ms: int) -> None:
+    def _set_provider_ban_until(cls, provider: str, ban_until_ms: int) -> None:
         with cls._lock:
-            cls._ban_until_ms = max(cls._ban_until_ms, int(ban_until_ms))
+            cls._provider_ban_until_ms[provider] = max(cls._provider_ban_until_ms.get(provider, 0), int(ban_until_ms))
 
     @classmethod
-    def _get_ban_until(cls) -> int:
+    def _get_provider_ban_until(cls, provider: str) -> int:
         with cls._lock:
-            return cls._ban_until_ms
+            return int(cls._provider_ban_until_ms.get(provider, 0))
 
     @classmethod
-    def _is_banned(cls) -> bool:
-        return int(time.time() * 1000) < cls._get_ban_until()
+    def _is_provider_banned(cls, provider: str) -> bool:
+        return int(time.time() * 1000) < cls._get_provider_ban_until(provider)
 
     @classmethod
     def _cache_get(cls, key: str, ttl_sec: float, allow_stale: bool = False) -> Any | None:
@@ -68,22 +83,67 @@ class BinanceFuturesClient:
         except Exception:
             return None
 
-    def _handle_upstream_error(self, exc: Exception, fallback_ban_sec: int = 120) -> None:
-        message = str(exc)
+    @staticmethod
+    def _is_rate_limit_error(message: str) -> bool:
         lowered = message.lower()
-        is_rate_ban = (
+        return (
             "code\":-1003" in lowered
             or "i'm a teapot" in lowered
             or "too many requests" in lowered
             or "rate limit" in lowered
+            or "429" in lowered
         )
-        if not is_rate_ban:
-            raise exc
+
+    def _handle_upstream_error(self, provider: str, exc: Exception, fallback_ban_sec: int = 120) -> Exception:
+        message = str(exc)
+        if not self._is_rate_limit_error(message):
+            return exc
         ban_until = self._extract_ban_until_ms(message)
         if ban_until is None:
             ban_until = int((time.time() + fallback_ban_sec) * 1000)
-        self._set_ban_until(ban_until)
-        raise BinanceRateLimitBanError(message, ban_until_ms=ban_until) from exc
+        self._set_provider_ban_until(provider, ban_until)
+        return BinanceRateLimitBanError(
+            f"{self._provider_labels.get(provider, provider)} REST is temporarily banned: {message}",
+            ban_until_ms=ban_until,
+        )
+
+    def _call_with_fallback(
+        self,
+        *,
+        key: str,
+        ttl_sec: float,
+        operation: str,
+        fetcher,
+        fallback_ban_sec: int = 120,
+    ) -> Any:
+        cached = self._cache_get(key, ttl_sec=ttl_sec)
+        if cached is not None:
+            return cached
+
+        stale = self._cache_get(key, ttl_sec=ttl_sec, allow_stale=True)
+        errors: list[str] = []
+
+        for provider in self._provider_order:
+            if self._is_provider_banned(provider):
+                errors.append(
+                    f"{provider}:cooldown_until={self._get_provider_ban_until(provider)}"
+                )
+                continue
+
+            exchange = self._get_exchange(provider)
+            try:
+                payload = fetcher(exchange, provider)
+                self._cache_set(key, payload)
+                return payload
+            except Exception as exc:
+                handled = self._handle_upstream_error(provider, exc, fallback_ban_sec=fallback_ban_sec)
+                errors.append(f"{provider}:{handled}")
+                continue
+
+        if stale is not None:
+            return stale
+        joined = "; ".join(errors) if errors else "no providers available"
+        raise RuntimeError(f"All market providers failed for {operation}: {joined}")
 
     def fetch_ohlcv(
         self,
@@ -94,128 +154,66 @@ class BinanceFuturesClient:
     ) -> list[list[Any]]:
         key = f"ohlcv:{symbol}:{timeframe}:{limit}:{since or 'latest'}"
         ttl = 10.0 if timeframe in {"1m", "3m", "5m"} else 30.0
-        cached = self._cache_get(key, ttl_sec=ttl)
-        if cached is not None:
-            return cached
-        if self._is_banned():
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise BinanceRateLimitBanError("Binance REST is temporarily banned", self._get_ban_until())
-        exchange = self._get_exchange()
-        try:
-            rows = exchange.fetch_ohlcv(symbol=symbol, timeframe=timeframe, since=since, limit=limit)
-            self._cache_set(key, rows)
-            return rows
-        except Exception as exc:
-            try:
-                self._handle_upstream_error(exc)
-            except BinanceRateLimitBanError:
-                stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-                if stale is not None:
-                    return stale
-                raise
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise
+        return self._call_with_fallback(
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_ohlcv({symbol},{timeframe})",
+            fetcher=lambda exchange, _provider: exchange.fetch_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                since=since,
+                limit=limit,
+            ),
+            fallback_ban_sec=90,
+        )
 
     def load_markets(self) -> dict[str, Any]:
         key = "markets:all"
         ttl = 600.0
-        cached = self._cache_get(key, ttl_sec=ttl)
-        if cached is not None:
-            return cached
-        if self._is_banned():
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise BinanceRateLimitBanError("Binance REST is temporarily banned", self._get_ban_until())
-        exchange = self._get_exchange()
-        try:
-            payload = exchange.load_markets()
-            self._cache_set(key, payload)
-            return payload
-        except Exception as exc:
-            try:
-                self._handle_upstream_error(exc)
-            except BinanceRateLimitBanError:
-                stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-                if stale is not None:
-                    return stale
-                raise
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise
+        return self._call_with_fallback(
+            key=key,
+            ttl_sec=ttl,
+            operation="load_markets",
+            fetcher=lambda exchange, _provider: exchange.load_markets(),
+            fallback_ban_sec=180,
+        )
 
     def fetch_ticker(self, symbol: str) -> dict[str, Any]:
         key = f"ticker:{symbol}"
         ttl = 2.0
-        cached = self._cache_get(key, ttl_sec=ttl)
-        if cached is not None:
-            return cached
-        if self._is_banned():
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise BinanceRateLimitBanError("Binance REST is temporarily banned", self._get_ban_until())
-        exchange = self._get_exchange()
-        try:
-            payload = exchange.fetch_ticker(symbol=symbol)
-            self._cache_set(key, payload)
-            return payload
-        except Exception as exc:
-            try:
-                self._handle_upstream_error(exc)
-            except BinanceRateLimitBanError:
-                stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-                if stale is not None:
-                    return stale
-                raise
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise
+        return self._call_with_fallback(
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_ticker({symbol})",
+            fetcher=lambda exchange, _provider: exchange.fetch_ticker(symbol=symbol),
+            fallback_ban_sec=60,
+        )
 
     def fetch_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
         key = f"tickers:{','.join(sorted(symbols))}" if symbols else "tickers:all"
         ttl = 8.0
-        cached = self._cache_get(key, ttl_sec=ttl)
-        if cached is not None:
-            return cached
-        if self._is_banned():
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise BinanceRateLimitBanError("Binance REST is temporarily banned", self._get_ban_until())
-        exchange = self._get_exchange()
-        try:
-            if symbols:
-                payload = exchange.fetch_tickers(symbols=symbols)
-            else:
-                payload = exchange.fetch_tickers()
-            self._cache_set(key, payload)
-            return payload
-        except Exception as exc:
-            try:
-                self._handle_upstream_error(exc)
-            except BinanceRateLimitBanError:
-                stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-                if stale is not None:
-                    return stale
-                raise
-            stale = self._cache_get(key, ttl_sec=ttl, allow_stale=True)
-            if stale is not None:
-                return stale
-            raise
+        return self._call_with_fallback(
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_tickers(count={0 if symbols is None else len(symbols)})",
+            fetcher=lambda exchange, _provider: exchange.fetch_tickers(symbols=symbols) if symbols else exchange.fetch_tickers(),
+            fallback_ban_sec=90,
+        )
 
     @classmethod
     def rest_status(cls) -> dict[str, Any]:
-        ban_until_ms = cls._get_ban_until()
-        banned = int(time.time() * 1000) < ban_until_ms
+        provider_status = {}
+        now_ms = int(time.time() * 1000)
+        for provider in cls._provider_order:
+            ban_until_ms = cls._get_provider_ban_until(provider)
+            provider_status[provider] = {
+                "label": cls._provider_labels.get(provider, provider),
+                "rest_banned": now_ms < ban_until_ms,
+                "ban_until_ms": ban_until_ms if ban_until_ms > 0 else None,
+            }
         return {
-            "rest_banned": banned,
-            "ban_until_ms": ban_until_ms if ban_until_ms > 0 else None,
+            "rest_banned": any(item["rest_banned"] for item in provider_status.values()),
+            "providers": provider_status,
+            "provider_order": list(cls._provider_order),
             "cache_size": len(cls._cache),
         }
