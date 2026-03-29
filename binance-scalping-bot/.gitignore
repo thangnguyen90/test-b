@@ -1,0 +1,18 @@
+# macOS / editor
+.DS_Store
+.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtualenv
+.venv/
+
+# Backend runtime artifacts
+backend/.runtime/*.log
+backend/.runtime/*.pid
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/

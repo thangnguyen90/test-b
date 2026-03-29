@@ -63,6 +63,7 @@ async def _pump_hunter_background_loop() -> None:
                 max_symbols=int(settings.pump_hunter_bg_max_symbols),
                 min_score=float(settings.pump_hunter_bg_min_score),
                 limit=int(settings.pump_hunter_bg_limit),
+                send_alerts=True,
             )
             count = int(payload.get("count") or 0)
             if count > 0:

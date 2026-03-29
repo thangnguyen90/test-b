@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -47,6 +48,7 @@ class PumpScannerService:
     def __init__(self, client: BinanceFuturesClient | None = None) -> None:
         self.client = client or BinanceFuturesClient()
         self.cache: dict[str, CacheItem] = {}
+        self._alert_lock = threading.Lock()
 
     @staticmethod
     def _derive_trade_plan(row: dict[str, Any]) -> tuple[str, float, float, float]:
@@ -91,7 +93,8 @@ class PumpScannerService:
             return
         signal_label = str(row.get("signal_label") or "WATCH").upper()
         alert_key = f"pump_discord:{symbol}:{signal_label}"
-        if self._get_cached(alert_key) is not None:
+        cooldown_sec = max(60, int(settings.pump_hunter_discord_alert_cooldown_sec))
+        if not self._claim_alert_slot(alert_key, ttl_sec=cooldown_sec):
             return
         side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
         notes = row.get("notes") or []
@@ -172,7 +175,7 @@ class PumpScannerService:
         )
         try:
             self._post_webhook(request)
-            self._set_cache(alert_key, True, ttl_sec=max(60, int(settings.pump_hunter_discord_alert_cooldown_sec)))
+            self._set_cache(alert_key, True, ttl_sec=cooldown_sec)
             logger.info(
                 "Pump hunter Discord alert sent: symbol=%s signal=%s stage=%s score=%.1f",
                 symbol,
@@ -181,6 +184,7 @@ class PumpScannerService:
                 score,
             )
         except Exception:
+            self._release_alert_slot(alert_key)
             logger.exception(
                 "Pump hunter Discord alert failed: symbol=%s signal=%s stage=%s score=%.1f",
                 symbol,
@@ -200,6 +204,17 @@ class PumpScannerService:
     def _set_cache(self, key: str, payload: Any, ttl_sec: int) -> Any:
         self.cache[key] = CacheItem(expires_at=time.time() + ttl_sec, payload=payload)
         return payload
+
+    def _claim_alert_slot(self, key: str, ttl_sec: int) -> bool:
+        with self._alert_lock:
+            if self._get_cached(key) is not None:
+                return False
+            self._set_cache(key, "__pending__", ttl_sec=max(15, int(ttl_sec)))
+            return True
+
+    def _release_alert_slot(self, key: str) -> None:
+        with self._alert_lock:
+            self.cache.pop(key, None)
 
     @staticmethod
     def _to_frame(rows: list[list[float]]) -> pd.DataFrame:
@@ -644,7 +659,14 @@ class PumpScannerService:
 
         return self._set_cache(cache_key, payload, ttl_sec=20 if include_candles else 30)
 
-    def scan(self, *, max_symbols: int = 35, min_score: float = 58.0, limit: int = 18) -> dict[str, Any]:
+    def scan(
+        self,
+        *,
+        max_symbols: int = 35,
+        min_score: float = 58.0,
+        limit: int = 18,
+        send_alerts: bool = False,
+    ) -> dict[str, Any]:
         safe_max_symbols = 0 if int(max_symbols) <= 0 else max(10, min(max_symbols, 500))
         safe_limit = max(1, min(limit, 100))
         safe_min_score = _clamp(float(min_score), 0.0, 100.0)
@@ -712,6 +734,7 @@ class PumpScannerService:
                 else "Full scan mode: quet toan bo futures USDT, co the cham hon va de gap REST rate-limit hon."
             ),
         )
-        for row in payload.get("items", []):
-            self._maybe_send_discord_alert(row)
+        if send_alerts:
+            for row in payload.get("items", []):
+                self._maybe_send_discord_alert(row)
         return self._set_cache(cache_key, payload, ttl_sec=18)
