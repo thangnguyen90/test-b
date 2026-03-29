@@ -15,6 +15,8 @@ from app.services.binance_client import BinanceFuturesClient
 
 logger = logging.getLogger(__name__)
 
+PUMP_HUNTER_HIGHLIGHT_TP_PCT = 10.0
+
 
 def _safe_float(value: Any) -> float | None:
     try:
@@ -105,10 +107,25 @@ class PumpScannerService:
             else:
                 tp_pct = ((entry - take_profit) / entry) * leverage * 100.0
                 sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
+        is_high_tp = tp_pct >= PUMP_HUNTER_HIGHLIGHT_TP_PCT
+        title_prefix = "HIGH_TP_10P " if is_high_tp else ""
+        embed_color = 0xF1C40F if is_high_tp else (0xED4245 if side == "SHORT" else 0x57F287)
+        fields: list[dict[str, Any]] = []
+        if is_high_tp:
+            fields.append(
+                {
+                    "name": "HIGH TP ALERT",
+                    "value": (
+                        f"Symbol {symbol}\n"
+                        f"Estimated TP {self._format_signed_pct(tp_pct)}"
+                    ),
+                    "inline": False,
+                }
+            )
         embed = {
-            "title": f"PUMP_HUNTER {side} setup: {symbol}",
-            "color": 0xED4245 if side == "SHORT" else 0x57F287,
-            "fields": [
+            "title": f"{title_prefix}PUMP_HUNTER {side} setup: {symbol}",
+            "color": embed_color,
+            "fields": fields + [
                 {"name": "Signal", "value": f"{signal_label}/{str(row.get('stage') or '-').upper()}", "inline": True},
                 {"name": "Side", "value": side, "inline": True},
                 {"name": "Score", "value": f"{score:.1f}", "inline": True},
@@ -134,6 +151,11 @@ class PumpScannerService:
             {
                 "username": "Pump Hunter Bot",
                 "allowed_mentions": {"parse": []},
+                "content": (
+                    f"HIGH TP >= 10% | {symbol} | {side} | TP {self._format_signed_pct(tp_pct)}"
+                    if is_high_tp
+                    else None
+                ),
                 "embeds": [embed],
             },
             ensure_ascii=False,

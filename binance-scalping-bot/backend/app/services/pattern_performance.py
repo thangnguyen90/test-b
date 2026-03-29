@@ -32,6 +32,10 @@ def _normalize_label(value: object) -> str:
     return str(value or "").strip().upper()
 
 
+def _is_ml_basic_entry_type(value: object) -> bool:
+    return _normalize_label(value) == "LIMIT"
+
+
 class PatternPerformanceResolver:
     def __init__(
         self,
@@ -110,6 +114,8 @@ class PatternPerformanceResolver:
         pattern_map: dict[str, dict[str, float | int | str]] = {}
 
         for row in deduped_rows:
+            if not _is_ml_basic_entry_type(row.get("entry_type")):
+                continue
             closed_at = _parse_dt(row.get("closed_at")) or _parse_dt(row.get("opened_at"))
             if closed_at is None:
                 continue
