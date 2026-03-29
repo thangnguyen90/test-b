@@ -330,6 +330,7 @@ def _evaluate_paper_entry_gate(
                         side=side,
                         effective_prob=effective_probability,
                         btc_guard=btc_guard,
+                        entry_type=normalized_entry_type,
                     )
                 )
             except Exception:
@@ -342,6 +343,13 @@ def _evaluate_paper_entry_gate(
                 if follows_btc and str(side).upper() == "SHORT" and shock_direction == "DOWN":
                     return False, "BTC down-shock short block", effective_probability, btc_following
                 try:
+                    short_rebound_1h_reason = engine._btc_limit_short_rebound_1h_reason(
+                        side=side,
+                        entry_type=normalized_entry_type,
+                        btc_guard=btc_guard,
+                    )
+                    if short_rebound_1h_reason:
+                        return False, str(short_rebound_1h_reason), effective_probability, btc_following
                     short_rebound_reason = engine._btc_short_rebound_ema99_reason(
                         side=side,
                         btc_guard=btc_guard,
@@ -360,6 +368,13 @@ def _evaluate_paper_entry_gate(
                     )
                     if long_top_fade_reason:
                         return False, str(long_top_fade_reason), effective_probability, btc_following
+                    btc_box_wait_reason = engine._btc_limit_box_wait_reason(
+                        side=side,
+                        entry_type=normalized_entry_type,
+                        btc_guard=btc_guard,
+                    )
+                    if btc_box_wait_reason:
+                        return False, str(btc_box_wait_reason), effective_probability, btc_following
                 except Exception:
                     pass
 

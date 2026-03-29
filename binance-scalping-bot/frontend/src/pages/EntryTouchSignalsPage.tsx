@@ -10,6 +10,10 @@ const AUTO_OPEN_COOLDOWN_MS = 30_000
 const LIVE_TOP_SYMBOLS = 24
 const FALLBACK_ORDER_USDT = 20
 const AUTO_ENTRY_MIN_EFFECTIVE_SCORE = 50
+const TABLE_PAGE_SIZE = 12
+const ENTRY_MAX_15M_RANGE_PCT = 4.8
+const ENTRY_MAX_15M_ATR_PCT = 2.8
+const ENTRY_MAX_15M_UPPER_WICK_PCT = 2.4
 
 type PumpHunterItem = {
   symbol: string
@@ -25,6 +29,9 @@ type PumpHunterItem = {
   invalidation_price: number
   rejection_score: number
   volume_ratio_15m: number
+  range_pct_15m: number
+  atr_pct_15m: number
+  upper_wick_pct_15m: number
   ticker_quote_volume: number
   updated_at: string
 }
@@ -116,6 +123,9 @@ type PumpEntrySignal = {
   blocked_reason: string
   rejection_score: number
   volume_ratio_15m: number
+  range_pct_15m: number
+  atr_pct_15m: number
+  upper_wick_pct_15m: number
   ticker_quote_volume: number
   entry_distance_pct: number
   target_distance_pct: number
@@ -208,6 +218,14 @@ function deriveTp1(
     : entryPrice + (move * 0.5)
 }
 
+function isTooVolatile15m(item: Pick<PumpHunterItem, 'range_pct_15m' | 'atr_pct_15m' | 'upper_wick_pct_15m'>): boolean {
+  return (
+    item.range_pct_15m >= ENTRY_MAX_15M_RANGE_PCT
+    || item.atr_pct_15m >= ENTRY_MAX_15M_ATR_PCT
+    || item.upper_wick_pct_15m >= ENTRY_MAX_15M_UPPER_WICK_PCT
+  )
+}
+
 function toPumpEntrySignal(item: PumpHunterItem, orderUsdt: number, livePrice?: number): PumpEntrySignal {
   const liveMark = typeof livePrice === 'number' && Number.isFinite(livePrice) && livePrice > 0
     ? livePrice
@@ -220,9 +238,12 @@ function toPumpEntrySignal(item: PumpHunterItem, orderUsdt: number, livePrice?: 
   const stopLoss = isPostSweep ? item.est_liq_target_high : item.invalidation_price
   const touched = item.signal_label === 'ENTER' ? true : isEntryTouched(entryPrice, liveMark)
   const passesScoreGate = item.effective_score > AUTO_ENTRY_MIN_EFFECTIVE_SCORE
-  const canEnter = item.signal_label === 'ENTER' && passesScoreGate
+  const blockedBy15mVolatility = isTooVolatile15m(item)
+  const canEnter = item.signal_label === 'ENTER' && passesScoreGate && !blockedBy15mVolatility
   let blockedReason = '-'
-  if (!passesScoreGate) {
+  if (blockedBy15mVolatility) {
+    blockedReason = `Loai do bien dong 15m cao (${item.range_pct_15m.toFixed(1)}% range)`
+  } else if (!passesScoreGate) {
     blockedReason = `Điểm phải > ${AUTO_ENTRY_MIN_EFFECTIVE_SCORE}`
   } else if (item.signal_label === 'SWEEPED') {
     blockedReason = 'Đã sweep nhưng chưa xác nhận entry'
@@ -254,6 +275,9 @@ function toPumpEntrySignal(item: PumpHunterItem, orderUsdt: number, livePrice?: 
     blocked_reason: blockedReason,
     rejection_score: item.rejection_score,
     volume_ratio_15m: item.volume_ratio_15m,
+    range_pct_15m: item.range_pct_15m,
+    atr_pct_15m: item.atr_pct_15m,
+    upper_wick_pct_15m: item.upper_wick_pct_15m,
     ticker_quote_volume: item.ticker_quote_volume,
     entry_distance_pct: entryDistancePct,
     target_distance_pct: targetDistancePct,
@@ -282,6 +306,9 @@ export default function EntryTouchSignalsPage() {
   const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
   const [closingTradeId, setClosingTradeId] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<'signals' | 'profit' | 'history'>('signals')
+  const [signalsPage, setSignalsPage] = useState(1)
+  const [profitPage, setProfitPage] = useState(1)
+  const [historyPage, setHistoryPage] = useState(1)
   const [error, setError] = useState('')
   const [priceWsStatus, setPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('fallback')
   const orderUsdtPerTrade = paperStats && typeof paperStats.order_usdt === 'number' && paperStats.order_usdt > 0
@@ -319,6 +346,7 @@ export default function EntryTouchSignalsPage() {
   const signals = useMemo(() => {
     const rows = (scan?.items ?? [])
       .filter((item) => item.signal_label === 'ENTER' || item.signal_label === 'SWEEPED' || item.signal_label === 'ARMING')
+      .filter((item) => !isTooVolatile15m(item))
       .map((item) => toPumpEntrySignal(item, orderUsdtPerTrade, livePrices[item.symbol]))
     rows.sort((a, b) => {
       if (a.can_enter !== b.can_enter) return a.can_enter ? -1 : 1
@@ -606,6 +634,62 @@ export default function EntryTouchSignalsPage() {
     })
   }, [pumpEntryOpenTrades, livePrices])
 
+  const signalTotalPages = Math.max(1, Math.ceil(signals.length / TABLE_PAGE_SIZE))
+  const profitTotalPages = Math.max(1, Math.ceil(profitRows.length / TABLE_PAGE_SIZE))
+  const historyTotalPages = Math.max(1, Math.ceil(pumpEntryClosedTrades.length / TABLE_PAGE_SIZE))
+
+  const pagedSignals = useMemo(() => {
+    const start = (signalsPage - 1) * TABLE_PAGE_SIZE
+    return signals.slice(start, start + TABLE_PAGE_SIZE)
+  }, [signals, signalsPage])
+
+  const pagedProfitRows = useMemo(() => {
+    const start = (profitPage - 1) * TABLE_PAGE_SIZE
+    return profitRows.slice(start, start + TABLE_PAGE_SIZE)
+  }, [profitRows, profitPage])
+
+  const pagedHistoryRows = useMemo(() => {
+    const start = (historyPage - 1) * TABLE_PAGE_SIZE
+    return pumpEntryClosedTrades.slice(start, start + TABLE_PAGE_SIZE)
+  }, [pumpEntryClosedTrades, historyPage])
+
+  useEffect(() => {
+    setSignalsPage((prev) => Math.min(prev, signalTotalPages))
+  }, [signalTotalPages])
+
+  useEffect(() => {
+    setProfitPage((prev) => Math.min(prev, profitTotalPages))
+  }, [profitTotalPages])
+
+  useEffect(() => {
+    setHistoryPage((prev) => Math.min(prev, historyTotalPages))
+  }, [historyTotalPages])
+
+  function renderPagination(currentPage: number, totalPages: number, setPage: (value: number) => void) {
+    if (totalPages <= 1) return null
+    return (
+      <div className="entry-touch-pagination">
+        <button
+          type="button"
+          className="btn-inline"
+          disabled={currentPage <= 1}
+          onClick={() => setPage(Math.max(1, currentPage - 1))}
+        >
+          Trang trước
+        </button>
+        <span className="entry-touch-pagination-meta">Trang {currentPage}/{totalPages}</span>
+        <button
+          type="button"
+          className="btn-inline"
+          disabled={currentPage >= totalPages}
+          onClick={() => setPage(Math.min(totalPages, currentPage + 1))}
+        >
+          Trang sau
+        </button>
+      </div>
+    )
+  }
+
   return (
     <main className="app-shell app-shell-wide entry-touch-page">
       <section className="hero">
@@ -679,6 +763,7 @@ export default function EntryTouchSignalsPage() {
             Cập nhật lần cuối: {formatVnTimestamp(lastUpdated)} | {priceWsStatus === 'live' ? 'Giá WS live' : priceWsStatus === 'connecting' ? 'WS đang nối' : 'REST fallback'} | Auto paper entry khi model mới xác nhận ENTER
           </p>
           <p className="subtext">Chỉ auto vào lệnh khi `Điểm &gt; 50`, tín hiệu là `ENTER`, và giá đã chạm entry.</p>
+          <p className="subtext">Tự loại coin có biên độ 15m quá gắt: range ≥ {ENTRY_MAX_15M_RANGE_PCT}%, ATR ≥ {ENTRY_MAX_15M_ATR_PCT}%, hoặc râu trên ≥ {ENTRY_MAX_15M_UPPER_WICK_PCT}%.</p>
           <p className="subtext">Mỗi lệnh auto dùng {orderUsdtPerTrade} USDT vốn vào lệnh, lấy từ env `PAPER_TRADE_ORDER_USDT` của backend.</p>
           {scan?.note ? <p className="subtext">{scan.note}</p> : null}
         </article>
@@ -765,7 +850,7 @@ export default function EntryTouchSignalsPage() {
                 </tr>
               </thead>
               <tbody>
-                {signals.map((item) => {
+                {pagedSignals.map((item) => {
                   const isOpen = openTradeKeySet.has(`${canonicalSymbol(item.symbol)}:${item.side}`)
                   return (
                     <tr key={item.symbol}>
@@ -804,16 +889,16 @@ export default function EntryTouchSignalsPage() {
                           <span className="entry-touch-meta">{formatPct(item.tp1_distance_pct)}</span>
                         </div>
                       </td>
-                      <td>{`${item.projected_profit_1_usdt >= 0 ? '+' : ''}${item.projected_profit_1_usdt.toFixed(2)} USDT`}</td>
+                      <td className={item.projected_profit_1_usdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>{`${item.projected_profit_1_usdt >= 0 ? '+' : ''}${item.projected_profit_1_usdt.toFixed(2)} USDT`}</td>
                       <td>
                         <div className="entry-touch-price-stack">
                           <span>{item.take_profit_2.toFixed(4)}</span>
                           <span className="entry-touch-meta">{formatPct(item.target_distance_pct)}</span>
                         </div>
                       </td>
-                      <td>{`${item.projected_profit_2_usdt >= 0 ? '+' : ''}${item.projected_profit_2_usdt.toFixed(2)} USDT`}</td>
+                      <td className={item.projected_profit_2_usdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>{`${item.projected_profit_2_usdt >= 0 ? '+' : ''}${item.projected_profit_2_usdt.toFixed(2)} USDT`}</td>
                       <td>{item.stop_loss.toFixed(4)}</td>
-                      <td>{`${item.projected_loss_usdt >= 0 ? '+' : ''}${item.projected_loss_usdt.toFixed(2)} USDT`}</td>
+                      <td className={item.projected_loss_usdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>{`${item.projected_loss_usdt >= 0 ? '+' : ''}${item.projected_loss_usdt.toFixed(2)} USDT`}</td>
                       <td>x{item.volume_ratio_15m.toFixed(2)}</td>
                       <td>{formatCompact(item.ticker_quote_volume)}</td>
                       <td>
@@ -831,6 +916,7 @@ export default function EntryTouchSignalsPage() {
               </tbody>
             </table>
           )}
+          {renderPagination(signalsPage, signalTotalPages, setSignalsPage)}
         </div>
       </section>
       ) : null}
@@ -864,15 +950,15 @@ export default function EntryTouchSignalsPage() {
                 </tr>
               </thead>
               <tbody>
-                {pumpEntryClosedTrades.map((row) => (
+                {pagedHistoryRows.map((row) => (
                   <tr key={row.id} className={typeof row.pnl === 'number' ? (row.pnl > 0 ? 'row-profit' : row.pnl < 0 ? 'row-loss' : '') : ''}>
                     <td>{row.id}</td>
                     <td><strong>{row.symbol}</strong></td>
                     <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                     <td>{row.entry_price}</td>
                     <td>{typeof row.close_price === 'number' ? row.close_price : '-'}</td>
-                    <td>{typeof row.pnl === 'number' ? `${row.pnl >= 0 ? '+' : ''}${row.pnl.toFixed(2)}` : '-'}</td>
-                    <td>{typeof row.pnl_pct === 'number' ? formatPct(row.pnl_pct) : '-'}</td>
+                    <td className={typeof row.pnl === 'number' ? (row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg') : ''}>{typeof row.pnl === 'number' ? `${row.pnl >= 0 ? '+' : ''}${row.pnl.toFixed(2)}` : '-'}</td>
+                    <td className={typeof row.pnl_pct === 'number' ? (row.pnl_pct >= 0 ? 'pnl-pos' : 'pnl-neg') : ''}>{typeof row.pnl_pct === 'number' ? formatPct(row.pnl_pct) : '-'}</td>
                     <td>{row.close_reason ?? '-'}</td>
                     <td>{formatVnTimestamp(row.opened_at)}</td>
                     <td>{formatVnTimestamp(row.closed_at)}</td>
@@ -881,6 +967,7 @@ export default function EntryTouchSignalsPage() {
               </tbody>
             </table>
           )}
+          {renderPagination(historyPage, historyTotalPages, setHistoryPage)}
         </div>
       </section>
       ) : null}
@@ -923,7 +1010,7 @@ export default function EntryTouchSignalsPage() {
                 </tr>
               </thead>
               <tbody>
-                {profitRows.map((row) => (
+                {pagedProfitRows.map((row) => (
                   <tr key={row.id} className={typeof row.upnlUsdt === 'number' ? (row.upnlUsdt > 0 ? 'row-profit' : row.upnlUsdt < 0 ? 'row-loss' : '') : ''}>
                     <td>{row.id}</td>
                     <td><strong>{row.symbol}</strong></td>
@@ -935,8 +1022,8 @@ export default function EntryTouchSignalsPage() {
                         <span className="entry-touch-meta">{formatVnTimestamp(livePriceTime[row.symbol])}</span>
                       </div>
                     </td>
-                    <td>{typeof row.upnlUsdt === 'number' ? `${row.upnlUsdt >= 0 ? '+' : ''}${row.upnlUsdt.toFixed(2)}` : '-'}</td>
-                    <td>{typeof row.upnlPct === 'number' ? formatPct(row.upnlPct) : '-'}</td>
+                    <td className={typeof row.upnlUsdt === 'number' ? (row.upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg') : ''}>{typeof row.upnlUsdt === 'number' ? `${row.upnlUsdt >= 0 ? '+' : ''}${row.upnlUsdt.toFixed(2)}` : '-'}</td>
+                    <td className={typeof row.upnlPct === 'number' ? (row.upnlPct >= 0 ? 'pnl-pos' : 'pnl-neg') : ''}>{typeof row.upnlPct === 'number' ? formatPct(row.upnlPct) : '-'}</td>
                     <td>{`${(row.entry_price * row.quantity).toFixed(2)} USDT`}</td>
                     <td>{typeof row.marginUsdt === 'number' ? `${row.marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>
                     <td>{row.tp1.toFixed(4)}</td>
@@ -966,6 +1053,7 @@ export default function EntryTouchSignalsPage() {
               </tbody>
             </table>
           )}
+          {renderPagination(profitPage, profitTotalPages, setProfitPage)}
         </div>
       </section>
       ) : null}

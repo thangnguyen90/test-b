@@ -7,6 +7,7 @@ import math
 import time
 import traceback
 from typing import Any
+from urllib.request import Request, urlopen
 
 from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
 from app.core.config import settings
@@ -16,6 +17,7 @@ from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.pattern_performance import PatternPerformanceResolver
+from app.services.pump_scanner_service import PumpScannerService
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
     calc_estimated_margin_ratio_pct,
@@ -112,6 +114,16 @@ class PaperTradingEngine:
         btc_short_stall_profit_exit_max_cluster_range_pct: float = 0.45,
         btc_short_stall_profit_exit_max_avg_body_pct: float = 0.18,
         btc_short_stall_profit_exit_near_low_pct: float = 0.35,
+        btc_short_slow_grind_block_enabled: bool = True,
+        btc_short_slow_grind_min_rebound_pct: float = 0.35,
+        btc_short_slow_grind_max_avg_body_pct: float = 0.22,
+        btc_short_slow_grind_min_upper_wick_ratio: float = 0.28,
+        btc_short_slow_grind_max_box_position_pct: float = 0.72,
+        btc_long_weak_base_block_enabled: bool = True,
+        btc_long_weak_base_min_pullback_pct: float = 0.45,
+        btc_long_weak_base_max_avg_body_pct: float = 0.22,
+        btc_long_weak_base_min_upper_wick_ratio: float = 0.28,
+        btc_long_weak_base_max_box_position_pct: float = 0.48,
         btc_short_rebound_ema99_block_enabled: bool = True,
         btc_long_pullback_ema99_block_enabled: bool = True,
         btc_long_top_fade_block_enabled: bool = True,
@@ -120,12 +132,22 @@ class PaperTradingEngine:
         btc_long_top_fade_pullback_pct: float = 0.45,
         btc_short_rebound_ema99_green_candle_pct: float = 0.35,
         btc_short_rebound_ema99_lookback_candles: int = 12,
+        btc_short_rebound_1h_block_enabled: bool = True,
+        btc_short_rebound_1h_lookback_candles: int = 12,
+        btc_short_rebound_1h_rebound_pct: float = 1.0,
+        btc_short_rebound_1h_green_candle_pct: float = 0.25,
+        btc_short_rebound_1h_15m_confirm_pct: float = 0.6,
+        btc_short_rebound_1h_ema8_tolerance_pct: float = 0.003,
         btc_profit_lock_enabled: bool = True,
         btc_profit_lock_min_confidence: float = 0.6,
         btc_follow_min_corr: float = 0.45,
         btc_follow_min_beta: float = 0.2,
         btc_follow_lookback: int = 120,
         btc_follow_cache_sec: float = 300.0,
+        discord_loss_alert_enabled: bool = True,
+        discord_loss_alert_threshold_pct: float = -8.0,
+        discord_loss_alert_rearm_pct: float = -6.0,
+        discord_loss_webhook_url: str = "",
         base_ml_max_symbols: int = 200,
         limit_max_orders_per_cycle: int = 4,
         test_ml_enabled: bool = False,
@@ -191,6 +213,8 @@ class PaperTradingEngine:
         entry_symbol_shock_strong_min_range_vs_avg: float = 2.4,
         entry_short_inside_bar_breakdown_confirm_enabled: bool = True,
         entry_long_inside_bar_breakout_confirm_enabled: bool = True,
+        entry_strong_bull_long_confirm_enabled: bool = True,
+        entry_strong_bull_short_confirm_enabled: bool = True,
         instant_sl_guard_short_top_test_cache_sec: float = 8.0,
         instant_sl_global_guard_enabled: bool = True,
         instant_sl_global_threshold: int = 3,
@@ -233,6 +257,7 @@ class PaperTradingEngine:
         self.liquid_predictor = liquid_predictor
         self.price_stream = price_stream
         self.market_client = BinanceFuturesClient()
+        self.pump_scanner = PumpScannerService(client=self.market_client)
         self.pattern_analyzer = CandlePatternAnalyzer(client=self.market_client)
         self.pattern_performance = PatternPerformanceResolver(
             analyzer=self.pattern_analyzer,
@@ -330,6 +355,16 @@ class PaperTradingEngine:
         self.btc_short_stall_profit_exit_max_cluster_range_pct = max(0.05, min(float(btc_short_stall_profit_exit_max_cluster_range_pct), 5.0))
         self.btc_short_stall_profit_exit_max_avg_body_pct = max(0.02, min(float(btc_short_stall_profit_exit_max_avg_body_pct), 5.0))
         self.btc_short_stall_profit_exit_near_low_pct = max(0.05, min(float(btc_short_stall_profit_exit_near_low_pct), 5.0))
+        self.btc_short_slow_grind_block_enabled = bool(btc_short_slow_grind_block_enabled)
+        self.btc_short_slow_grind_min_rebound_pct = max(0.05, min(float(btc_short_slow_grind_min_rebound_pct), 5.0))
+        self.btc_short_slow_grind_max_avg_body_pct = max(0.02, min(float(btc_short_slow_grind_max_avg_body_pct), 5.0))
+        self.btc_short_slow_grind_min_upper_wick_ratio = max(0.05, min(float(btc_short_slow_grind_min_upper_wick_ratio), 0.95))
+        self.btc_short_slow_grind_max_box_position_pct = max(0.05, min(float(btc_short_slow_grind_max_box_position_pct), 0.98))
+        self.btc_long_weak_base_block_enabled = bool(btc_long_weak_base_block_enabled)
+        self.btc_long_weak_base_min_pullback_pct = max(0.05, min(float(btc_long_weak_base_min_pullback_pct), 5.0))
+        self.btc_long_weak_base_max_avg_body_pct = max(0.02, min(float(btc_long_weak_base_max_avg_body_pct), 5.0))
+        self.btc_long_weak_base_min_upper_wick_ratio = max(0.05, min(float(btc_long_weak_base_min_upper_wick_ratio), 0.95))
+        self.btc_long_weak_base_max_box_position_pct = max(0.05, min(float(btc_long_weak_base_max_box_position_pct), 0.98))
         self.btc_short_rebound_ema99_block_enabled = bool(btc_short_rebound_ema99_block_enabled)
         self.btc_long_pullback_ema99_block_enabled = bool(btc_long_pullback_ema99_block_enabled)
         self.btc_long_top_fade_block_enabled = bool(btc_long_top_fade_block_enabled)
@@ -338,12 +373,23 @@ class PaperTradingEngine:
         self.btc_long_top_fade_pullback_pct = max(0.05, min(float(btc_long_top_fade_pullback_pct), 5.0))
         self.btc_short_rebound_ema99_green_candle_pct = max(0.0, min(float(btc_short_rebound_ema99_green_candle_pct), 5.0))
         self.btc_short_rebound_ema99_lookback_candles = max(4, min(int(btc_short_rebound_ema99_lookback_candles), 48))
+        self.btc_short_rebound_1h_block_enabled = bool(btc_short_rebound_1h_block_enabled)
+        self.btc_short_rebound_1h_lookback_candles = max(4, min(int(btc_short_rebound_1h_lookback_candles), 72))
+        self.btc_short_rebound_1h_rebound_pct = max(0.1, min(float(btc_short_rebound_1h_rebound_pct), 12.0))
+        self.btc_short_rebound_1h_green_candle_pct = max(0.0, min(float(btc_short_rebound_1h_green_candle_pct), 6.0))
+        self.btc_short_rebound_1h_15m_confirm_pct = max(0.0, min(float(btc_short_rebound_1h_15m_confirm_pct), 8.0))
+        self.btc_short_rebound_1h_ema8_tolerance_pct = max(0.0, min(float(btc_short_rebound_1h_ema8_tolerance_pct), 0.03))
         self.btc_profit_lock_enabled = bool(btc_profit_lock_enabled)
         self.btc_profit_lock_min_confidence = max(0.5, min(float(btc_profit_lock_min_confidence), 0.99))
         self.btc_follow_min_corr = max(0.0, min(float(btc_follow_min_corr), 0.99))
         self.btc_follow_min_beta = max(0.0, float(btc_follow_min_beta))
         self.btc_follow_lookback = max(60, min(500, int(btc_follow_lookback)))
         self.btc_follow_cache_sec = max(30.0, float(btc_follow_cache_sec))
+        self.discord_loss_alert_enabled = bool(discord_loss_alert_enabled)
+        self.discord_loss_alert_threshold_pct = float(discord_loss_alert_threshold_pct)
+        self.discord_loss_alert_rearm_pct = float(discord_loss_alert_rearm_pct)
+        self.discord_loss_webhook_url = str(discord_loss_webhook_url or "").strip()
+        self._discord_loss_alerted_trade_ids: set[int] = set()
         self.base_ml_max_symbols = max(10, min(600, int(base_ml_max_symbols)))
         self.limit_max_orders_per_cycle = max(0, min(50, int(limit_max_orders_per_cycle)))
         self.test_ml_enabled = bool(test_ml_enabled)
@@ -415,11 +461,6 @@ class PaperTradingEngine:
                 "offset_pct": max(0.0, min(float(entry_short_btc_short_base_offset_pct), 2.0)),
             },
             {
-                "pattern": "STRONG_BULL",
-                "btc_trend": "SHORT",
-                "offset_pct": max(0.0, min(float(entry_strong_bull_short_offset_pct), 2.0)),
-            },
-            {
                 "pattern": "BULL_ENGULFING",
                 "btc_trend": "SHORT",
                 "offset_pct": max(0.0, min(float(entry_bull_engulfing_short_offset_pct), 2.0)),
@@ -457,6 +498,8 @@ class PaperTradingEngine:
         self.entry_symbol_shock_strong_min_range_vs_avg = max(1.0, min(float(entry_symbol_shock_strong_min_range_vs_avg), 10.0))
         self.entry_short_inside_bar_breakdown_confirm_enabled = bool(entry_short_inside_bar_breakdown_confirm_enabled)
         self.entry_long_inside_bar_breakout_confirm_enabled = bool(entry_long_inside_bar_breakout_confirm_enabled)
+        self.entry_strong_bull_long_confirm_enabled = bool(entry_strong_bull_long_confirm_enabled)
+        self.entry_strong_bull_short_confirm_enabled = bool(entry_strong_bull_short_confirm_enabled)
         self.instant_sl_guard_short_top_test_cache_sec = max(
             1.0,
             min(float(instant_sl_guard_short_top_test_cache_sec), 60.0),
@@ -507,6 +550,8 @@ class PaperTradingEngine:
         self._symbol_shock_pause_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
         self._short_inside_bar_breakdown_cache: dict[str, tuple[float, bool]] = {}
         self._long_inside_bar_breakout_cache: dict[str, tuple[float, bool]] = {}
+        self._strong_bull_long_confirm_cache: dict[str, tuple[float, bool]] = {}
+        self._strong_bull_short_confirm_cache: dict[str, tuple[float, bool]] = {}
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
@@ -705,7 +750,13 @@ class PaperTradingEngine:
                     open_trades_by_symbol=open_trades_by_symbol,
                 ):
                     continue
-                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(
+                    symbol=symbol,
+                    side=side,
+                    effective_prob=effective_prob,
+                    btc_guard=btc_guard,
+                    entry_type="LIMIT",
+                ):
                     continue
 
                 # Trigger condition: market touches/gets through entry.
@@ -876,7 +927,13 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
-                if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                if not self._pass_btc_filter(
+                    symbol=symbol,
+                    side=side,
+                    effective_prob=effective_prob,
+                    btc_guard=btc_guard,
+                    entry_type="ML_TEST",
+                ):
                     continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -1063,7 +1120,13 @@ class PaperTradingEngine:
                 if not touched:
                     continue
                 if not skip_btc_guards:
-                    if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
+                    if not self._pass_btc_filter(
+                        symbol=symbol,
+                        side=side,
+                        effective_prob=effective_prob,
+                        btc_guard=btc_guard,
+                        entry_type=candles_entry_type,
+                    ):
                         continue
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
@@ -1356,6 +1419,12 @@ class PaperTradingEngine:
 
                 # Once ROI reaches trigger, move SL to a locked-profit level.
                 pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=price, leverage=int(trade["leverage"]))
+                self._maybe_schedule_discord_loss_alert(
+                    trade=trade,
+                    market_price=price,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                )
                 prev_mae = float(trade.get("mae_pct") or 0.0)
                 prev_mfe = float(trade.get("mfe_pct") or 0.0)
                 next_mae = min(prev_mae, pnl_pct)
@@ -2001,6 +2070,10 @@ class PaperTradingEngine:
         symbol_shock_reason = self._symbol_shock_pause_reason(symbol=symbol)
         if symbol_shock_reason:
             return symbol_shock_reason
+        if side_key == "SHORT" and self._is_strong_bull_waiting_short_confirmation(symbol=symbol):
+            return "Short waits for confirmation after STRONG_BULL"
+        if side_key == "LONG" and self._is_strong_bull_waiting_long_confirmation(symbol=symbol):
+            return "Long waits for confirmation after STRONG_BULL"
         if side_key == "SHORT" and self._is_short_inside_bar_waiting_breakdown(symbol=symbol):
             return "Short waits for inside-bar breakdown close"
         if side_key == "LONG" and self._is_long_inside_bar_waiting_breakout(symbol=symbol):
@@ -2438,6 +2511,92 @@ class PaperTradingEngine:
 
         self._long_inside_bar_breakout_cache[key] = (now_ts, bool(matched))
         return bool(matched)
+
+    def _is_strong_bull_waiting_long_confirmation(self, *, symbol: str) -> bool:
+        if not self.entry_strong_bull_long_confirm_enabled:
+            return False
+
+        key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cached = self._strong_bull_long_confirm_cache.get(key)
+        if cached is not None:
+            cached_ts, cached_value = cached
+            if (now_ts - cached_ts) <= self.instant_sl_guard_short_top_test_cache_sec:
+                return bool(cached_value)
+
+        waiting = False
+        try:
+            rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=7)
+            if rows and len(rows) >= 5:
+                latest_closed = rows[-2]
+                latest_prev = rows[-3]
+                latest_pattern = CandlePatternAnalyzer._classify_pattern(latest_prev, latest_closed)
+                if latest_pattern == "STRONG_BULL":
+                    waiting = True
+                else:
+                    setup_prev = rows[-4]
+                    setup_candle = rows[-3]
+                    confirm_candle = rows[-2]
+                    setup_pattern = CandlePatternAnalyzer._classify_pattern(setup_prev, setup_candle)
+                    if setup_pattern == "STRONG_BULL":
+                        setup_high = float(setup_candle[2])
+                        setup_close = float(setup_candle[4])
+                        confirm_open = float(confirm_candle[1])
+                        confirm_close = float(confirm_candle[4])
+                        bullish_confirm = (
+                            confirm_close > confirm_open
+                            and confirm_close >= setup_close
+                            and float(confirm_candle[2]) >= setup_high
+                        )
+                        waiting = not bullish_confirm
+        except Exception:
+            waiting = False
+
+        self._strong_bull_long_confirm_cache[key] = (now_ts, bool(waiting))
+        return bool(waiting)
+
+    def _is_strong_bull_waiting_short_confirmation(self, *, symbol: str) -> bool:
+        if not self.entry_strong_bull_short_confirm_enabled:
+            return False
+
+        key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cached = self._strong_bull_short_confirm_cache.get(key)
+        if cached is not None:
+            cached_ts, cached_value = cached
+            if (now_ts - cached_ts) <= self.instant_sl_guard_short_top_test_cache_sec:
+                return bool(cached_value)
+
+        waiting = False
+        try:
+            rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="5m", limit=7)
+            if rows and len(rows) >= 5:
+                latest_closed = rows[-2]
+                latest_prev = rows[-3]
+                latest_pattern = CandlePatternAnalyzer._classify_pattern(latest_prev, latest_closed)
+                if latest_pattern == "STRONG_BULL":
+                    waiting = True
+                else:
+                    setup_prev = rows[-4]
+                    setup_candle = rows[-3]
+                    confirm_candle = rows[-2]
+                    setup_pattern = CandlePatternAnalyzer._classify_pattern(setup_prev, setup_candle)
+                    if setup_pattern == "STRONG_BULL":
+                        setup_open = float(setup_candle[1])
+                        setup_low = float(setup_candle[3])
+                        confirm_open = float(confirm_candle[1])
+                        confirm_close = float(confirm_candle[4])
+                        bearish_confirm = (
+                            confirm_close < confirm_open
+                            and confirm_close <= setup_open
+                            and float(confirm_candle[3]) <= setup_low
+                        )
+                        waiting = not bearish_confirm
+        except Exception:
+            waiting = False
+
+        self._strong_bull_short_confirm_cache[key] = (now_ts, bool(waiting))
+        return bool(waiting)
 
     def _register_instant_sl_event(
         self,
@@ -3240,19 +3399,30 @@ class PaperTradingEngine:
             "trend_1h_reversal": False,
             "ema99_15m": 0.0,
             "ema99_1h": 0.0,
+            "ema8_1h": 0.0,
+            "ema13_1h": 0.0,
+            "ema21_1h": 0.0,
             "nearest_ema99": 0.0,
             "near_ema99": False,
             "near_ema99_gap_pct": 0.0,
             "recent_low_15m": 0.0,
             "recent_high_15m": 0.0,
+            "recent_low_1h": 0.0,
+            "recent_high_1h": 0.0,
             "rebound_from_recent_low_pct": 0.0,
+            "rebound_from_recent_low_1h_pct": 0.0,
             "green_candle_pct": 0.0,
             "prev_green_candle_pct": 0.0,
+            "green_candle_1h_pct": 0.0,
+            "prev_green_candle_1h_pct": 0.0,
             "ema99_reclaim_up": False,
             "ema99_reclaim_down": False,
+            "ema8_reclaim_up_1h": False,
             "short_rebound_ema99_risk": False,
             "short_rebound_ema99_release": False,
+            "short_rebound_1h_risk": False,
             "pullback_from_recent_high_pct": 0.0,
+            "pullback_from_recent_high_1h_pct": 0.0,
             "long_pullback_ema99_risk": False,
             "long_pullback_ema99_release": False,
             "long_top_fade_risk": False,
@@ -3261,6 +3431,11 @@ class PaperTradingEngine:
             "short_stall_cluster_range_pct": 0.0,
             "short_stall_avg_body_pct": 0.0,
             "short_stall_near_low_pct": 0.0,
+            "cluster_higher_close_steps_15m": 0,
+            "latest_upper_wick_ratio_15m": 0.0,
+            "cluster_upper_wick_ratio_15m": 0.0,
+            "short_slow_grind_risk": False,
+            "long_weak_base_risk": False,
         }
         if (
             not self.btc_filter_enabled
@@ -3270,6 +3445,7 @@ class PaperTradingEngine:
             and not self.btc_reversal_loss_exit_enabled
             and not self.btc_profit_lock_enabled
             and not self.btc_short_rebound_ema99_block_enabled
+            and not self.btc_short_rebound_1h_block_enabled
         ):
             return neutral
 
@@ -3293,11 +3469,21 @@ class PaperTradingEngine:
                 rsi_1h = rsi_15m
                 ema99_15m = self._ema_last(closes[-180:], period=99) if len(closes) >= 99 else 0.0
                 ema99_1h = 0.0
+                ema8_1h = 0.0
+                ema13_1h = 0.0
+                ema21_1h = 0.0
                 trend_1h_side = "NEUTRAL"
                 trend_1h_confidence = 0.0
                 trend_1h_score = 0.0
                 trend_1h_prev_side = "NEUTRAL"
                 trend_1h_reversal = False
+                green_candle_1h_pct = 0.0
+                prev_green_candle_1h_pct = 0.0
+                recent_low_1h = 0.0
+                recent_high_1h = 0.0
+                rebound_from_recent_low_1h_pct = 0.0
+                pullback_from_recent_high_1h_pct = 0.0
+                ema8_reclaim_up_1h = False
                 try:
                     rows_1h = self.market_client.fetch_ohlcv(
                         symbol="BTC/USDT",
@@ -3305,6 +3491,12 @@ class PaperTradingEngine:
                         limit=220,
                     )
                     closes_1h = [float(row[4]) for row in rows_1h if len(row) >= 5]
+                    if len(closes_1h) >= 8:
+                        ema8_1h = self._ema_last(closes_1h[-80:], period=8)
+                    if len(closes_1h) >= 13:
+                        ema13_1h = self._ema_last(closes_1h[-130:], period=13)
+                    if len(closes_1h) >= 21:
+                        ema21_1h = self._ema_last(closes_1h[-180:], period=21)
                     if len(closes_1h) >= 20:
                         rsi_1h = self._rsi_last(closes_1h, period=14)
                     if len(closes_1h) >= 60:
@@ -3319,6 +3511,40 @@ class PaperTradingEngine:
                         )
                     if len(closes_1h) >= 99:
                         ema99_1h = self._ema_last(closes_1h[-180:], period=99)
+                    if rows_1h:
+                        last_row_1h = rows_1h[-1] if len(rows_1h[-1]) >= 5 else None
+                        prev_row_1h = rows_1h[-2] if len(rows_1h) >= 2 and len(rows_1h[-2]) >= 5 else None
+                        if last_row_1h is not None:
+                            open_px_1h = float(last_row_1h[1])
+                            close_px_1h = float(last_row_1h[4])
+                            if abs(open_px_1h) > 1e-12:
+                                green_candle_1h_pct = ((close_px_1h - open_px_1h) / open_px_1h) * 100.0
+                        if prev_row_1h is not None:
+                            prev_open_px_1h = float(prev_row_1h[1])
+                            prev_close_px_1h = float(prev_row_1h[4])
+                            if abs(prev_open_px_1h) > 1e-12:
+                                prev_green_candle_1h_pct = ((prev_close_px_1h - prev_open_px_1h) / prev_open_px_1h) * 100.0
+                        lookback_rows_1h = rows_1h[-self.btc_short_rebound_1h_lookback_candles :]
+                        recent_low_1h = min((float(row[3]) for row in lookback_rows_1h if len(row) >= 4), default=0.0)
+                        recent_high_1h = max((float(row[2]) for row in lookback_rows_1h if len(row) >= 3), default=0.0)
+                        latest_close_1h = float(closes_1h[-1]) if closes_1h else 0.0
+                        prev_close_1h = float(closes_1h[-2]) if len(closes_1h) >= 2 else latest_close_1h
+                        rebound_from_recent_low_1h_pct = (
+                            ((latest_close_1h - recent_low_1h) / recent_low_1h) * 100.0
+                            if recent_low_1h > 0 and latest_close_1h > recent_low_1h
+                            else 0.0
+                        )
+                        pullback_from_recent_high_1h_pct = (
+                            ((recent_high_1h - latest_close_1h) / recent_high_1h) * 100.0
+                            if recent_high_1h > 0 and latest_close_1h < recent_high_1h
+                            else 0.0
+                        )
+                        ema8_reclaim_up_1h = bool(
+                            ema8_1h > 0
+                            and len(closes_1h) >= 2
+                            and prev_close_1h < ema8_1h
+                            and latest_close_1h >= ema8_1h
+                        )
                 except Exception:
                     pass
 
@@ -3382,6 +3608,80 @@ class PaperTradingEngine:
                     if recent_high_15m > 0 and float(closes[-1]) < recent_high_15m
                     else 0.0
                 )
+                box_range_pct_15m = (
+                    ((recent_high_15m - recent_low_15m) / recent_low_15m) * 100.0
+                    if recent_low_15m > 0 and recent_high_15m > recent_low_15m
+                    else 0.0
+                )
+                box_position_pct_15m = (
+                    (float(closes[-1]) - recent_low_15m) / max(1e-12, (recent_high_15m - recent_low_15m))
+                    if recent_high_15m > recent_low_15m
+                    else 0.5
+                )
+                cluster_rows_15m = rows[-4:]
+                cluster_green_count_15m = 0
+                cluster_red_count_15m = 0
+                cluster_higher_close_steps_15m = 0
+                cluster_lower_close_steps_15m = 0
+                cluster_avg_body_pct_15m = 0.0
+                cluster_net_move_pct_15m = 0.0
+                cluster_trend_15m = "FLAT"
+                cluster_body_pcts_15m: list[float] = []
+                cluster_upper_wick_ratios_15m: list[float] = []
+                cluster_first_open_15m: float | None = None
+                cluster_last_close_15m: float | None = None
+                prev_cluster_close_15m: float | None = None
+                latest_upper_wick_ratio_15m = 0.0
+                for row in cluster_rows_15m:
+                    if len(row) < 5:
+                        continue
+                    row_open = float(row[1])
+                    row_high = float(row[2])
+                    row_low = float(row[3])
+                    row_close = float(row[4])
+                    if cluster_first_open_15m is None:
+                        cluster_first_open_15m = row_open
+                    cluster_last_close_15m = row_close
+                    if row_close > row_open:
+                        cluster_green_count_15m += 1
+                    elif row_close < row_open:
+                        cluster_red_count_15m += 1
+                    if abs(row_open) > 1e-12:
+                        cluster_body_pcts_15m.append(abs((row_close - row_open) / row_open) * 100.0)
+                    candle_range = max(1e-12, row_high - row_low)
+                    upper_wick = max(0.0, row_high - max(row_open, row_close))
+                    upper_wick_ratio = upper_wick / candle_range
+                    cluster_upper_wick_ratios_15m.append(upper_wick_ratio)
+                    latest_upper_wick_ratio_15m = upper_wick_ratio
+                    if prev_cluster_close_15m is not None:
+                        if row_close > prev_cluster_close_15m:
+                            cluster_higher_close_steps_15m += 1
+                        elif row_close < prev_cluster_close_15m:
+                            cluster_lower_close_steps_15m += 1
+                    prev_cluster_close_15m = row_close
+                if cluster_body_pcts_15m:
+                    cluster_avg_body_pct_15m = sum(cluster_body_pcts_15m) / float(len(cluster_body_pcts_15m))
+                cluster_upper_wick_ratio_15m = 0.0
+                if cluster_upper_wick_ratios_15m:
+                    cluster_upper_wick_ratio_15m = sum(cluster_upper_wick_ratios_15m) / float(len(cluster_upper_wick_ratios_15m))
+                if (
+                    cluster_first_open_15m is not None
+                    and cluster_last_close_15m is not None
+                    and abs(cluster_first_open_15m) > 1e-12
+                ):
+                    cluster_net_move_pct_15m = ((cluster_last_close_15m - cluster_first_open_15m) / cluster_first_open_15m) * 100.0
+                if (
+                    cluster_net_move_pct_15m >= 0.18
+                    and cluster_green_count_15m >= 3
+                    and cluster_higher_close_steps_15m >= 2
+                ):
+                    cluster_trend_15m = "LONG"
+                elif (
+                    cluster_net_move_pct_15m <= -0.18
+                    and cluster_red_count_15m >= 3
+                    and cluster_lower_close_steps_15m >= 2
+                ):
+                    cluster_trend_15m = "SHORT"
                 ema99_reclaim_up = bool(
                     nearest_ema99 > 0
                     and len(closes) >= 2
@@ -3474,6 +3774,34 @@ class PaperTradingEngine:
                 short_stall_avg_body_pct = 0.0
                 short_stall_near_low_pct = 0.0
                 short_stall_profit_exit_risk = False
+                short_slow_grind_risk = bool(
+                    self.btc_short_slow_grind_block_enabled
+                    and rebound_from_recent_low_pct >= self.btc_short_slow_grind_min_rebound_pct
+                    and box_position_pct_15m <= self.btc_short_slow_grind_max_box_position_pct
+                    and cluster_green_count_15m >= 2
+                    and cluster_higher_close_steps_15m >= 2
+                    and cluster_net_move_pct_15m > 0
+                    and cluster_avg_body_pct_15m <= self.btc_short_slow_grind_max_avg_body_pct
+                    and (
+                        latest_upper_wick_ratio_15m >= self.btc_short_slow_grind_min_upper_wick_ratio
+                        or cluster_upper_wick_ratio_15m >= self.btc_short_slow_grind_min_upper_wick_ratio
+                    )
+                    and not short_break_confirmed
+                )
+                long_weak_base_risk = bool(
+                    self.btc_long_weak_base_block_enabled
+                    and pullback_from_recent_high_pct >= self.btc_long_weak_base_min_pullback_pct
+                    and box_position_pct_15m <= self.btc_long_weak_base_max_box_position_pct
+                    and cluster_red_count_15m >= 2
+                    and cluster_lower_close_steps_15m >= 2
+                    and cluster_net_move_pct_15m < 0
+                    and cluster_avg_body_pct_15m <= self.btc_long_weak_base_max_avg_body_pct
+                    and (
+                        latest_upper_wick_ratio_15m >= self.btc_long_weak_base_min_upper_wick_ratio
+                        or cluster_upper_wick_ratio_15m >= self.btc_long_weak_base_min_upper_wick_ratio
+                    )
+                    and not long_reclaim_confirmed
+                )
                 stall_rows = rows[-self.btc_short_stall_profit_exit_lookback_candles :]
                 if self.btc_short_stall_profit_exit_enabled and len(stall_rows) >= 3 and recent_low_15m > 0:
                     highs = [float(row[2]) for row in stall_rows if len(row) >= 3]
@@ -3505,8 +3833,27 @@ class PaperTradingEngine:
                             and short_stall_near_low_pct <= self.btc_short_stall_profit_exit_near_low_pct
                             and short_stall_cluster_range_pct <= self.btc_short_stall_profit_exit_max_cluster_range_pct
                             and short_stall_avg_body_pct <= self.btc_short_stall_profit_exit_max_avg_body_pct
-                            and green_count >= 1
+                    and green_count >= 1
+                )
+                short_rebound_1h_risk = bool(
+                    self.btc_short_rebound_1h_block_enabled
+                    and trend_side == "SHORT"
+                    and confidence >= self.btc_filter_min_confidence
+                    and rebound_from_recent_low_pct >= self.btc_short_rebound_1h_15m_confirm_pct
+                    and rebound_from_recent_low_1h_pct >= self.btc_short_rebound_1h_rebound_pct
+                    and (
+                        green_candle_1h_pct >= self.btc_short_rebound_1h_green_candle_pct
+                        or prev_green_candle_1h_pct >= self.btc_short_rebound_1h_green_candle_pct
+                    )
+                    and (
+                        ema8_reclaim_up_1h
+                        or (
+                            ema8_1h > 0
+                            and abs(float(closes[-1])) > 1e-12
+                            and float(closes[-1]) >= (ema8_1h * (1.0 - self.btc_short_rebound_1h_ema8_tolerance_pct))
                         )
+                    )
+                )
 
                 payload = {
                     "side": trend_side,
@@ -3532,19 +3879,40 @@ class PaperTradingEngine:
                     "trend_1h_reversal": bool(trend_1h_reversal),
                     "ema99_15m": float(ema99_15m),
                     "ema99_1h": float(ema99_1h),
+                    "ema8_1h": float(ema8_1h),
+                    "ema13_1h": float(ema13_1h),
+                    "ema21_1h": float(ema21_1h),
                     "nearest_ema99": float(nearest_ema99),
                     "near_ema99": bool(near_ema99),
                     "near_ema99_gap_pct": float(near_ema99_gap_pct),
                     "recent_low_15m": float(recent_low_15m),
                     "recent_high_15m": float(recent_high_15m),
+                    "recent_low_1h": float(recent_low_1h),
+                    "recent_high_1h": float(recent_high_1h),
+                    "box_range_pct_15m": float(box_range_pct_15m),
+                    "box_position_pct_15m": float(box_position_pct_15m),
+                    "cluster_trend_15m": cluster_trend_15m,
+                    "cluster_net_move_pct_15m": float(cluster_net_move_pct_15m),
+                    "cluster_avg_body_pct_15m": float(cluster_avg_body_pct_15m),
+                    "cluster_higher_close_steps_15m": int(cluster_higher_close_steps_15m),
+                    "cluster_green_count_15m": int(cluster_green_count_15m),
+                    "cluster_red_count_15m": int(cluster_red_count_15m),
+                    "latest_upper_wick_ratio_15m": float(latest_upper_wick_ratio_15m),
+                    "cluster_upper_wick_ratio_15m": float(cluster_upper_wick_ratio_15m),
                     "rebound_from_recent_low_pct": float(rebound_from_recent_low_pct),
+                    "rebound_from_recent_low_1h_pct": float(rebound_from_recent_low_1h_pct),
                     "pullback_from_recent_high_pct": float(pullback_from_recent_high_pct),
+                    "pullback_from_recent_high_1h_pct": float(pullback_from_recent_high_1h_pct),
                     "green_candle_pct": float(green_candle_pct),
                     "prev_green_candle_pct": float(prev_green_candle_pct),
+                    "green_candle_1h_pct": float(green_candle_1h_pct),
+                    "prev_green_candle_1h_pct": float(prev_green_candle_1h_pct),
                     "ema99_reclaim_up": bool(ema99_reclaim_up),
                     "ema99_reclaim_down": bool(ema99_reclaim_down),
+                    "ema8_reclaim_up_1h": bool(ema8_reclaim_up_1h),
                     "short_rebound_ema99_risk": bool(short_rebound_ema99_risk),
                     "short_rebound_ema99_release": bool(short_rebound_ema99_release),
+                    "short_rebound_1h_risk": bool(short_rebound_1h_risk),
                     "long_pullback_ema99_risk": bool(long_pullback_ema99_risk),
                     "long_pullback_ema99_release": bool(long_pullback_ema99_release),
                     "long_top_fade_risk": bool(long_top_fade_risk),
@@ -3553,6 +3921,8 @@ class PaperTradingEngine:
                     "short_stall_cluster_range_pct": float(short_stall_cluster_range_pct),
                     "short_stall_avg_body_pct": float(short_stall_avg_body_pct),
                     "short_stall_near_low_pct": float(short_stall_near_low_pct),
+                    "short_slow_grind_risk": bool(short_slow_grind_risk),
+                    "long_weak_base_risk": bool(long_weak_base_risk),
                 }
         except Exception:
             payload = cached[1] if cached is not None else neutral
@@ -3614,6 +3984,42 @@ class PaperTradingEngine:
             return f"BTC reclaim EMA99 after selloff (+{rebound_pct:.2f}% from low)"
         return f"BTC rebound near EMA99 ({gap_pct:.2f}% gap, +{rebound_pct:.2f}% from low)"
 
+    def _btc_limit_short_rebound_1h_reason(
+        self,
+        *,
+        side: str,
+        entry_type: str | None,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
+        if not self.btc_short_rebound_1h_block_enabled:
+            return None
+        if str(side or "").upper() != "SHORT":
+            return None
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return None
+        guard = btc_guard or {}
+        if not bool(guard.get("short_rebound_1h_risk")):
+            return None
+        try:
+            rebound_15m = float(guard.get("rebound_from_recent_low_pct") or 0.0)
+            rebound_1h = float(guard.get("rebound_from_recent_low_1h_pct") or 0.0)
+            green_1h = float(guard.get("green_candle_1h_pct") or 0.0)
+            ema8_reclaim_up_1h = bool(guard.get("ema8_reclaim_up_1h"))
+        except Exception:
+            rebound_15m = 0.0
+            rebound_1h = 0.0
+            green_1h = 0.0
+            ema8_reclaim_up_1h = False
+        if ema8_reclaim_up_1h:
+            return (
+                "BTC 1h rebound after dump: reclaim EMA8 "
+                f"(15m +{rebound_15m:.2f}%, 1h +{rebound_1h:.2f}%, 1h candle +{green_1h:.2f}%)"
+            )
+        return (
+            "BTC 1h rebound after dump "
+            f"(15m +{rebound_15m:.2f}%, 1h +{rebound_1h:.2f}%, 1h candle +{green_1h:.2f}%)"
+        )
+
     def _btc_long_pullback_ema99_reason(self, *, side: str, btc_guard: dict[str, Any] | None = None) -> str | None:
         if not self.btc_long_pullback_ema99_block_enabled:
             return None
@@ -3652,16 +4058,161 @@ class PaperTradingEngine:
             rebound_pct = 0.0
         return f"BTC fading from recent top (-{pullback_pct:.2f}% from high, +{rebound_pct:.2f}% off low)"
 
-    def _pass_btc_filter(self, symbol: str, side: str, effective_prob: float, btc_guard: dict[str, Any]) -> bool:
+    def _btc_limit_box_wait_reason(
+        self,
+        *,
+        side: str,
+        entry_type: str | None,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return None
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        guard = btc_guard or {}
+        try:
+            mark_price = float(guard.get("mark_price") or 0.0)
+            recent_low = float(guard.get("recent_low_15m") or 0.0)
+            recent_high = float(guard.get("recent_high_15m") or 0.0)
+            box_range_pct = float(guard.get("box_range_pct_15m") or 0.0)
+            box_position_pct = float(guard.get("box_position_pct_15m") or 0.5)
+            cluster_net_move_pct = float(guard.get("cluster_net_move_pct_15m") or 0.0)
+            cluster_trend = str(guard.get("cluster_trend_15m") or "FLAT").upper()
+        except Exception:
+            return None
+
+        if mark_price <= 0 or recent_low <= 0 or recent_high <= recent_low:
+            return None
+        if box_range_pct < 0.35:
+            return None
+
+        break_confirm_pct = 0.0008
+        edge_tolerance_pct = 0.0015
+        red_zone_max = 0.36
+        green_zone_min = 0.64
+
+        short_break_confirmed = mark_price <= (recent_low * (1.0 - break_confirm_pct))
+        long_reclaim_confirmed = mark_price >= (recent_high * (1.0 + break_confirm_pct))
+        in_red_zone = (box_position_pct <= red_zone_max) or (mark_price <= (recent_low * (1.0 + edge_tolerance_pct)))
+        in_green_zone = (box_position_pct >= green_zone_min) or (mark_price >= (recent_high * (1.0 - edge_tolerance_pct)))
+
+        if side_key == "SHORT":
+            if short_break_confirmed:
+                return None
+            if in_red_zone:
+                rebound_note = ""
+                if cluster_trend == "LONG" or cluster_net_move_pct > 0.18:
+                    rebound_note = " Cum nen 15m dang hoi len."
+                return (
+                    "Chan SHORT ML basic: BTC dang o red zone ho tro 15m, tranh short vao day box."
+                    f"{rebound_note} Cho break duoi {recent_low:.1f} roi moi short."
+                )
+            return None
+
+        if long_reclaim_confirmed:
+            return None
+        if in_green_zone:
+            reject_note = ""
+            if cluster_trend == "SHORT" or cluster_net_move_pct < -0.18:
+                reject_note = " Cum nen 15m dang bi tu choi xuong."
+            return (
+                "Chan LONG ML basic: BTC dang o green zone khang cu 15m, tranh long vao dinh box."
+                f"{reject_note} Cho reclaim tren {recent_high:.1f} roi moi long."
+            )
+        return None
+
+    def _btc_short_slow_grind_reason(
+        self,
+        *,
+        side: str,
+        entry_type: str | None,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return None
+        if str(side or "").upper() != "SHORT":
+            return None
+        guard = btc_guard or {}
+        if not bool(guard.get("short_slow_grind_risk")):
+            return None
+        try:
+            rebound_pct = float(guard.get("rebound_from_recent_low_pct") or 0.0)
+            avg_body_pct = float(guard.get("cluster_avg_body_pct_15m") or 0.0)
+            latest_upper_wick_ratio = float(guard.get("latest_upper_wick_ratio_15m") or 0.0)
+            cluster_upper_wick_ratio = float(guard.get("cluster_upper_wick_ratio_15m") or 0.0)
+            recent_low = float(guard.get("recent_low_15m") or 0.0)
+        except Exception:
+            rebound_pct = 0.0
+            avg_body_pct = 0.0
+            latest_upper_wick_ratio = 0.0
+            cluster_upper_wick_ratio = 0.0
+            recent_low = 0.0
+        wick_ratio = max(latest_upper_wick_ratio, cluster_upper_wick_ratio) * 100.0
+        return (
+            "Chan SHORT ML basic: BTC dang bo cham roi rut rau tren o cum nen 15m, "
+            f"de quet SL short som (rebound +{rebound_pct:.2f}%, body TB {avg_body_pct:.2f}%, wick {wick_ratio:.0f}%). "
+            f"Cho break lai day {recent_low:.1f} roi moi short."
+        )
+
+    def _btc_long_weak_base_reason(
+        self,
+        *,
+        side: str,
+        entry_type: str | None,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return None
+        if str(side or "").upper() != "LONG":
+            return None
+        guard = btc_guard or {}
+        if not bool(guard.get("long_weak_base_risk")):
+            return None
+        try:
+            pullback_pct = float(guard.get("pullback_from_recent_high_pct") or 0.0)
+            avg_body_pct = float(guard.get("cluster_avg_body_pct_15m") or 0.0)
+            latest_upper_wick_ratio = float(guard.get("latest_upper_wick_ratio_15m") or 0.0)
+            cluster_upper_wick_ratio = float(guard.get("cluster_upper_wick_ratio_15m") or 0.0)
+            recent_high = float(guard.get("recent_high_15m") or 0.0)
+        except Exception:
+            pullback_pct = 0.0
+            avg_body_pct = 0.0
+            latest_upper_wick_ratio = 0.0
+            cluster_upper_wick_ratio = 0.0
+            recent_high = 0.0
+        wick_ratio = max(latest_upper_wick_ratio, cluster_upper_wick_ratio) * 100.0
+        return (
+            "Chan LONG ML basic: BTC vua giam xong va dang tao weak base 15m, "
+            f"di ngang yeu dan kem rut rau tren (pullback -{pullback_pct:.2f}%, body TB {avg_body_pct:.2f}%, wick {wick_ratio:.0f}%). "
+            f"Cho reclaim lai tren {recent_high:.1f} hoac it nhat co cum nen manh hon roi moi long."
+        )
+
+    def _pass_btc_filter(
+        self,
+        symbol: str,
+        side: str,
+        effective_prob: float,
+        btc_guard: dict[str, Any],
+        entry_type: str | None = None,
+    ) -> bool:
         if not self._pass_btc_trend_hour_lock(symbol=symbol, side=side, btc_guard=btc_guard):
             return False
         if not self._pass_btc_shock_directional_guard(symbol=symbol, side=side, btc_guard=btc_guard):
+            return False
+        if self._btc_limit_short_rebound_1h_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
             return False
         if self._btc_short_rebound_ema99_reason(side=side, btc_guard=btc_guard):
             return False
         if self._btc_long_pullback_ema99_reason(side=side, btc_guard=btc_guard):
             return False
         if self._btc_long_top_fade_reason(side=side, btc_guard=btc_guard):
+            return False
+        if self._btc_long_weak_base_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
+            return False
+        if self._btc_short_slow_grind_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
+            return False
+        if self._btc_limit_box_wait_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
             return False
         if not self.btc_filter_enabled:
             return True
@@ -4267,6 +4818,114 @@ class PaperTradingEngine:
             return payload
         except Exception:
             return None
+
+    def _maybe_schedule_discord_loss_alert(
+        self,
+        *,
+        trade: dict[str, Any],
+        market_price: float,
+        pnl: float,
+        pnl_pct: float,
+    ) -> None:
+        if not self.discord_loss_alert_enabled or not self.discord_loss_webhook_url:
+            return
+        trade_id = int(trade.get("id") or 0)
+        if trade_id <= 0:
+            return
+        entry_type = str(trade.get("entry_type") or "LIMIT").strip().upper()
+        if entry_type != "PUMP_ENTRY_TOUCH":
+            return
+        if pnl_pct >= self.discord_loss_alert_rearm_pct:
+            self._discord_loss_alerted_trade_ids.discard(trade_id)
+            return
+        if pnl_pct > self.discord_loss_alert_threshold_pct:
+            return
+        if trade_id in self._discord_loss_alerted_trade_ids:
+            return
+        self._discord_loss_alerted_trade_ids.add(trade_id)
+        asyncio.create_task(
+            self._send_discord_loss_alert(
+                trade=trade,
+                market_price=float(market_price),
+                pnl=float(pnl),
+                pnl_pct=float(pnl_pct),
+            )
+        )
+
+    async def _send_discord_loss_alert(
+        self,
+        *,
+        trade: dict[str, Any],
+        market_price: float,
+        pnl: float,
+        pnl_pct: float,
+    ) -> None:
+        trade_id = int(trade.get("id") or 0)
+        symbol = str(trade.get("symbol") or "-")
+        side = str(trade.get("side") or "-").upper()
+        entry_type = str(trade.get("entry_type") or "LIMIT").upper()
+        try:
+            suggestion = await asyncio.to_thread(
+                self._build_loss_alert_entry_hint,
+                symbol,
+                market_price,
+            )
+            lines = [
+                "Pump Hunter drawdown alert",
+                f"Trade #{trade_id} | {symbol} | {side} | {entry_type}",
+                f"uPnL: {pnl:+.2f} USDT ({pnl_pct:+.2f}%) | Mark: {market_price:.6f}",
+                f"Entry hien tai: {float(trade.get('entry_price') or 0.0):.6f} | TP: {float(trade.get('take_profit') or 0.0):.6f} | SL: {float(trade.get('stop_loss') or 0.0):.6f}",
+                suggestion,
+            ]
+            payload = json.dumps({"content": "\n".join(lines)}, ensure_ascii=False).encode("utf-8")
+            request = Request(
+                self.discord_loss_webhook_url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "curl/8.7.1",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            await asyncio.to_thread(self._post_discord_request, request)
+        except Exception:
+            self._discord_loss_alerted_trade_ids.discard(trade_id)
+
+    @staticmethod
+    def _post_discord_request(request: Request) -> None:
+        with urlopen(request, timeout=10) as response:
+            response.read()
+
+    def _build_loss_alert_entry_hint(self, symbol: str, market_price: float) -> str:
+        try:
+            analysis = self.pump_scanner.analyze_symbol(
+                symbol,
+                ticker={"last": market_price, "close": market_price},
+            )
+        except Exception as exc:
+            return f"Entry goi y hien tai: khong lay duoc ({type(exc).__name__})"
+
+        signal_label = str(analysis.get("signal_label") or "WATCH").upper()
+        stage = str(analysis.get("stage") or "-").upper()
+        effective_score = float(analysis.get("effective_score") or analysis.get("pump_score") or 0.0)
+        is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
+        side = "SHORT" if is_post_sweep else "LONG"
+        entry_price = float(analysis.get("mark_price") or market_price or 0.0)
+        take_profit_raw = analysis.get("invalidation_price") if side == "SHORT" else analysis.get("est_liq_target_price")
+        stop_loss_raw = analysis.get("est_liq_target_high") if side == "SHORT" else analysis.get("invalidation_price")
+        take_profit = float(take_profit_raw or 0.0)
+        stop_loss = float(stop_loss_raw or 0.0)
+        range_pct_15m = float(analysis.get("range_pct_15m") or 0.0)
+        atr_pct_15m = float(analysis.get("atr_pct_15m") or 0.0)
+        upper_wick_pct_15m = float(analysis.get("upper_wick_pct_15m") or 0.0)
+        volatile_note = ""
+        if range_pct_15m >= 4.8 or atr_pct_15m >= 2.8 or upper_wick_pct_15m >= 2.4:
+            volatile_note = " | Canh bao: 15m bien dong gat"
+        return (
+            f"Entry phu hop luc nay: {side} | signal {signal_label}/{stage} | score {effective_score:.1f} | "
+            f"entry {entry_price:.6f} | TP {take_profit:.6f} | SL {stop_loss:.6f}{volatile_note}"
+        )
 
     @staticmethod
     def _calc_pnl(side: str, entry: float, close_price: float, quantity: float) -> float:

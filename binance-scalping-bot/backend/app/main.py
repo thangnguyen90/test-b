@@ -1,13 +1,14 @@
 import asyncio
 from datetime import datetime, timezone
+import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 
+from app.api.analytics import pump_service, router as analytics_router
 from app.api.market import router as market_router
 from app.api.ml import router as ml_router
-from app.api.analytics import router as analytics_router
 from app.api.orders import router as orders_router
 from app.api.paper_trades import paper_trade_api
 from app.api.paper_trades import router as paper_trades_router
@@ -28,10 +29,13 @@ from app.models.orders import ApiHealth
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.paper_trading_engine import PaperTradingEngine
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title=settings.app_name)
 paper_trade_repo: MySQLTradeRepository | None = None
 paper_trade_candle_repo: MySQLTradeRepository | None = None
 paper_trade_engine: PaperTradingEngine | None = None
+pump_hunter_bg_task: asyncio.Task | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,9 +54,35 @@ app.include_router(analytics_router)
 app.include_router(paper_trades_router)
 
 
+async def _pump_hunter_background_loop() -> None:
+    interval_sec = max(15.0, float(settings.pump_hunter_bg_interval_sec))
+    while True:
+        try:
+            payload = await asyncio.to_thread(
+                pump_service.scan,
+                max_symbols=int(settings.pump_hunter_bg_max_symbols),
+                min_score=float(settings.pump_hunter_bg_min_score),
+                limit=int(settings.pump_hunter_bg_limit),
+            )
+            count = int(payload.get("count") or 0)
+            if count > 0:
+                logger.info(
+                    "Pump hunter background scan finished: count=%s scanned=%s min_score=%.1f max_symbols=%s",
+                    count,
+                    int(payload.get("scanned") or 0),
+                    float(settings.pump_hunter_bg_min_score),
+                    int(settings.pump_hunter_bg_max_symbols),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Pump hunter background scan failed")
+        await asyncio.sleep(interval_sec)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
-    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine
+    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine, pump_hunter_bg_task
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
@@ -161,6 +191,16 @@ async def on_startup() -> None:
                 btc_short_stall_profit_exit_max_cluster_range_pct=settings.paper_trade_btc_short_stall_profit_exit_max_cluster_range_pct,
                 btc_short_stall_profit_exit_max_avg_body_pct=settings.paper_trade_btc_short_stall_profit_exit_max_avg_body_pct,
                 btc_short_stall_profit_exit_near_low_pct=settings.paper_trade_btc_short_stall_profit_exit_near_low_pct,
+                btc_short_slow_grind_block_enabled=settings.paper_trade_btc_short_slow_grind_block_enabled,
+                btc_short_slow_grind_min_rebound_pct=settings.paper_trade_btc_short_slow_grind_min_rebound_pct,
+                btc_short_slow_grind_max_avg_body_pct=settings.paper_trade_btc_short_slow_grind_max_avg_body_pct,
+                btc_short_slow_grind_min_upper_wick_ratio=settings.paper_trade_btc_short_slow_grind_min_upper_wick_ratio,
+                btc_short_slow_grind_max_box_position_pct=settings.paper_trade_btc_short_slow_grind_max_box_position_pct,
+                btc_long_weak_base_block_enabled=settings.paper_trade_btc_long_weak_base_block_enabled,
+                btc_long_weak_base_min_pullback_pct=settings.paper_trade_btc_long_weak_base_min_pullback_pct,
+                btc_long_weak_base_max_avg_body_pct=settings.paper_trade_btc_long_weak_base_max_avg_body_pct,
+                btc_long_weak_base_min_upper_wick_ratio=settings.paper_trade_btc_long_weak_base_min_upper_wick_ratio,
+                btc_long_weak_base_max_box_position_pct=settings.paper_trade_btc_long_weak_base_max_box_position_pct,
                 btc_short_rebound_ema99_block_enabled=settings.paper_trade_btc_short_rebound_ema99_block_enabled,
                 btc_long_pullback_ema99_block_enabled=settings.paper_trade_btc_long_pullback_ema99_block_enabled,
                 btc_long_top_fade_block_enabled=settings.paper_trade_btc_long_top_fade_block_enabled,
@@ -169,12 +209,22 @@ async def on_startup() -> None:
                 btc_long_top_fade_pullback_pct=settings.paper_trade_btc_long_top_fade_pullback_pct,
                 btc_short_rebound_ema99_green_candle_pct=settings.paper_trade_btc_short_rebound_ema99_green_candle_pct,
                 btc_short_rebound_ema99_lookback_candles=settings.paper_trade_btc_short_rebound_ema99_lookback_candles,
+                btc_short_rebound_1h_block_enabled=settings.paper_trade_btc_short_rebound_1h_block_enabled,
+                btc_short_rebound_1h_lookback_candles=settings.paper_trade_btc_short_rebound_1h_lookback_candles,
+                btc_short_rebound_1h_rebound_pct=settings.paper_trade_btc_short_rebound_1h_rebound_pct,
+                btc_short_rebound_1h_green_candle_pct=settings.paper_trade_btc_short_rebound_1h_green_candle_pct,
+                btc_short_rebound_1h_15m_confirm_pct=settings.paper_trade_btc_short_rebound_1h_15m_confirm_pct,
+                btc_short_rebound_1h_ema8_tolerance_pct=settings.paper_trade_btc_short_rebound_1h_ema8_tolerance_pct,
                 btc_profit_lock_enabled=settings.paper_trade_btc_profit_lock_enabled,
                 btc_profit_lock_min_confidence=settings.paper_trade_btc_profit_lock_min_confidence,
                 btc_follow_min_corr=settings.paper_trade_btc_follow_min_corr,
                 btc_follow_min_beta=settings.paper_trade_btc_follow_min_beta,
                 btc_follow_lookback=settings.paper_trade_btc_follow_lookback,
                 btc_follow_cache_sec=settings.paper_trade_btc_follow_cache_sec,
+                discord_loss_alert_enabled=settings.paper_trade_discord_loss_alert_enabled,
+                discord_loss_alert_threshold_pct=settings.paper_trade_discord_loss_alert_threshold_pct,
+                discord_loss_alert_rearm_pct=settings.paper_trade_discord_loss_alert_rearm_pct,
+                discord_loss_webhook_url=settings.paper_trade_discord_loss_webhook_url,
                 base_ml_max_symbols=settings.paper_trade_base_ml_max_symbols,
                 limit_max_orders_per_cycle=settings.paper_trade_limit_max_orders_per_cycle,
                 test_ml_enabled=settings.paper_trade_test_ml_enabled,
@@ -232,6 +282,8 @@ async def on_startup() -> None:
                 entry_symbol_shock_strong_min_range_vs_avg=settings.paper_trade_entry_symbol_shock_strong_min_range_vs_avg,
                 entry_short_inside_bar_breakdown_confirm_enabled=settings.paper_trade_entry_short_inside_bar_breakdown_confirm_enabled,
                 entry_long_inside_bar_breakout_confirm_enabled=settings.paper_trade_entry_long_inside_bar_breakout_confirm_enabled,
+                entry_strong_bull_long_confirm_enabled=settings.paper_trade_entry_strong_bull_long_confirm_enabled,
+                entry_strong_bull_short_confirm_enabled=settings.paper_trade_entry_strong_bull_short_confirm_enabled,
                 instant_sl_guard_short_top_test_cache_sec=settings.paper_trade_instant_sl_guard_short_top_test_cache_sec,
                 instant_sl_global_guard_enabled=settings.paper_trade_instant_sl_global_guard_enabled,
                 instant_sl_global_threshold=settings.paper_trade_instant_sl_global_threshold,
@@ -279,10 +331,30 @@ async def on_startup() -> None:
     await ws_manager.start()
     await price_stream.start()
     await auto_trainer.start()
+    if settings.pump_hunter_bg_enabled:
+        pump_hunter_bg_task = asyncio.create_task(_pump_hunter_background_loop())
+        logger.info(
+            "Pump hunter background scan started: interval=%.1fs max_symbols=%s min_score=%.1f limit=%s webhook=%s",
+            float(settings.pump_hunter_bg_interval_sec),
+            int(settings.pump_hunter_bg_max_symbols),
+            float(settings.pump_hunter_bg_min_score),
+            int(settings.pump_hunter_bg_limit),
+            "configured" if str(settings.pump_hunter_discord_webhook_url or "").strip() else "missing",
+        )
+    else:
+        logger.info("Pump hunter background scan disabled via settings")
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    global pump_hunter_bg_task
+    if pump_hunter_bg_task is not None:
+        pump_hunter_bg_task.cancel()
+        try:
+            await pump_hunter_bg_task
+        except asyncio.CancelledError:
+            pass
+        pump_hunter_bg_task = None
     if paper_trade_engine is not None:
         await paper_trade_engine.stop()
     await auto_trainer.stop()

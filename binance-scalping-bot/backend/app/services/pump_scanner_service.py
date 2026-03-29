@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
 
+from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -39,6 +45,83 @@ class PumpScannerService:
     def __init__(self, client: BinanceFuturesClient | None = None) -> None:
         self.client = client or BinanceFuturesClient()
         self.cache: dict[str, CacheItem] = {}
+
+    @staticmethod
+    def _derive_trade_plan(row: dict[str, Any]) -> tuple[str, float, float, float]:
+        signal_label = str(row.get("signal_label") or "").upper()
+        stage = str(row.get("stage") or "").upper()
+        is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
+        side = "SHORT" if is_post_sweep else "LONG"
+        entry = float(row.get("mark_price") or 0.0)
+        take_profit = float(
+            (row.get("invalidation_price") if side == "SHORT" else row.get("est_liq_target_price")) or 0.0
+        )
+        stop_loss = float(
+            (row.get("est_liq_target_high") if side == "SHORT" else row.get("invalidation_price")) or 0.0
+        )
+        return side, entry, take_profit, stop_loss
+
+    @staticmethod
+    def _post_webhook(request: Request) -> None:
+        with urlopen(request, timeout=10) as response:
+            response.read()
+
+    def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
+        if not settings.pump_hunter_discord_alert_enabled:
+            return
+        webhook_url = str(settings.pump_hunter_discord_webhook_url or "").strip()
+        if not webhook_url:
+            return
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        if score < float(settings.pump_hunter_discord_min_score):
+            return
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            return
+        signal_label = str(row.get("signal_label") or "WATCH").upper()
+        alert_key = f"pump_discord:{symbol}:{signal_label}"
+        if self._get_cached(alert_key) is not None:
+            return
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        notes = row.get("notes") or []
+        notes_text = " | ".join(str(item) for item in notes[:3]) if isinstance(notes, list) and notes else "-"
+        lines = [
+            "Pump Hunter alert",
+            f"{symbol} | {side} | {signal_label}/{str(row.get('stage') or '-').upper()} | score {score:.1f}",
+            f"Entry {entry:.6f} | TP {take_profit:.6f} | SL {stop_loss:.6f}",
+            f"Mark {float(row.get('mark_price') or 0.0):.6f} | RR {float(row.get('rr_ratio') or 0.0):.2f} | Dist {float(row.get('est_liq_distance_pct') or 0.0):+.2f}%",
+            f"Vol15m x{float(row.get('volume_ratio_15m') or 0.0):.2f} | QuoteVol {float(row.get('ticker_quote_volume') or 0.0):,.0f} | Rejection {float(row.get('rejection_score') or 0.0):.1f}",
+            f"Notes: {notes_text}",
+        ]
+        payload = json.dumps({"content": "\n".join(lines)}, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            self._post_webhook(request)
+            self._set_cache(alert_key, True, ttl_sec=max(60, int(settings.pump_hunter_discord_alert_cooldown_sec)))
+            logger.info(
+                "Pump hunter Discord alert sent: symbol=%s signal=%s stage=%s score=%.1f",
+                symbol,
+                signal_label,
+                str(row.get("stage") or "-").upper(),
+                score,
+            )
+        except Exception:
+            logger.exception(
+                "Pump hunter Discord alert failed: symbol=%s signal=%s stage=%s score=%.1f",
+                symbol,
+                signal_label,
+                str(row.get("stage") or "-").upper(),
+                score,
+            )
 
     def _get_cached(self, key: str, allow_stale: bool = False) -> Any | None:
         item = self.cache.get(key)
@@ -359,6 +442,9 @@ class PumpScannerService:
         expansion_ratio = float(latest_15m.get("expansion_ratio") or 1.0)
         close_in_range = float(latest_15m.get("close_in_range") or 0.5)
         body_pct = float(latest_15m.get("body_pct") or 0.0) * 100.0
+        range_pct_15m = float(latest_15m.get("range_pct") or 0.0) * 100.0
+        atr_pct_15m = float(latest_15m.get("atr_pct") or 0.0) * 100.0
+        upper_wick_pct_15m = float(latest_15m.get("upper_wick_pct") or 0.0) * 100.0
         stack_gap_pct = float(latest_15m.get("ema_stack_gap_pct") or 0.0) * 100.0
         above_ema_stack = bool(latest_15m.get("above_ema_stack"))
 
@@ -448,6 +534,9 @@ class PumpScannerService:
             "expansion_ratio": round(expansion_ratio, 2),
             "close_in_range": round(close_in_range, 2),
             "body_pct": round(body_pct, 2),
+            "range_pct_15m": round(range_pct_15m, 2),
+            "atr_pct_15m": round(atr_pct_15m, 2),
+            "upper_wick_pct_15m": round(upper_wick_pct_15m, 2),
             "ema_stack_gap_pct": round(stack_gap_pct, 2),
             "above_ema_stack": above_ema_stack,
             "est_liq_target_price": round(float(target_price), 6),
@@ -557,4 +646,6 @@ class PumpScannerService:
                 else "Full scan mode: quet toan bo futures USDT, co the cham hon va de gap REST rate-limit hon."
             ),
         )
+        for row in payload.get("items", []):
+            self._maybe_send_discord_alert(row)
         return self._set_cache(cache_key, payload, ttl_sec=18)
