@@ -51,18 +51,50 @@ class PumpScannerService:
         self._alert_lock = threading.Lock()
 
     @staticmethod
-    def _derive_trade_plan(row: dict[str, Any]) -> tuple[str, float, float, float]:
+    def _derive_post_sweep_short_entry(
+        *,
+        current_price: float,
+        invalidation_price: float,
+        zone_low: float,
+        zone_high: float,
+    ) -> float:
+        if current_price <= 0:
+            return 0.0
+        base_entry = max(current_price, invalidation_price if invalidation_price > 0 else current_price)
+        rebound_cap = zone_low if zone_low > base_entry else 0.0
+        if rebound_cap <= base_entry and zone_high > base_entry:
+            rebound_cap = zone_high * 0.985
+        if rebound_cap > base_entry:
+            entry = base_entry + ((rebound_cap - base_entry) * 0.55)
+        else:
+            entry = base_entry * 1.0015
+        if zone_high > 0:
+            entry = min(entry, zone_high * 0.9975)
+        return max(base_entry, entry)
+
+    @classmethod
+    def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
         signal_label = str(row.get("signal_label") or "").upper()
         stage = str(row.get("stage") or "").upper()
         is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
         side = "SHORT" if is_post_sweep else "LONG"
-        entry = float(row.get("mark_price") or 0.0)
-        take_profit = float(
-            (row.get("invalidation_price") if side == "SHORT" else row.get("est_liq_target_price")) or 0.0
-        )
-        stop_loss = float(
-            (row.get("est_liq_target_high") if side == "SHORT" else row.get("invalidation_price")) or 0.0
-        )
+        mark_price = float(row.get("mark_price") or 0.0)
+        invalidation_price = float(row.get("invalidation_price") or 0.0)
+        zone_low = float(row.get("est_liq_target_low") or 0.0)
+        zone_high = float(row.get("est_liq_target_high") or 0.0)
+        if side == "SHORT":
+            entry = cls._derive_post_sweep_short_entry(
+                current_price=mark_price,
+                invalidation_price=invalidation_price,
+                zone_low=zone_low,
+                zone_high=zone_high,
+            )
+            take_profit = invalidation_price
+            stop_loss = zone_high
+        else:
+            entry = mark_price
+            take_profit = float(row.get("est_liq_target_price") or 0.0)
+            stop_loss = invalidation_price
         return side, entry, take_profit, stop_loss
 
     @staticmethod
@@ -589,9 +621,19 @@ class PumpScannerService:
         elif bool(sweep_ctx["swept_recently"]):
             notes.append("Gia vua quet len vung thanh ly gan day")
 
+        suggested_entry_price = current_price
+        if str(sweep_ctx["signal_label"]) in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}:
+            suggested_entry_price = self._derive_post_sweep_short_entry(
+                current_price=current_price,
+                invalidation_price=invalidation_price,
+                zone_low=zone_low,
+                zone_high=zone_high,
+            )
+
         payload: dict[str, Any] = {
             "symbol": symbol,
             "mark_price": round(float(current_price), 6),
+            "suggested_entry_price": round(float(suggested_entry_price), 6),
             "pump_score": pump_score,
             "effective_score": effective_score,
             "stage": stage,

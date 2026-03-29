@@ -18,6 +18,7 @@ const ENTRY_MAX_15M_UPPER_WICK_PCT = 2.4
 type PumpHunterItem = {
   symbol: string
   mark_price: number
+  suggested_entry_price?: number
   pump_score: number
   effective_score: number
   stage: string
@@ -220,6 +221,35 @@ function deriveTp1(
     : entryPrice + (move * 0.5)
 }
 
+function derivePostSweepShortEntry(item: Pick<PumpHunterItem, 'mark_price' | 'suggested_entry_price' | 'invalidation_price' | 'est_liq_target_low' | 'est_liq_target_high'>, liveMark: number): number {
+  if (typeof item.suggested_entry_price === 'number' && item.suggested_entry_price > 0) {
+    return item.suggested_entry_price
+  }
+  const currentPrice = liveMark > 0 ? liveMark : item.mark_price
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return item.mark_price
+  const invalidationPrice = Number.isFinite(item.invalidation_price) && item.invalidation_price > 0
+    ? item.invalidation_price
+    : currentPrice
+  const zoneLow = Number.isFinite(item.est_liq_target_low) && item.est_liq_target_low > 0
+    ? item.est_liq_target_low
+    : 0
+  const zoneHigh = Number.isFinite(item.est_liq_target_high) && item.est_liq_target_high > 0
+    ? item.est_liq_target_high
+    : 0
+  const baseEntry = Math.max(currentPrice, invalidationPrice)
+  let reboundCap = zoneLow > baseEntry ? zoneLow : 0
+  if (reboundCap <= baseEntry && zoneHigh > baseEntry) {
+    reboundCap = zoneHigh * 0.985
+  }
+  let entry = reboundCap > baseEntry
+    ? baseEntry + ((reboundCap - baseEntry) * 0.55)
+    : baseEntry * 1.0015
+  if (zoneHigh > 0) {
+    entry = Math.min(entry, zoneHigh * 0.9975)
+  }
+  return Math.max(baseEntry, entry)
+}
+
 function isTooVolatile15m(item: Pick<PumpHunterItem, 'range_pct_15m' | 'atr_pct_15m' | 'upper_wick_pct_15m'>): boolean {
   return (
     item.range_pct_15m >= ENTRY_MAX_15M_RANGE_PCT
@@ -234,19 +264,32 @@ function toPumpEntrySignal(item: PumpHunterItem, orderUsdt: number, livePrice?: 
     : item.mark_price
   const isPostSweep = item.signal_label === 'ENTER' || item.signal_label === 'SWEEPED' || item.stage === 'POST_SWEEP' || item.stage === 'SWEEPED'
   const side: 'LONG' | 'SHORT' = isPostSweep ? 'SHORT' : 'LONG'
-  const entryPrice = liveMark
+  const entryPrice = isPostSweep
+    ? derivePostSweepShortEntry(item, liveMark)
+    : liveMark
   const takeProfit = isPostSweep ? item.invalidation_price : item.est_liq_target_price
   const takeProfit1 = deriveTp1(side, entryPrice, takeProfit)
   const stopLoss = isPostSweep ? item.est_liq_target_high : item.invalidation_price
-  const touched = item.signal_label === 'ENTER' ? true : isEntryTouched(entryPrice, liveMark)
+  const touched = isEntryTouched(entryPrice, liveMark)
   const passesScoreGate = item.effective_score > AUTO_ENTRY_MIN_EFFECTIVE_SCORE
   const blockedBy15mVolatility = isTooVolatile15m(item)
-  const canEnter = item.signal_label === 'ENTER' && passesScoreGate && !blockedBy15mVolatility
+  const geometryOk = side === 'SHORT'
+    ? takeProfit < entryPrice && stopLoss > entryPrice
+    : takeProfit > entryPrice && stopLoss < entryPrice
+  const canEnter = item.signal_label === 'ENTER' && passesScoreGate && !blockedBy15mVolatility && geometryOk && touched
   let blockedReason = '-'
   if (blockedBy15mVolatility) {
     blockedReason = `Loai do bien dong 15m cao (${item.range_pct_15m.toFixed(1)}% range)`
   } else if (!passesScoreGate) {
     blockedReason = `Điểm phải > ${AUTO_ENTRY_MIN_EFFECTIVE_SCORE}`
+  } else if (!geometryOk) {
+    blockedReason = side === 'SHORT'
+      ? 'Entry/TP chua hop le, tranh short ngay sau nen sap'
+      : 'Entry/TP chua hop le'
+  } else if (!touched && side === 'SHORT') {
+    blockedReason = 'Cho gia hoi cham entry roi moi short'
+  } else if (!touched) {
+    blockedReason = 'Cho gia cham entry'
   } else if (item.signal_label === 'SWEEPED') {
     blockedReason = 'Đã sweep nhưng chưa xác nhận entry'
   } else if (item.signal_label !== 'ENTER') {
