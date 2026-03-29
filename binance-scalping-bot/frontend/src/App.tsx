@@ -475,7 +475,7 @@ type MlStatus = {
 }
 
 type SortDirection = 'asc' | 'desc'
-type ModelViewFilter = 'ALL' | 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
+type ModelViewFilter = 'ALL' | 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
 type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
@@ -788,8 +788,9 @@ function formatSignalSource(source?: string | null): string {
   return normalized
 }
 
-function tradeModelSource(entryType?: string | null): 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST' {
+function tradeModelSource(entryType?: string | null): 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST' {
   const normalized = (entryType ?? '').trim().toUpperCase()
+  if (normalized === 'PUMP_ENTRY_TOUCH') return 'PUMP_ENTRY_TOUCH'
   if (normalized === 'ML_CANDLES_TEST' || normalized === 'ML_CANDLES_BG') return 'ML_CANDLES_TEST'
   if (normalized === 'ML_TEST') return 'ML_TEST'
   if (normalized === 'LIQ_EMA99') return 'LIQ_EMA99'
@@ -807,8 +808,9 @@ function tradeMlCandlesCompareLabel(entryType?: string | null): MlCandlesCompare
   return tradeMlCandlesVariant(entryType) ?? 'ML'
 }
 
-function tradeModelBadge(source: 'ML' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
+function tradeModelBadge(source: 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
   if (source === 'LIQ_EMA99') return 'warn'
+  if (source === 'PUMP_ENTRY_TOUCH') return 'warn'
   if (source === 'ML_TEST' || source === 'ML_CANDLES_TEST') return 'success'
   return 'neutral'
 }
@@ -1715,8 +1717,8 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     return sortedPaperHistory.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
   }, [sortedPaperHistory, paperModelFilter])
   const modelFilterCounts = useMemo(() => {
-    const open = { ML: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
-    const closed = { ML: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
+    const open = { ML: 0, PUMP_ENTRY_TOUCH: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
+    const closed = { ML: 0, PUMP_ENTRY_TOUCH: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
     for (const row of paperOpenTrades) {
       const model = tradeModelSource(row.entry_type)
       if (model in open) open[model] += 1
@@ -2977,8 +2979,10 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   }, [paperModelFilter])
 
   useEffect(() => {
-    const trackedOpenTrades = showMlCandlesScreen ? mlCandlesOpenTradesDb : paperOpenTrades
-    if ((!showPaperScreen && !(showMlCandlesScreen && mlCandlesScreenView === 'compare')) || trackedOpenTrades.length === 0) return
+    const trackedOpenTrades: PaperTrade[] = []
+    if (showPaperScreen) trackedOpenTrades.push(...paperOpenTrades)
+    if (showMlCandlesScreen && mlCandlesScreenView === 'compare') trackedOpenTrades.push(...mlCandlesOpenTradesDb)
+    if (trackedOpenTrades.length === 0) return
 
     let mounted = true
     const symbols = Array.from(new Set(trackedOpenTrades.map((row) => row.symbol)))
@@ -4027,6 +4031,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
               onClick={() => setPaperModelFilter('ML')}
             >
               ML ({modelFilterCounts.open.ML}/{modelFilterCounts.closed.ML})
+            </button>
+            <button
+              type="button"
+              className={`tab-btn ${paperModelFilter === 'PUMP_ENTRY_TOUCH' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('PUMP_ENTRY_TOUCH')}
+            >
+              PUMP ({modelFilterCounts.open.PUMP_ENTRY_TOUCH}/{modelFilterCounts.closed.PUMP_ENTRY_TOUCH})
             </button>
             <button
               type="button"
