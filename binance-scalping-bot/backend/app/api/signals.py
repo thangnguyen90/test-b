@@ -81,7 +81,7 @@ def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int | None = None) -
     if _SYMBOLS_CACHE["symbols"] and now < float(_SYMBOLS_CACHE["expires_at"]):
         return _SYMBOLS_CACHE["symbols"][:max_symbols]
 
-    markets = market_client.load_markets()
+    markets = market_client.load_binance_markets()
     symbols: list[str] = []
     for market in markets.values():
         if not market.get("active", True):
@@ -96,7 +96,7 @@ def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int | None = None) -
 
     symbols = sorted(set(symbols))
     try:
-        tickers_map = market_client.fetch_tickers(symbols) if symbols else {}
+        tickers_map = market_client.fetch_binance_tickers(symbols) if symbols else {}
     except Exception:
         tickers_map = {}
     if isinstance(tickers_map, dict) and tickers_map:
@@ -368,6 +368,20 @@ def _evaluate_paper_entry_gate(
                     )
                     if long_top_fade_reason:
                         return False, str(long_top_fade_reason), effective_probability, btc_following
+                    btc_long_confirm_reason = engine._btc_limit_long_confirmation_reason(
+                        side=side,
+                        entry_type=normalized_entry_type,
+                        btc_guard=btc_guard,
+                    )
+                    if btc_long_confirm_reason:
+                        return False, str(btc_long_confirm_reason), effective_probability, btc_following
+                    long_weak_base_reason = engine._btc_long_weak_base_reason(
+                        side=side,
+                        entry_type=normalized_entry_type,
+                        btc_guard=btc_guard,
+                    )
+                    if long_weak_base_reason:
+                        return False, str(long_weak_base_reason), effective_probability, btc_following
                     btc_box_wait_reason = engine._btc_limit_box_wait_reason(
                         side=side,
                         entry_type=normalized_entry_type,
@@ -527,7 +541,7 @@ def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | No
     matches: list[dict] = []
 
     try:
-        tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
+        tickers_map = market_client.fetch_binance_tickers(scan_symbols) if scan_symbols else {}
     except Exception as exc:
         if _is_418_error(exc):
             _BLOCK_UNTIL_TS = now_ts + 180
@@ -603,7 +617,7 @@ def _scan_candles_signals_impl(min_win: float, max_symbols: int, symbols: list[s
     matches: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
     try:
-        tickers_map = market_client.fetch_tickers(scan_symbols) if scan_symbols else {}
+        tickers_map = market_client.fetch_binance_tickers(scan_symbols) if scan_symbols else {}
     except Exception:
         tickers_map = {}
 

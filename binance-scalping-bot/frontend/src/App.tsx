@@ -477,7 +477,7 @@ type MlStatus = {
 type SortDirection = 'asc' | 'desc'
 type ModelViewFilter = 'ALL' | 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
 type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
-type MlCandlesCompareTarget = 'ML' | MlCandlesVariant
+type MlCandlesCompareTarget = 'ML' | 'PUMP_ENTRY_TOUCH' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
 type MlCandlesScreenView = 'signals' | 'compare'
 type AppScreenView =
@@ -805,7 +805,16 @@ function tradeMlCandlesVariant(entryType?: string | null): MlCandlesVariant | nu
 }
 
 function tradeMlCandlesCompareLabel(entryType?: string | null): MlCandlesCompareTarget {
+  const normalized = (entryType ?? '').trim().toUpperCase()
+  if (normalized === 'PUMP_ENTRY_TOUCH') return 'PUMP_ENTRY_TOUCH'
   return tradeMlCandlesVariant(entryType) ?? 'ML'
+}
+
+function formatMlCandlesCompareTargetLabel(target: MlCandlesCompareTarget): string {
+  if (target === 'PUMP_ENTRY_TOUCH') return 'Pump Hunter'
+  if (target === 'ML_CANDLES_BG') return 'ML Candles BG'
+  if (target === 'ML_CANDLES_TEST') return 'ML Candles Test'
+  return 'ML'
 }
 
 function tradeModelBadge(source: 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
@@ -816,6 +825,7 @@ function tradeModelBadge(source: 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_T
 }
 
 function tradeMlCandlesCompareBadge(source: MlCandlesCompareTarget): 'neutral' | 'warn' | 'success' {
+  if (source === 'PUMP_ENTRY_TOUCH') return 'warn'
   if (source === 'ML_CANDLES_BG') return 'warn'
   if (source === 'ML_CANDLES_TEST') return 'success'
   return 'neutral'
@@ -1749,7 +1759,9 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       target: MlCandlesCompareTarget,
       selectedDate?: string,
     ): CompareBucket => {
-      const openSource = target === 'ML' ? paperOpenTrades : mlCandlesOpenTradesDb
+      const openSource = target === 'ML' || target === 'PUMP_ENTRY_TOUCH'
+        ? paperOpenTrades
+        : mlCandlesOpenTradesDb
       const openRows = openSource.filter((row) => {
         if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
         if (!selectedDate) return true
@@ -1786,20 +1798,19 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       }
     }
     return [
-      buildBucket('ML', 'ML'),
-      buildBucket('ML Candles BG', 'ML_CANDLES_BG'),
-      buildBucket('ML Candles Test', 'ML_CANDLES_TEST'),
+      buildBucket(formatMlCandlesCompareTargetLabel('ML'), 'ML'),
+      buildBucket(formatMlCandlesCompareTargetLabel('PUMP_ENTRY_TOUCH'), 'PUMP_ENTRY_TOUCH'),
+      buildBucket(formatMlCandlesCompareTargetLabel('ML_CANDLES_BG'), 'ML_CANDLES_BG'),
+      buildBucket(formatMlCandlesCompareTargetLabel('ML_CANDLES_TEST'), 'ML_CANDLES_TEST'),
     ]
   }, [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices])
   const mlCompareDailyBuckets = useMemo(
     () => [
-      ...(['ML', 'ML_CANDLES_BG', 'ML_CANDLES_TEST'] as MlCandlesCompareTarget[]).map((target) => {
-        const label = target === 'ML'
-          ? 'ML'
-          : target === 'ML_CANDLES_BG'
-            ? 'ML Candles BG'
-            : 'ML Candles Test'
-        const openSource = target === 'ML' ? paperOpenTrades : mlCandlesOpenTradesDb
+      ...(['ML', 'PUMP_ENTRY_TOUCH', 'ML_CANDLES_BG', 'ML_CANDLES_TEST'] as MlCandlesCompareTarget[]).map((target) => {
+        const label = formatMlCandlesCompareTargetLabel(target)
+        const openSource = target === 'ML' || target === 'PUMP_ENTRY_TOUCH'
+          ? paperOpenTrades
+          : mlCandlesOpenTradesDb
         const openRows = openSource.filter((row) => {
           if (tradeMlCandlesCompareLabel(row.entry_type) !== target) return false
           return formatVnDateOnly(row.opened_at) === mlCompareDate
@@ -1845,7 +1856,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       .filter((row) => {
         const candlesVariant = tradeMlCandlesVariant(row.entry_type)
         const model = tradeModelSource(row.entry_type)
-        return model === 'ML' || candlesVariant != null
+        return model === 'ML' || model === 'PUMP_ENTRY_TOUCH' || candlesVariant != null
       })
       .sort((a, b) => {
         const bTime = Date.parse(b.opened_at ?? '') || 0
@@ -1859,6 +1870,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     const counts: Record<MlCompareModelFilter, number> = {
       ALL: recentMlCompareHistory.length,
       ML: 0,
+      PUMP_ENTRY_TOUCH: 0,
       ML_CANDLES_BG: 0,
       ML_CANDLES_TEST: 0,
     }
@@ -4785,7 +4797,11 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                           ) : '-'}
                         </td>
                         <td><span className="badge neutral">{row.entry_type ?? '-'}</span></td>
-                        <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
+                        <td>
+                          <span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>
+                            {formatMlCandlesCompareTargetLabel(modelLabel)}
+                          </span>
+                        </td>
                         <td>
                           {row.reference_win_symbol ? (
                             <div className="signal-model-stack">
@@ -4810,7 +4826,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             )}
           </div>
 
-          <h3 className="section-title">Recent ML vs ML Candles Compare</h3>
+          <h3 className="section-title">Recent Model Compare</h3>
           <div className="history-header">
             <div className="scan-actions">
               <button
@@ -4832,6 +4848,16 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                 }}
               >
                 ML ({mlCompareFilterCounts.ML})
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareModelFilter === 'PUMP_ENTRY_TOUCH' ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareModelFilter('PUMP_ENTRY_TOUCH')
+                  setMlComparePage(1)
+                }}
+              >
+                PUMP ({mlCompareFilterCounts.PUMP_ENTRY_TOUCH})
               </button>
               <button
                 type="button"
@@ -4929,7 +4955,11 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                         className={rowClassName}
                       >
                         <td>{row.id}</td>
-                        <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
+                        <td>
+                          <span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>
+                            {formatMlCandlesCompareTargetLabel(modelLabel)}
+                          </span>
+                        </td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                         <td>{renderSignalPatternSummary(row.close_candle_pattern, row.btc_trend_at_close)}</td>

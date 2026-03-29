@@ -80,6 +80,7 @@ class MySQLTradeRepository:
                         liq_ema99_1h DOUBLE NULL,
                         liq_zone_price DOUBLE NULL,
                         liq_zone_score DOUBLE NULL,
+                        entry_point_score DOUBLE NULL,
                         quantity DOUBLE NOT NULL,
                         margin_usdt DOUBLE NULL,
                         leverage INT NOT NULL,
@@ -274,6 +275,19 @@ class MySQLTradeRepository:
                     """
                     SELECT COUNT(*) AS cnt
                     FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='entry_point_score'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades ADD COLUMN entry_point_score DOUBLE NULL AFTER liq_zone_score"
+                    )
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
                     WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades' AND COLUMN_NAME='feature_snapshot_json'
                     """,
                     (self.database,),
@@ -439,6 +453,7 @@ class MySQLTradeRepository:
                         liq_ema99_1h DOUBLE NULL,
                         liq_zone_price DOUBLE NULL,
                         liq_zone_score DOUBLE NULL,
+                        entry_point_score DOUBLE NULL,
                         quantity DOUBLE NOT NULL,
                         margin_usdt DOUBLE NULL,
                         leverage INT NOT NULL,
@@ -492,11 +507,24 @@ class MySQLTradeRepository:
                     )
                 cur.execute(
                     """
+                    SELECT COUNT(*) AS cnt
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='paper_trades_ml_candles' AND COLUMN_NAME='entry_point_score'
+                    """,
+                    (self.database,),
+                )
+                row = cur.fetchone() or {}
+                if int(row.get("cnt") or 0) == 0:
+                    cur.execute(
+                        "ALTER TABLE paper_trades_ml_candles ADD COLUMN entry_point_score DOUBLE NULL AFTER liq_zone_score"
+                    )
+                cur.execute(
+                    """
                     INSERT INTO paper_trades_ml_candles (
                         source_trade_id, symbol, side, btc_following, entry_type,
                         signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss,
-                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score, entry_point_score,
                         quantity, margin_usdt, leverage, status,
                         opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
@@ -506,7 +534,7 @@ class MySQLTradeRepository:
                         id, symbol, side, btc_following, entry_type,
                         signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss,
-                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score, entry_point_score,
                         quantity, margin_usdt, leverage, status,
                         opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
@@ -527,6 +555,7 @@ class MySQLTradeRepository:
                         liq_ema99_1h=VALUES(liq_ema99_1h),
                         liq_zone_price=VALUES(liq_zone_price),
                         liq_zone_score=VALUES(liq_zone_score),
+                        entry_point_score=VALUES(entry_point_score),
                         quantity=VALUES(quantity),
                         margin_usdt=VALUES(margin_usdt),
                         leverage=VALUES(leverage),
@@ -558,7 +587,7 @@ class MySQLTradeRepository:
                         source_trade_id, symbol, side, btc_following, entry_type,
                         signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss,
-                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score, entry_point_score,
                         quantity, margin_usdt, leverage, status,
                         opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
@@ -568,7 +597,7 @@ class MySQLTradeRepository:
                         NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
                         NEW.signal_win_probability, NEW.effective_win_probability,
                         NEW.entry_price, NEW.take_profit, NEW.stop_loss,
-                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score, NEW.entry_point_score,
                         NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
                         NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason, NEW.reference_win_symbol, NEW.reference_win_at,
                         NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
@@ -587,7 +616,7 @@ class MySQLTradeRepository:
                         source_trade_id, symbol, side, btc_following, entry_type,
                         signal_win_probability, effective_win_probability,
                         entry_price, take_profit, stop_loss,
-                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score, entry_point_score,
                         quantity, margin_usdt, leverage, status,
                         opened_at, closed_at, close_price, close_reason, reference_win_symbol, reference_win_at,
                         mae_pct, mfe_pct, feature_snapshot_json, feature_captured_at,
@@ -597,7 +626,7 @@ class MySQLTradeRepository:
                         NEW.id, NEW.symbol, NEW.side, NEW.btc_following, NEW.entry_type,
                         NEW.signal_win_probability, NEW.effective_win_probability,
                         NEW.entry_price, NEW.take_profit, NEW.stop_loss,
-                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score,
+                        NEW.liq_ema99_15m, NEW.liq_ema99_1h, NEW.liq_zone_price, NEW.liq_zone_score, NEW.entry_point_score,
                         NEW.quantity, NEW.margin_usdt, NEW.leverage, NEW.status,
                         NEW.opened_at, NEW.closed_at, NEW.close_price, NEW.close_reason, NEW.reference_win_symbol, NEW.reference_win_at,
                         NEW.mae_pct, NEW.mfe_pct, NEW.feature_snapshot_json, NEW.feature_captured_at,
@@ -618,6 +647,7 @@ class MySQLTradeRepository:
                         liq_ema99_1h=VALUES(liq_ema99_1h),
                         liq_zone_price=VALUES(liq_zone_price),
                         liq_zone_score=VALUES(liq_zone_score),
+                        entry_point_score=VALUES(entry_point_score),
                         quantity=VALUES(quantity),
                         margin_usdt=VALUES(margin_usdt),
                         leverage=VALUES(leverage),
@@ -712,11 +742,11 @@ class MySQLTradeRepository:
                     """
                     INSERT INTO paper_trades (
                         symbol, side, btc_following, entry_type, signal_win_probability, effective_win_probability,
-                        entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score,
+                        entry_price, take_profit, stop_loss, liq_ema99_15m, liq_ema99_1h, liq_zone_price, liq_zone_score, entry_point_score,
                         quantity, margin_usdt, leverage, reference_win_symbol, reference_win_at, mae_pct, mfe_pct,
                         feature_snapshot_json, feature_captured_at,
                         status, opened_at, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'OPEN', %s, %s, %s)
                     """,
                     (
                         payload["symbol"],
@@ -732,6 +762,7 @@ class MySQLTradeRepository:
                         payload.get("liq_ema99_1h"),
                         payload.get("liq_zone_price"),
                         payload.get("liq_zone_score"),
+                        payload.get("entry_point_score"),
                         payload["quantity"],
                         payload.get("margin_usdt"),
                         payload["leverage"],

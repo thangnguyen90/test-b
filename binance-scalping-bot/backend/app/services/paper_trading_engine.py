@@ -559,6 +559,7 @@ class PaperTradingEngine:
         self._long_inside_bar_breakout_cache: dict[str, tuple[float, bool]] = {}
         self._strong_bull_long_confirm_cache: dict[str, tuple[float, bool]] = {}
         self._strong_bull_short_confirm_cache: dict[str, tuple[float, bool]] = {}
+        self._btc_long_confirmation_cache: dict[str, tuple[float, bool]] = {}
         self._btc_trend_cache: tuple[float, dict[str, Any]] | None = None
         self._btc_follow_cache: dict[str, tuple[float, bool, float, float]] = {}
         self._open_pause_until_ts: float = 0.0
@@ -1475,6 +1476,7 @@ class PaperTradingEngine:
                 # Close losing counter-trend positions on BTC 1H reversal (day-toggle capable).
                 if not skip_btc_guards:
                     if self._should_force_close_loss_on_btc_reversal(
+                        entry_type=entry_type,
                         side=side,
                         pnl=pnl,
                         pnl_pct=pnl_pct,
@@ -3253,7 +3255,7 @@ class PaperTradingEngine:
 
     def _resolve_market_price(self, symbol: str) -> float | None:
         try:
-            ticker = self.market_client.fetch_ticker(symbol=symbol)
+            ticker = self.market_client.fetch_binance_ticker(symbol=symbol)
             price = self._extract_price_from_ticker(ticker)
             if price is not None:
                 return float(price)
@@ -3261,7 +3263,7 @@ class PaperTradingEngine:
             pass
 
         try:
-            rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="1m", limit=2)
+            rows = self.market_client.fetch_binance_ohlcv(symbol=symbol, timeframe="1m", limit=2)
             if rows:
                 return float(rows[-1][4])
         except Exception:
@@ -3274,7 +3276,7 @@ class PaperTradingEngine:
         if not unique:
             return {}
         try:
-            payload = self.market_client.fetch_tickers(unique)
+            payload = self.market_client.fetch_binance_tickers(unique)
         except Exception:
             return {}
 
@@ -3295,7 +3297,7 @@ class PaperTradingEngine:
         if self._top_vol_cache is not None and (now - self._top_vol_cache[0]) <= 300:
             return list(self._top_vol_cache[1])
         try:
-            markets = self.market_client.load_markets()
+            markets = self.market_client.load_binance_markets()
             all_symbols: list[str] = []
             for market in markets.values():
                 if not market.get("active", True):
@@ -3308,7 +3310,7 @@ class PaperTradingEngine:
                 if sym:
                     all_symbols.append(str(sym))
             all_symbols = sorted(set(all_symbols))
-            tickers = self.market_client.fetch_tickers(all_symbols[:220])
+            tickers = self.market_client.fetch_binance_tickers(all_symbols[:220])
             ranked: list[tuple[str, float]] = []
             for symbol in all_symbols:
                 ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
@@ -3454,6 +3456,11 @@ class PaperTradingEngine:
             "short_stall_avg_body_pct": 0.0,
             "short_stall_near_low_pct": 0.0,
             "cluster_higher_close_steps_15m": 0,
+            "cluster_lower_close_steps_15m": 0,
+            "cluster_red_count_15m": 0,
+            "cluster_green_count_15m": 0,
+            "cluster_net_move_pct_15m": 0.0,
+            "box_position_pct_15m": 0.5,
             "latest_upper_wick_ratio_15m": 0.0,
             "cluster_upper_wick_ratio_15m": 0.0,
             "short_slow_grind_risk": False,
@@ -3917,6 +3924,7 @@ class PaperTradingEngine:
                     "cluster_net_move_pct_15m": float(cluster_net_move_pct_15m),
                     "cluster_avg_body_pct_15m": float(cluster_avg_body_pct_15m),
                     "cluster_higher_close_steps_15m": int(cluster_higher_close_steps_15m),
+                    "cluster_lower_close_steps_15m": int(cluster_lower_close_steps_15m),
                     "cluster_green_count_15m": int(cluster_green_count_15m),
                     "cluster_red_count_15m": int(cluster_red_count_15m),
                     "latest_upper_wick_ratio_15m": float(latest_upper_wick_ratio_15m),
@@ -4210,6 +4218,97 @@ class PaperTradingEngine:
             f"Cho reclaim lai tren {recent_high:.1f} hoac it nhat co cum nen manh hon roi moi long."
         )
 
+    def _btc_long_confirmation_ready(self, *, btc_guard: dict[str, Any] | None = None) -> bool:
+        key = self._normalize_symbol_key(self.entry_symbol_shock_pause_btc_symbol or "BTC/USDT")
+        now_ts = time.time()
+        cached = self._btc_long_confirmation_cache.get(key)
+        if cached is not None:
+            cached_ts, cached_value = cached
+            if (now_ts - cached_ts) <= self.instant_sl_guard_short_top_test_cache_sec:
+                return bool(cached_value)
+
+        confirmed = False
+        try:
+            rows = self.market_client.fetch_ohlcv(symbol=self.entry_symbol_shock_pause_btc_symbol, timeframe="15m", limit=7)
+            if rows and len(rows) >= 5:
+                prev_candle = rows[-3]
+                confirm_candle = rows[-2]
+                prev_open = float(prev_candle[1])
+                prev_high = float(prev_candle[2])
+                prev_close = float(prev_candle[4])
+                confirm_open = float(confirm_candle[1])
+                confirm_high = float(confirm_candle[2])
+                confirm_close = float(confirm_candle[4])
+                ema_fast = float((btc_guard or {}).get("ema_fast") or 0.0)
+
+                confirmed = bool(
+                    confirm_close > confirm_open
+                    and confirm_close >= prev_close
+                    and (confirm_close >= prev_open or confirm_high >= prev_high)
+                    and (ema_fast <= 0.0 or confirm_close >= ema_fast)
+                )
+                if prev_close >= prev_open:
+                    confirmed = bool(
+                        confirmed
+                        and confirm_high >= prev_high
+                        and confirm_close >= prev_close
+                    )
+        except Exception:
+            confirmed = False
+
+        self._btc_long_confirmation_cache[key] = (now_ts, bool(confirmed))
+        return bool(confirmed)
+
+    def _btc_limit_long_confirmation_reason(
+        self,
+        *,
+        side: str,
+        entry_type: str | None,
+        btc_guard: dict[str, Any] | None = None,
+    ) -> str | None:
+        if str(entry_type or "").strip().upper() != "LIMIT":
+            return None
+        if str(side or "").upper() != "LONG":
+            return None
+        guard = btc_guard or {}
+        try:
+            pullback_pct = float(guard.get("pullback_from_recent_high_pct") or 0.0)
+            box_position_pct = float(guard.get("box_position_pct_15m") or 0.5)
+            cluster_trend = str(guard.get("cluster_trend_15m") or "FLAT").upper()
+            cluster_red_count = int(guard.get("cluster_red_count_15m") or 0)
+            cluster_lower_close_steps = int(guard.get("cluster_lower_close_steps_15m") or 0)
+            cluster_net_move_pct = float(guard.get("cluster_net_move_pct_15m") or 0.0)
+            latest_upper_wick_ratio = float(guard.get("latest_upper_wick_ratio_15m") or 0.0)
+            cluster_upper_wick_ratio = float(guard.get("cluster_upper_wick_ratio_15m") or 0.0)
+            recent_high = float(guard.get("recent_high_15m") or 0.0)
+        except Exception:
+            return None
+
+        fade_risk = bool(
+            guard.get("long_weak_base_risk")
+            or guard.get("long_top_fade_risk")
+            or guard.get("long_pullback_ema99_risk")
+            or (
+                pullback_pct >= 0.25
+                and box_position_pct <= 0.68
+                and cluster_red_count >= 2
+                and cluster_lower_close_steps >= 2
+                and cluster_net_move_pct <= -0.12
+                and (cluster_trend == "SHORT" or latest_upper_wick_ratio >= 0.18 or cluster_upper_wick_ratio >= 0.18)
+            )
+        )
+        if not fade_risk:
+            return None
+        if self._btc_long_confirmation_ready(btc_guard=guard):
+            return None
+
+        wick_ratio = max(latest_upper_wick_ratio, cluster_upper_wick_ratio) * 100.0
+        return (
+            "Chan LONG ML basic: BTC dang fade sau nhip tang 15m va chua co nen xac nhan hoi lai, "
+            f"(pullback -{pullback_pct:.2f}%, wick {wick_ratio:.0f}%, red_count {cluster_red_count}). "
+            f"Cho it nhat 1 nen 15m xanh dong manh va reclaim lai nen truoc, uu tien huong ve {recent_high:.1f} roi moi long."
+        )
+
     def _pass_btc_filter(
         self,
         symbol: str,
@@ -4229,6 +4328,8 @@ class PaperTradingEngine:
         if self._btc_long_pullback_ema99_reason(side=side, btc_guard=btc_guard):
             return False
         if self._btc_long_top_fade_reason(side=side, btc_guard=btc_guard):
+            return False
+        if self._btc_limit_long_confirmation_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
             return False
         if self._btc_long_weak_base_reason(side=side, entry_type=entry_type, btc_guard=btc_guard):
             return False
@@ -4421,6 +4522,7 @@ class PaperTradingEngine:
     def _should_force_close_loss_on_btc_reversal(
         self,
         *,
+        entry_type: str,
         side: str,
         pnl: float,
         pnl_pct: float,
@@ -4428,7 +4530,11 @@ class PaperTradingEngine:
     ) -> bool:
         if not self.btc_reversal_loss_exit_enabled:
             return False
-        if pnl >= 0:
+        normalized_entry_type = str(entry_type or "").strip().upper()
+        if normalized_entry_type == "LIMIT":
+            if pnl <= 0:
+                return False
+        elif pnl >= 0:
             return False
         if abs(float(pnl_pct)) < self.btc_reversal_loss_exit_min_loss_pct:
             return False

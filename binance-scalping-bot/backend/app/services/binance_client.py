@@ -16,6 +16,7 @@ class BinanceRateLimitBanError(Exception):
 
 class BinanceFuturesClient:
     _provider_order: tuple[str, ...] = ("binanceusdm", "okx", "bybit")
+    _primary_provider: str = "binanceusdm"
     _provider_labels: dict[str, str] = {
         "binanceusdm": "Binance",
         "okx": "OKX",
@@ -145,6 +146,40 @@ class BinanceFuturesClient:
         joined = "; ".join(errors) if errors else "no providers available"
         raise RuntimeError(f"All market providers failed for {operation}: {joined}")
 
+    def _call_single_provider(
+        self,
+        *,
+        provider: str,
+        key: str,
+        ttl_sec: float,
+        operation: str,
+        fetcher,
+        fallback_ban_sec: int = 120,
+    ) -> Any:
+        cached = self._cache_get(key, ttl_sec=ttl_sec)
+        if cached is not None:
+            return cached
+
+        stale = self._cache_get(key, ttl_sec=ttl_sec, allow_stale=True)
+        if self._is_provider_banned(provider):
+            if stale is not None:
+                return stale
+            raise RuntimeError(
+                f"{self._provider_labels.get(provider, provider)} REST unavailable for {operation}: "
+                f"cooldown_until={self._get_provider_ban_until(provider)}"
+            )
+
+        exchange = self._get_exchange(provider)
+        try:
+            payload = fetcher(exchange, provider)
+            self._cache_set(key, payload)
+            return payload
+        except Exception as exc:
+            handled = self._handle_upstream_error(provider, exc, fallback_ban_sec=fallback_ban_sec)
+            if stale is not None:
+                return stale
+            raise handled
+
     def fetch_ohlcv(
         self,
         symbol: str,
@@ -197,6 +232,65 @@ class BinanceFuturesClient:
             ttl_sec=ttl,
             operation=f"fetch_tickers(count={0 if symbols is None else len(symbols)})",
             fetcher=lambda exchange, _provider: exchange.fetch_tickers(symbols=symbols) if symbols else exchange.fetch_tickers(),
+            fallback_ban_sec=90,
+        )
+
+    def load_binance_markets(self) -> dict[str, Any]:
+        key = "binance:markets:all"
+        ttl = 600.0
+        return self._call_single_provider(
+            provider=self._primary_provider,
+            key=key,
+            ttl_sec=ttl,
+            operation="load_binance_markets",
+            fetcher=lambda exchange, _provider: exchange.load_markets(),
+            fallback_ban_sec=180,
+        )
+
+    def fetch_binance_ticker(self, symbol: str) -> dict[str, Any]:
+        key = f"binance:ticker:{symbol}"
+        ttl = 2.0
+        return self._call_single_provider(
+            provider=self._primary_provider,
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_binance_ticker({symbol})",
+            fetcher=lambda exchange, _provider: exchange.fetch_ticker(symbol=symbol),
+            fallback_ban_sec=60,
+        )
+
+    def fetch_binance_tickers(self, symbols: list[str] | None = None) -> dict[str, Any]:
+        key = f"binance:tickers:{','.join(sorted(symbols))}" if symbols else "binance:tickers:all"
+        ttl = 8.0
+        return self._call_single_provider(
+            provider=self._primary_provider,
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_binance_tickers(count={0 if symbols is None else len(symbols)})",
+            fetcher=lambda exchange, _provider: exchange.fetch_tickers(symbols=symbols) if symbols else exchange.fetch_tickers(),
+            fallback_ban_sec=90,
+        )
+
+    def fetch_binance_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 1000,
+        since: int | None = None,
+    ) -> list[list[Any]]:
+        key = f"binance:ohlcv:{symbol}:{timeframe}:{limit}:{since or 'latest'}"
+        ttl = 10.0 if timeframe in {"1m", "3m", "5m"} else 30.0
+        return self._call_single_provider(
+            provider=self._primary_provider,
+            key=key,
+            ttl_sec=ttl,
+            operation=f"fetch_binance_ohlcv({symbol},{timeframe})",
+            fetcher=lambda exchange, _provider: exchange.fetch_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                since=since,
+                limit=limit,
+            ),
             fallback_ban_sec=90,
         )
 

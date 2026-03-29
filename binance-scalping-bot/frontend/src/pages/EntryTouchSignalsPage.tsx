@@ -66,6 +66,7 @@ type PaperTrade = {
   close_reason?: string | null
   pnl?: number | null
   pnl_pct?: number | null
+  entry_point_score?: number | null
 }
 
 type MarketPricesBatchResponse = {
@@ -89,6 +90,7 @@ type PaperMarketOpenRequest = {
   repo_scope?: 'main' | 'candles' | 'auto'
   entry_type?: string
   entry_price?: number
+  entry_point_score?: number
   take_profit: number
   stop_loss: number
   order_usdt?: number
@@ -590,6 +592,7 @@ export default function EntryTouchSignalsPage() {
             repo_scope: 'main',
             entry_type: 'PUMP_ENTRY_TOUCH',
             entry_price: item.entry_price,
+            entry_point_score: item.effective_score,
             take_profit: item.take_profit,
             stop_loss: item.stop_loss,
             order_usdt: orderUsdtPerTrade,
@@ -940,6 +943,7 @@ export default function EntryTouchSignalsPage() {
                   <th>ID</th>
                   <th>Symbol</th>
                   <th>Side</th>
+                  <th>Point vào</th>
                   <th>Entry</th>
                   <th>Close</th>
                   <th>PnL USDT</th>
@@ -955,6 +959,7 @@ export default function EntryTouchSignalsPage() {
                     <td>{row.id}</td>
                     <td><strong>{row.symbol}</strong></td>
                     <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
+                    <td>{typeof row.entry_point_score === 'number' ? row.entry_point_score.toFixed(1) : '-'}</td>
                     <td>{row.entry_price}</td>
                     <td>{typeof row.close_price === 'number' ? row.close_price : '-'}</td>
                     <td className={typeof row.pnl === 'number' ? (row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg') : ''}>{typeof row.pnl === 'number' ? `${row.pnl >= 0 ? '+' : ''}${row.pnl.toFixed(2)}` : '-'}</td>
@@ -994,6 +999,7 @@ export default function EntryTouchSignalsPage() {
                   <th>ID</th>
                   <th>Symbol</th>
                   <th>Side</th>
+                  <th>Point vào</th>
                   <th>Entry</th>
                   <th>Mark live</th>
                   <th>uPnL USDT</th>
@@ -1015,6 +1021,7 @@ export default function EntryTouchSignalsPage() {
                     <td>{row.id}</td>
                     <td><strong>{row.symbol}</strong></td>
                     <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
+                    <td>{typeof row.entry_point_score === 'number' ? row.entry_point_score.toFixed(1) : '-'}</td>
                     <td>{row.entry_price}</td>
                     <td>
                       <div className="entry-touch-price-stack">

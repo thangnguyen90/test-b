@@ -19,6 +19,7 @@ class PaperTrade(BaseModel):
     liq_ema99_1h: Optional[float] = None
     liq_zone_price: Optional[float] = None
     liq_zone_score: Optional[float] = None
+    entry_point_score: Optional[float] = None
     quantity: float
     leverage: int
     status: str
@@ -218,6 +219,7 @@ class PaperMarketOpenRequest(BaseModel):
     stop_loss: float = Field(gt=0)
     reference_win_symbol: Optional[str] = Field(default=None, max_length=64)
     reference_win_at: Optional[datetime] = None
+    entry_point_score: Optional[float] = Field(default=None)
     order_usdt: Optional[float] = Field(default=None, gt=0)
     margin_usdt: Optional[float] = Field(default=None, gt=0)
     quantity: Optional[float] = Field(default=None, gt=0)
