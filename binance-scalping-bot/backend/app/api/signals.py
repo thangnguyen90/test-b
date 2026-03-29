@@ -485,6 +485,14 @@ def _build_scan_match(
         blocked_reason = "Precheck unavailable"
         effective_win_probability = float(signal.win_probability)
         btc_following = None
+    try:
+        candle_pattern = pattern_analyzer.current_symbol_pattern(signal.symbol)
+    except Exception:
+        candle_pattern = "UNKNOWN"
+    try:
+        btc_trend = pattern_analyzer.btc_trend_now()
+    except Exception:
+        btc_trend = "UNKNOWN"
     payload = {
         "symbol": signal.symbol,
         "side": signal.side,
@@ -502,8 +510,8 @@ def _build_scan_match(
         "liq_zone_value": liq_zone_value,
         "reference_win_symbol": getattr(signal, "reference_win_symbol", None),
         "reference_win_at": getattr(signal, "reference_win_at", None),
-        "candle_pattern": pattern_analyzer.current_symbol_pattern(signal.symbol),
-        "btc_trend": pattern_analyzer.btc_trend_now(),
+        "candle_pattern": candle_pattern,
+        "btc_trend": btc_trend,
     }
     if compare_field:
         payload[compare_field] = compare_payload

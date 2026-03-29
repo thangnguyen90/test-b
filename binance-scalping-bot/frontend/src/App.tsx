@@ -2339,7 +2339,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
 
   async function fetchClosedPatternStats(targetLookback = closedPatternStatsTargetLookback) {
     const response = await fetch(
-      `${API_BASE}/api/v1/paper-trades/pattern-stats?repo_scope=all&lookback=${targetLookback}&include_unknown=false`,
+      `${API_BASE}/api/v1/paper-trades/pattern-stats?repo_scope=main&lookback=${targetLookback}&include_unknown=false`,
     )
     if (!response.ok) throw new Error('Closed pattern stats API unavailable')
     const payload = (await response.json()) as ClosedPatternStatsResponse
@@ -4211,6 +4211,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
           <div className="history-header">
             <h3 className="section-title">Closed Candle Pattern Stats</h3>
             <div className="scan-actions">
+              <span className="badge neutral">ML basic only</span>
               <span className="badge neutral">Lookback: {closedPatternStatsLookback}</span>
               <span className="badge neutral">Known Rows: {closedPatternStatsCount}</span>
               <span className="badge neutral">Unknown: {closedPatternUnknownCount}</span>

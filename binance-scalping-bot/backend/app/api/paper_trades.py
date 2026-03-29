@@ -113,6 +113,10 @@ class PaperTradeAPI:
     def _normalize_symbol_key(symbol: str) -> str:
         return str(symbol or "").upper().strip().replace(":USDT", "")
 
+    @staticmethod
+    def _is_ml_basic_entry_type(value: object) -> bool:
+        return str(value or "").strip().upper() == "LIMIT"
+
     def _is_major_symbol(self, symbol: str) -> bool:
         if callable(self.major_symbol_resolver):
             try:
@@ -768,6 +772,8 @@ class PaperTradeAPI:
         included_rows = 0
         unknown_rows = 0
         for row in enriched_rows:
+            if not self._is_ml_basic_entry_type(row.get("entry_type")):
+                continue
             pattern = str(row.get("close_candle_pattern") or "").upper().strip()
             btc_trend = str(row.get("btc_trend_at_close") or "").upper().strip()
             if not pattern or not btc_trend:
