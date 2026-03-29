@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import math
 import time
 import traceback
@@ -26,6 +27,8 @@ from app.services.risk_manager import (
     calc_quantity_from_order_usdt,
     normalize_tp_sl,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
@@ -148,6 +151,8 @@ class PaperTradingEngine:
         discord_loss_alert_threshold_pct: float = -8.0,
         discord_loss_alert_rearm_pct: float = -6.0,
         discord_loss_webhook_url: str = "",
+        discord_open_alert_enabled: bool = True,
+        discord_open_webhook_url: str = "",
         base_ml_max_symbols: int = 200,
         limit_max_orders_per_cycle: int = 4,
         test_ml_enabled: bool = False,
@@ -390,6 +395,8 @@ class PaperTradingEngine:
         self.discord_loss_alert_rearm_pct = float(discord_loss_alert_rearm_pct)
         self.discord_loss_webhook_url = str(discord_loss_webhook_url or "").strip()
         self._discord_loss_alerted_trade_ids: set[int] = set()
+        self.discord_open_alert_enabled = bool(discord_open_alert_enabled)
+        self.discord_open_webhook_url = str(discord_open_webhook_url or "").strip()
         self.base_ml_max_symbols = max(10, min(600, int(base_ml_max_symbols)))
         self.limit_max_orders_per_cycle = max(0, min(50, int(limit_max_orders_per_cycle)))
         self.test_ml_enabled = bool(test_ml_enabled)
@@ -1214,6 +1221,21 @@ class PaperTradingEngine:
                 )
                 self._register_open_pressure_event(side=side)
                 opened_candles_orders += 1
+                self._maybe_schedule_open_trade_discord_alert(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry_type=candles_entry_type,
+                    btc_following=btc_following,
+                    entry_price=entry,
+                    take_profit=normalized_tp,
+                    stop_loss=normalized_sl,
+                    leverage=leverage,
+                    margin_usdt=margin_usdt,
+                    raw_prob=raw_prob,
+                    effective_prob=effective_prob,
+                    opened_at=datetime.now(timezone(timedelta(hours=7))),
+                )
 
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
         if (not open_paused) and (not entry_hard_blocked) and self.liquid_enabled and self.liquid_predictor is not None:
@@ -4852,6 +4874,155 @@ class PaperTradingEngine:
             )
         )
 
+    def _maybe_schedule_open_trade_discord_alert(
+        self,
+        *,
+        trade_id: int,
+        symbol: str,
+        side: str,
+        entry_type: str,
+        btc_following: bool | None,
+        entry_price: float,
+        take_profit: float,
+        stop_loss: float,
+        leverage: int,
+        margin_usdt: float,
+        raw_prob: float,
+        effective_prob: float,
+        opened_at: datetime,
+    ) -> None:
+        if not self.discord_open_alert_enabled or not self.discord_open_webhook_url:
+            return
+        if str(entry_type or "").strip().upper() != self.candles_bg_entry_type:
+            return
+        asyncio.create_task(
+            self._send_open_trade_discord_alert(
+                trade_id=trade_id,
+                symbol=str(symbol or ""),
+                side=str(side or "").upper(),
+                btc_following=btc_following,
+                entry_type=str(entry_type or "").strip().upper(),
+                entry_price=float(entry_price),
+                take_profit=float(take_profit),
+                stop_loss=float(stop_loss),
+                leverage=int(leverage),
+                margin_usdt=float(margin_usdt),
+                raw_prob=float(raw_prob),
+                effective_prob=float(effective_prob),
+                opened_at=opened_at,
+            )
+        )
+
+    @staticmethod
+    def _format_discord_number(value: float, digits: int = 6) -> str:
+        text = f"{float(value):.{digits}f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    @staticmethod
+    def _format_discord_signed_pct(value: float) -> str:
+        return f"{float(value):+,.2f}%"
+
+    @staticmethod
+    def _format_discord_naive_vn(value: datetime) -> str:
+        dt = value
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+        return dt.strftime("%Y-%m-%d %H:%M:%S ICT")
+
+    def _build_open_trade_pattern_summary(self, *, symbol: str, btc_following: bool | None) -> str:
+        pattern = "-"
+        btc_trend = "-"
+        try:
+            resolved_pattern = self.pattern_analyzer.current_symbol_pattern(symbol)
+            if resolved_pattern:
+                pattern = str(resolved_pattern).strip().upper()
+        except Exception:
+            pass
+        try:
+            resolved_btc_trend = self.pattern_analyzer.btc_trend_now()
+            if resolved_btc_trend:
+                btc_trend = str(resolved_btc_trend).strip().upper()
+        except Exception:
+            pass
+
+        stat_suffix = ""
+        try:
+            stat = self.pattern_performance.resolve_live_pattern_stat(symbol)
+            if stat is not None:
+                win_rate_pct = float(stat.get("win_rate_pct") or 0.0)
+                total_trades = int(stat.get("total_trades") or 0)
+                if total_trades > 0:
+                    stat_suffix = f" | win {win_rate_pct:.1f}% over {total_trades} signals"
+        except Exception:
+            stat_suffix = ""
+
+        follow_label = "BTC FOLLOWING" if btc_following is True else "BTC NON_FOLLOWING" if btc_following is False else "BTC FOLLOW ?"
+        return f"{pattern} | BTC {btc_trend} | {follow_label}{stat_suffix}"
+
+    async def _send_open_trade_discord_alert(
+        self,
+        *,
+        trade_id: int,
+        symbol: str,
+        side: str,
+        btc_following: bool | None,
+        entry_type: str,
+        entry_price: float,
+        take_profit: float,
+        stop_loss: float,
+        leverage: int,
+        margin_usdt: float,
+        raw_prob: float,
+        effective_prob: float,
+        opened_at: datetime,
+    ) -> None:
+        try:
+            tp_pct = self._calc_pnl_pct(side=side, entry=entry_price, mark_price=take_profit, leverage=int(leverage))
+            sl_pct = self._calc_pnl_pct(side=side, entry=entry_price, mark_price=stop_loss, leverage=int(leverage))
+            pattern_text = await asyncio.to_thread(
+                self._build_open_trade_pattern_summary,
+                symbol=symbol,
+                btc_following=btc_following,
+            )
+            embed = {
+                "title": f"{entry_type} {side} filled: {symbol}",
+                "color": 0xED4245 if side == "SHORT" else 0x57F287,
+                "fields": [
+                    {"name": "Trade ID", "value": str(trade_id), "inline": True},
+                    {"name": "Side", "value": side, "inline": True},
+                    {"name": "BTC Follow", "value": "YES" if btc_following is True else "NO" if btc_following is False else "-", "inline": True},
+                    {"name": "Entry", "value": self._format_discord_number(entry_price, 8), "inline": True},
+                    {"name": "TP", "value": f"{self._format_discord_number(take_profit, 8)} ({self._format_discord_signed_pct(tp_pct)})", "inline": True},
+                    {"name": "SL", "value": f"{self._format_discord_number(stop_loss, 8)} ({self._format_discord_signed_pct(sl_pct)})", "inline": True},
+                    {"name": "Leverage", "value": f"{int(leverage)}x", "inline": True},
+                    {"name": "Margin", "value": f"{float(margin_usdt):.2f}", "inline": True},
+                    {"name": "Win Prob", "value": f"raw {raw_prob:.4f} | eff {effective_prob:.4f}", "inline": True},
+                    {"name": "Pattern", "value": pattern_text, "inline": False},
+                    {"name": "Opened At", "value": self._format_discord_naive_vn(opened_at), "inline": False},
+                ],
+            }
+            payload = json.dumps(
+                {
+                    "username": "ML Candles BG Bot",
+                    "allowed_mentions": {"parse": []},
+                    "embeds": [embed],
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            request = Request(
+                self.discord_open_webhook_url,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "curl/8.7.1",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            await asyncio.to_thread(self._post_discord_request, request)
+        except Exception:
+            logger.exception("Open trade Discord alert failed: trade_id=%s symbol=%s entry_type=%s", trade_id, symbol, entry_type)
+
     async def _send_discord_loss_alert(
         self,
         *,
@@ -4870,14 +5041,45 @@ class PaperTradingEngine:
                 symbol,
                 market_price,
             )
-            lines = [
-                "Pump Hunter drawdown alert",
-                f"Trade #{trade_id} | {symbol} | {side} | {entry_type}",
-                f"uPnL: {pnl:+.2f} USDT ({pnl_pct:+.2f}%) | Mark: {market_price:.6f}",
-                f"Entry hien tai: {float(trade.get('entry_price') or 0.0):.6f} | TP: {float(trade.get('take_profit') or 0.0):.6f} | SL: {float(trade.get('stop_loss') or 0.0):.6f}",
-                suggestion,
-            ]
-            payload = json.dumps({"content": "\n".join(lines)}, ensure_ascii=False).encode("utf-8")
+            leverage = int(trade.get("leverage") or 1)
+            margin_usdt = float(trade.get("margin_usdt") or 0.0)
+            if margin_usdt <= 0:
+                margin_usdt = calc_margin_usdt(
+                    entry_price=float(trade.get("entry_price") or 0.0),
+                    quantity=float(trade.get("quantity") or 0.0),
+                    leverage=leverage,
+                )
+            tp_value = float(trade.get("take_profit") or 0.0)
+            sl_value = float(trade.get("stop_loss") or 0.0)
+            embed = {
+                "title": f"{entry_type} {side} drawdown: {symbol}",
+                "color": 0xED4245,
+                "fields": [
+                    {"name": "Trade ID", "value": str(trade_id), "inline": True},
+                    {"name": "Side", "value": side, "inline": True},
+                    {
+                        "name": "BTC Follow",
+                        "value": "YES" if trade.get("btc_following") is True else "NO" if trade.get("btc_following") is False else "-",
+                        "inline": True,
+                    },
+                    {"name": "Entry", "value": self._format_discord_number(float(trade.get("entry_price") or 0.0), 8), "inline": True},
+                    {"name": "TP", "value": f"{self._format_discord_number(tp_value, 8)} ({self._format_discord_signed_pct(self._calc_pnl_pct(side=side, entry=float(trade.get('entry_price') or 0.0), mark_price=tp_value, leverage=leverage))})", "inline": True},
+                    {"name": "SL", "value": f"{self._format_discord_number(sl_value, 8)} ({self._format_discord_signed_pct(self._calc_pnl_pct(side=side, entry=float(trade.get('entry_price') or 0.0), mark_price=sl_value, leverage=leverage))})", "inline": True},
+                    {"name": "Leverage", "value": f"{leverage}x", "inline": True},
+                    {"name": "Margin", "value": f"{margin_usdt:.2f}", "inline": True},
+                    {"name": "uPnL", "value": f"{pnl:+.2f} USDT | {pnl_pct:+.2f}%", "inline": True},
+                    {"name": "Pattern", "value": suggestion, "inline": False},
+                    {"name": "Opened At", "value": self._format_discord_naive_vn(self._parse_dt(trade.get('opened_at')) or datetime.now(timezone(timedelta(hours=7)))), "inline": False},
+                ],
+            }
+            payload = json.dumps(
+                {
+                    "username": "Paper Trade Bot",
+                    "allowed_mentions": {"parse": []},
+                    "embeds": [embed],
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
             request = Request(
                 self.discord_loss_webhook_url,
                 data=payload,

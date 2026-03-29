@@ -66,6 +66,15 @@ class PumpScannerService:
         with urlopen(request, timeout=10) as response:
             response.read()
 
+    @staticmethod
+    def _format_number(value: float, digits: int = 6) -> str:
+        text = f"{float(value):.{digits}f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    @staticmethod
+    def _format_signed_pct(value: float) -> str:
+        return f"{float(value):+,.2f}%"
+
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_discord_alert_enabled:
             return
@@ -85,15 +94,50 @@ class PumpScannerService:
         side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
         notes = row.get("notes") or []
         notes_text = " | ".join(str(item) for item in notes[:3]) if isinstance(notes, list) and notes else "-"
-        lines = [
-            "Pump Hunter alert",
-            f"{symbol} | {side} | {signal_label}/{str(row.get('stage') or '-').upper()} | score {score:.1f}",
-            f"Entry {entry:.6f} | TP {take_profit:.6f} | SL {stop_loss:.6f}",
-            f"Mark {float(row.get('mark_price') or 0.0):.6f} | RR {float(row.get('rr_ratio') or 0.0):.2f} | Dist {float(row.get('est_liq_distance_pct') or 0.0):+.2f}%",
-            f"Vol15m x{float(row.get('volume_ratio_15m') or 0.0):.2f} | QuoteVol {float(row.get('ticker_quote_volume') or 0.0):,.0f} | Rejection {float(row.get('rejection_score') or 0.0):.1f}",
-            f"Notes: {notes_text}",
-        ]
-        payload = json.dumps({"content": "\n".join(lines)}, ensure_ascii=False).encode("utf-8")
+        leverage = 5
+        margin_usdt = 20.0
+        tp_pct = 0.0
+        sl_pct = 0.0
+        if entry > 0:
+            if side == "LONG":
+                tp_pct = ((take_profit - entry) / entry) * leverage * 100.0
+                sl_pct = ((stop_loss - entry) / entry) * leverage * 100.0
+            else:
+                tp_pct = ((entry - take_profit) / entry) * leverage * 100.0
+                sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
+        embed = {
+            "title": f"PUMP_HUNTER {side} setup: {symbol}",
+            "color": 0xED4245 if side == "SHORT" else 0x57F287,
+            "fields": [
+                {"name": "Signal", "value": f"{signal_label}/{str(row.get('stage') or '-').upper()}", "inline": True},
+                {"name": "Side", "value": side, "inline": True},
+                {"name": "Score", "value": f"{score:.1f}", "inline": True},
+                {"name": "Entry", "value": self._format_number(entry, 8), "inline": True},
+                {"name": "TP", "value": f"{self._format_number(take_profit, 8)} ({self._format_signed_pct(tp_pct)})", "inline": True},
+                {"name": "SL", "value": f"{self._format_number(stop_loss, 8)} ({self._format_signed_pct(sl_pct)})", "inline": True},
+                {"name": "Leverage", "value": f"{leverage}x", "inline": True},
+                {"name": "Margin", "value": f"{margin_usdt:.2f}", "inline": True},
+                {"name": "Market", "value": f"mark {self._format_number(float(row.get('mark_price') or 0.0), 8)} | RR {float(row.get('rr_ratio') or 0.0):.2f}", "inline": True},
+                {
+                    "name": "Pattern",
+                    "value": (
+                        f"Vol15m x{float(row.get('volume_ratio_15m') or 0.0):.2f}"
+                        f" | Rejection {float(row.get('rejection_score') or 0.0):.1f}"
+                        f" | Dist {self._format_signed_pct(float(row.get('est_liq_distance_pct') or 0.0))}"
+                    ),
+                    "inline": False,
+                },
+                {"name": "Notes", "value": notes_text, "inline": False},
+            ],
+        }
+        payload = json.dumps(
+            {
+                "username": "Pump Hunter Bot",
+                "allowed_mentions": {"parse": []},
+                "embeds": [embed],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
         request = Request(
             webhook_url,
             data=payload,

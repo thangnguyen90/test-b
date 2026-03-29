@@ -225,6 +225,8 @@ async def on_startup() -> None:
                 discord_loss_alert_threshold_pct=settings.paper_trade_discord_loss_alert_threshold_pct,
                 discord_loss_alert_rearm_pct=settings.paper_trade_discord_loss_alert_rearm_pct,
                 discord_loss_webhook_url=settings.paper_trade_discord_loss_webhook_url,
+                discord_open_alert_enabled=settings.paper_trade_discord_open_alert_enabled,
+                discord_open_webhook_url=settings.paper_trade_discord_open_webhook_url,
                 base_ml_max_symbols=settings.paper_trade_base_ml_max_symbols,
                 limit_max_orders_per_cycle=settings.paper_trade_limit_max_orders_per_cycle,
                 test_ml_enabled=settings.paper_trade_test_ml_enabled,
