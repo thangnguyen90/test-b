@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from fastapi import HTTPException
 from fastapi import APIRouter, Query
 
+from app.models.pump_hunter import PumpHunterBinanceOrderRequest
 from app.services.analytics_service import AnalyticsService
+from app.services.binance_futures_trade_service import BinanceApiError
 from app.services.pump_scanner_service import PumpScannerService
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
@@ -67,3 +70,27 @@ def get_pump_hunter_scan(
 def get_pump_hunter_detail(symbol: str = Query(..., min_length=3)) -> dict:
     payload = pump_service.analyze_symbol(symbol=symbol, include_candles=True)
     return payload
+
+
+@router.post("/pump-hunter/binance-order")
+def submit_pump_hunter_binance_order(req: PumpHunterBinanceOrderRequest) -> dict:
+    row = pump_service.analyze_symbol(symbol=req.symbol, include_candles=False)
+    try:
+        return pump_service.submit_binance_order(
+            row,
+            test_mode=bool(req.test_mode),
+            order_usdt=req.order_usdt,
+            leverage=req.leverage,
+            margin_type=req.margin_type,
+        )
+    except BinanceApiError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": str(exc),
+                "binance_status_code": exc.status_code,
+                "binance_payload": exc.payload,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

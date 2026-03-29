@@ -13,6 +13,7 @@ import pandas as pd
 
 from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+from app.services.binance_futures_trade_service import BinanceFuturesTradeService
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class CacheItem:
 class PumpScannerService:
     def __init__(self, client: BinanceFuturesClient | None = None) -> None:
         self.client = client or BinanceFuturesClient()
+        self.trade_client = BinanceFuturesTradeService()
         self.cache: dict[str, CacheItem] = {}
         self._alert_lock = threading.Lock()
 
@@ -111,6 +113,19 @@ class PumpScannerService:
     def _format_signed_pct(value: float) -> str:
         return f"{float(value):+,.2f}%"
 
+    @staticmethod
+    def _calc_trade_pct_metrics(*, side: str, entry: float, take_profit: float, stop_loss: float, leverage: int) -> tuple[float, float]:
+        tp_pct = 0.0
+        sl_pct = 0.0
+        if entry > 0:
+            if str(side).upper() == "LONG":
+                tp_pct = ((take_profit - entry) / entry) * leverage * 100.0
+                sl_pct = ((stop_loss - entry) / entry) * leverage * 100.0
+            else:
+                tp_pct = ((entry - take_profit) / entry) * leverage * 100.0
+                sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
+        return float(tp_pct), float(sl_pct)
+
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_discord_alert_enabled:
             return
@@ -123,26 +138,25 @@ class PumpScannerService:
         symbol = str(row.get("symbol") or "").strip()
         if not symbol:
             return
-        signal_label = str(row.get("signal_label") or "WATCH").upper()
-        alert_key = f"pump_discord:{symbol}:{signal_label}"
-        cooldown_sec = max(60, int(settings.pump_hunter_discord_alert_cooldown_sec))
-        if not self._claim_alert_slot(alert_key, ttl_sec=cooldown_sec):
-            return
         side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
         notes = row.get("notes") or []
         notes_text = " | ".join(str(item) for item in notes[:3]) if isinstance(notes, list) and notes else "-"
         leverage = 5
         margin_usdt = 20.0
-        tp_pct = 0.0
-        sl_pct = 0.0
-        if entry > 0:
-            if side == "LONG":
-                tp_pct = ((take_profit - entry) / entry) * leverage * 100.0
-                sl_pct = ((stop_loss - entry) / entry) * leverage * 100.0
-            else:
-                tp_pct = ((entry - take_profit) / entry) * leverage * 100.0
-                sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
+        tp_pct, sl_pct = self._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            leverage=leverage,
+        )
         is_high_tp = tp_pct >= PUMP_HUNTER_HIGHLIGHT_TP_PCT
+        signal_label = str(row.get("signal_label") or "WATCH").upper()
+        alert_scope = "high_tp" if is_high_tp else signal_label.lower()
+        alert_key = f"pump_discord:{symbol}:{side}:{alert_scope}"
+        cooldown_sec = max(60, int(settings.pump_hunter_discord_alert_cooldown_sec))
+        if not self._claim_alert_slot(alert_key, ttl_sec=cooldown_sec):
+            return
         title_prefix = "HIGH_TP_10P " if is_high_tp else ""
         embed_color = 0xF1C40F if is_high_tp else (0xED4245 if side == "SHORT" else 0x57F287)
         fields: list[dict[str, Any]] = []
@@ -224,6 +238,157 @@ class PumpScannerService:
                 str(row.get("stage") or "-").upper(),
                 score,
             )
+
+    def _maybe_execute_live_order(self, row: dict[str, Any]) -> None:
+        if not settings.pump_hunter_live_trade_enabled:
+            return
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        if score < float(settings.pump_hunter_live_min_score):
+            return
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        if entry <= 0 or take_profit <= 0:
+            return
+        leverage = max(1, int(settings.pump_hunter_live_leverage))
+        tp_pct, _ = self._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            leverage=leverage,
+        )
+        if tp_pct < float(settings.pump_hunter_live_min_tp_pct):
+            return
+        if tp_pct < PUMP_HUNTER_HIGHLIGHT_TP_PCT:
+            return
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            return
+        order_key = f"pump_live_order:{symbol}:{side}:high_tp"
+        cooldown_sec = max(60, int(settings.pump_hunter_live_signal_cooldown_sec))
+        if not self._claim_alert_slot(order_key, ttl_sec=cooldown_sec):
+            return
+        try:
+            result = self.trade_client.place_limit_order(
+                symbol=symbol,
+                side=side,
+                entry_price=entry,
+                order_usdt=float(settings.pump_hunter_live_order_usdt),
+                leverage=leverage,
+                margin_type=str(settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+                test_mode=bool(settings.pump_hunter_live_order_test_mode),
+            )
+            result = self._attach_signal_to_order_result(result, row)
+            self._set_cache(order_key, result, ttl_sec=cooldown_sec)
+            self._send_order_success_discord_alert(result)
+            logger.info(
+                "Pump hunter Binance order submitted: symbol=%s side=%s test_mode=%s qty=%s entry=%s",
+                symbol,
+                side,
+                bool(settings.pump_hunter_live_order_test_mode),
+                result.get("quantity"),
+                result.get("entry_price"),
+            )
+        except Exception:
+            self._release_alert_slot(order_key)
+            logger.exception("Pump hunter Binance order failed: symbol=%s side=%s", symbol, side)
+
+    def submit_binance_order(
+        self,
+        row: dict[str, Any],
+        *,
+        test_mode: bool = True,
+        order_usdt: float | None = None,
+        leverage: int | None = None,
+        margin_type: str | None = None,
+    ) -> dict[str, Any]:
+        result = self.trade_client.place_limit_order(
+            symbol=str(row.get("symbol") or "").strip(),
+            side=self._derive_trade_plan(row)[0],
+            entry_price=self._derive_trade_plan(row)[1],
+            order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
+            leverage=int(leverage or settings.pump_hunter_live_leverage),
+            margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+            test_mode=bool(test_mode),
+        )
+        result = self._attach_signal_to_order_result(result, row)
+        self._send_order_success_discord_alert(result)
+        return result
+
+    def _attach_signal_to_order_result(self, result: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        symbol = str(row.get("symbol") or "").strip()
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        result["signal"] = {
+            "symbol": symbol,
+            "side": side,
+            "score": score,
+            "signal_label": str(row.get("signal_label") or "").upper(),
+            "stage": str(row.get("stage") or "").upper(),
+            "entry": entry,
+            "tp": take_profit,
+            "sl": stop_loss,
+        }
+        return result
+
+    def _send_order_success_discord_alert(self, result: dict[str, Any]) -> None:
+        webhook_url = str(settings.pump_hunter_order_discord_webhook_url or "").strip()
+        if not webhook_url:
+            return
+        signal = result.get("signal") if isinstance(result.get("signal"), dict) else {}
+        symbol = str(result.get("symbol") or signal.get("symbol") or "").strip()
+        side = str(signal.get("side") or result.get("side") or "").upper()
+        test_mode = bool(result.get("test_mode"))
+        mode_label = "TEST ORDER" if test_mode else "LIVE ORDER"
+        score = float(signal.get("score") or 0.0)
+        tp_pct, sl_pct = self._calc_trade_pct_metrics(
+            side=side,
+            entry=float(signal.get("entry") or 0.0),
+            take_profit=float(signal.get("tp") or 0.0),
+            stop_loss=float(signal.get("sl") or 0.0),
+            leverage=int(result.get("leverage") or settings.pump_hunter_live_leverage or 1),
+        )
+        color = 0x3498DB if test_mode else 0x2ECC71
+        payload = json.dumps(
+            {
+                "username": "Pump Hunter Executor",
+                "allowed_mentions": {"parse": []},
+                "embeds": [
+                    {
+                        "title": f"{mode_label} placed: {symbol}",
+                        "color": color,
+                        "fields": [
+                            {"name": "Mode", "value": mode_label, "inline": True},
+                            {"name": "Side", "value": side or "-", "inline": True},
+                            {"name": "Score", "value": f"{score:.1f}", "inline": True},
+                            {"name": "Signal", "value": f"{str(signal.get('signal_label') or '-').upper()}/{str(signal.get('stage') or '-').upper()}", "inline": True},
+                            {"name": "Entry", "value": self._format_number(float(signal.get("entry") or result.get("entry_price") or 0.0), 8), "inline": True},
+                            {"name": "Quantity", "value": str(result.get("quantity") or "-"), "inline": True},
+                            {"name": "TP", "value": f"{self._format_number(float(signal.get('tp') or 0.0), 8)} ({self._format_signed_pct(tp_pct)})", "inline": True},
+                            {"name": "SL", "value": f"{self._format_number(float(signal.get('sl') or 0.0), 8)} ({self._format_signed_pct(sl_pct)})", "inline": True},
+                            {"name": "Margin", "value": f"{float(result.get('margin_usdt') or 0.0):.2f}", "inline": True},
+                            {"name": "Notional", "value": f"{float(result.get('notional_usdt') or 0.0):.2f}", "inline": True},
+                            {"name": "Leverage", "value": f"{int(result.get('leverage') or 0)}x", "inline": True},
+                            {"name": "Margin Type", "value": str(result.get("margin_type") or "-"), "inline": True},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            self._post_webhook(request)
+        except Exception:
+            logger.exception("Pump hunter order Discord alert failed: symbol=%s mode=%s", symbol, mode_label)
 
     def _get_cached(self, key: str, allow_stale: bool = False) -> Any | None:
         item = self.cache.get(key)
@@ -779,4 +944,5 @@ class PumpScannerService:
         if send_alerts:
             for row in payload.get("items", []):
                 self._maybe_send_discord_alert(row)
+                self._maybe_execute_live_order(row)
         return self._set_cache(cache_key, payload, ttl_sec=18)

@@ -578,3 +578,15 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/install_backend_cron.sh uninstall
 ```
+
+
+curl -i -sS -X POST http://127.0.0.1:8000/api/v1/analytics/pump-hunter/binance-order \
+-H 'Content-Type: application/json' \
+-d '{"symbol":"AIO/USDT:USDT","test_mode":false}'
+
+
+curl -i -sS -X POST http://127.0.0.1:8000/api/v1/analytics/pump-hunter/binance-order \
+-H 'Content-Type: application/json' \
+-d '{"symbol":"AIO/USDT:USDT","test_mode":true}'
+
+

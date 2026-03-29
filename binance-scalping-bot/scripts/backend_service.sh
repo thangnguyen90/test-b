@@ -11,6 +11,8 @@ LOG_MAX_MB="${BACKEND_LOG_MAX_MB:-128}"
 LOG_KEEP_FILES="${BACKEND_LOG_KEEP_FILES:-5}"
 HOST="127.0.0.1"
 PORT="8000"
+HEALTH_PATH="/health"
+START_WAIT_SEC="${BACKEND_START_WAIT_SEC:-15}"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -65,14 +67,28 @@ start_backend() {
     echo $! > "$PID_FILE"
   )
 
-  sleep 1
-  if is_running; then
-    echo "Backend started (pid=$(cat "$PID_FILE"))"
-  else
-    echo "Backend failed to start. Last log lines:"
-    tail -n 40 "$LOG_FILE" || true
-    exit 1
-  fi
+  local started_pid
+  local waited=0
+  started_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  while [[ "$waited" -lt "$START_WAIT_SEC" ]]; do
+    if ! is_running; then
+      echo "Backend failed to stay alive during startup."
+      echo "Last log lines:"
+      tail -n 60 "$LOG_FILE" || true
+      exit 1
+    fi
+    if curl -fsS --max-time 1 "http://$HOST:$PORT$HEALTH_PATH" >/dev/null 2>&1; then
+      echo "Backend started (pid=$started_pid)"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  echo "Backend process exists but /health is not ready after ${START_WAIT_SEC}s."
+  echo "Last log lines:"
+  tail -n 60 "$LOG_FILE" || true
+  exit 1
 }
 
 stop_backend() {

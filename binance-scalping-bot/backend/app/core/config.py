@@ -333,6 +333,19 @@ class Settings(BaseModel):
     pump_hunter_bg_max_symbols: int = int(os.getenv("PUMP_HUNTER_BG_MAX_SYMBOLS", "0"))
     pump_hunter_bg_min_score: float = float(os.getenv("PUMP_HUNTER_BG_MIN_SCORE", "58"))
     pump_hunter_bg_limit: int = int(os.getenv("PUMP_HUNTER_BG_LIMIT", "18"))
+    binance_api_key: str = os.getenv("BINANCE_API_KEY", "")
+    binance_api_secret: str = os.getenv("BINANCE_API_SECRET", "")
+    binance_api_base_url: str = os.getenv("BINANCE_API_BASE_URL", "https://fapi.binance.com")
+    binance_recv_window_ms: int = int(os.getenv("BINANCE_RECV_WINDOW_MS", "5000"))
+    pump_hunter_live_trade_enabled: bool = os.getenv("PUMP_HUNTER_LIVE_TRADE_ENABLED", "false").lower() == "true"
+    pump_hunter_live_order_test_mode: bool = os.getenv("PUMP_HUNTER_LIVE_ORDER_TEST_MODE", "true").lower() == "true"
+    pump_hunter_live_order_usdt: float = float(os.getenv("PUMP_HUNTER_LIVE_ORDER_USDT", "2"))
+    pump_hunter_live_leverage: int = int(os.getenv("PUMP_HUNTER_LIVE_LEVERAGE", "5"))
+    pump_hunter_live_margin_type: str = os.getenv("PUMP_HUNTER_LIVE_MARGIN_TYPE", "ISOLATED").upper()
+    pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
+    pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "10"))
+    pump_hunter_live_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_LIVE_SIGNAL_COOLDOWN_SEC", "900"))
+    pump_hunter_order_discord_webhook_url: str = os.getenv("PUMP_HUNTER_ORDER_DISCORD_WEBHOOK_URL", "")
     paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "300"))
     paper_trade_limit_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_LIMIT_MAX_ORDERS_PER_CYCLE", "4"))
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
