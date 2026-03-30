@@ -333,6 +333,8 @@ class Settings(BaseModel):
     pump_hunter_bg_max_symbols: int = int(os.getenv("PUMP_HUNTER_BG_MAX_SYMBOLS", "0"))
     pump_hunter_bg_min_score: float = float(os.getenv("PUMP_HUNTER_BG_MIN_SCORE", "58"))
     pump_hunter_bg_limit: int = int(os.getenv("PUMP_HUNTER_BG_LIMIT", "18"))
+    pump_hunter_tp_scale_down_threshold_pct: float = float(os.getenv("PUMP_HUNTER_TP_SCALE_DOWN_THRESHOLD_PCT", "50"))
+    pump_hunter_tp_scale_down_factor: float = float(os.getenv("PUMP_HUNTER_TP_SCALE_DOWN_FACTOR", "0.5"))
     binance_api_key: str = os.getenv("BINANCE_API_KEY", "")
     binance_api_secret: str = os.getenv("BINANCE_API_SECRET", "")
     binance_api_base_url: str = os.getenv("BINANCE_API_BASE_URL", "https://fapi.binance.com")

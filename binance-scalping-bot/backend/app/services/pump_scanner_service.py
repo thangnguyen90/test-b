@@ -77,6 +77,31 @@ class PumpScannerService:
         return max(base_entry, entry)
 
     @classmethod
+    def _compress_take_profit_if_needed(cls, *, side: str, entry: float, take_profit: float) -> float:
+        if entry <= 0 or take_profit <= 0:
+            return take_profit
+        leverage = max(1, int(settings.pump_hunter_live_leverage or 5))
+        tp_pct, _ = cls._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=entry,
+            leverage=leverage,
+        )
+        threshold_pct = float(settings.pump_hunter_tp_scale_down_threshold_pct)
+        if tp_pct <= threshold_pct:
+            return take_profit
+        factor = _clamp(float(settings.pump_hunter_tp_scale_down_factor), 0.05, 1.0)
+        if factor >= 0.999:
+            return take_profit
+        distance = abs(entry - take_profit)
+        if distance <= 0:
+            return take_profit
+        if str(side).upper() == "SHORT":
+            return entry - (distance * factor)
+        return entry + (distance * factor)
+
+    @classmethod
     def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
         signal_label = str(row.get("signal_label") or "").upper()
         stage = str(row.get("stage") or "").upper()
@@ -99,6 +124,11 @@ class PumpScannerService:
             entry = mark_price
             take_profit = float(row.get("est_liq_target_price") or 0.0)
             stop_loss = invalidation_price
+        take_profit = cls._compress_take_profit_if_needed(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+        )
         return side, entry, take_profit, stop_loss
 
     @staticmethod
