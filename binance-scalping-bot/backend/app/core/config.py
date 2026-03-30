@@ -345,6 +345,18 @@ class Settings(BaseModel):
     pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
     pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "10"))
     pump_hunter_live_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_LIVE_SIGNAL_COOLDOWN_SEC", "900"))
+    pump_hunter_live_place_tp_on_fill_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_PLACE_TP_ON_FILL_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_cancel_unfilled_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_CANCEL_UNFILLED_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_cancel_after_minutes: int = int(os.getenv("PUMP_HUNTER_LIVE_CANCEL_AFTER_MINUTES", "120"))
+    pump_hunter_live_cancel_check_interval_sec: int = int(
+        os.getenv("PUMP_HUNTER_LIVE_CANCEL_CHECK_INTERVAL_SEC", "60")
+    )
     pump_hunter_order_discord_webhook_url: str = os.getenv("PUMP_HUNTER_ORDER_DISCORD_WEBHOOK_URL", "")
     paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "300"))
     paper_trade_limit_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_LIMIT_MAX_ORDERS_PER_CYCLE", "4"))

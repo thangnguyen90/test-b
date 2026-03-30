@@ -51,6 +51,8 @@ class PumpScannerService:
         self.trade_client = BinanceFuturesTradeService()
         self.cache: dict[str, CacheItem] = {}
         self._alert_lock = threading.Lock()
+        self._live_order_lock = threading.Lock()
+        self._live_order_registry: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _derive_post_sweep_short_entry(
@@ -279,6 +281,7 @@ class PumpScannerService:
             )
             result = self._attach_signal_to_order_result(result, row)
             self._set_cache(order_key, result, ttl_sec=cooldown_sec)
+            self._track_live_order(result)
             self._send_order_success_discord_alert(result)
             logger.info(
                 "Pump hunter Binance order submitted: symbol=%s side=%s test_mode=%s qty=%s entry=%s",
@@ -311,6 +314,7 @@ class PumpScannerService:
             test_mode=bool(test_mode),
         )
         result = self._attach_signal_to_order_result(result, row)
+        self._track_live_order(result)
         self._send_order_success_discord_alert(result)
         return result
 
@@ -389,6 +393,271 @@ class PumpScannerService:
             self._post_webhook(request)
         except Exception:
             logger.exception("Pump hunter order Discord alert failed: symbol=%s mode=%s", symbol, mode_label)
+
+    def _send_order_cancel_discord_alert(self, tracked: dict[str, Any], cancel_resp: dict[str, Any]) -> None:
+        webhook_url = str(settings.pump_hunter_order_discord_webhook_url or "").strip()
+        if not webhook_url:
+            return
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        score = float(tracked.get("score") or 0.0)
+        placed_at_text = str(tracked.get("placed_at_text") or "-")
+        age_minutes = max(0.0, float(tracked.get("age_minutes") or 0.0))
+        payload = json.dumps(
+            {
+                "username": "Pump Hunter Executor",
+                "allowed_mentions": {"parse": []},
+                "embeds": [
+                    {
+                        "title": f"LIVE ORDER canceled: {symbol}",
+                        "color": 0xE67E22,
+                        "fields": [
+                            {"name": "Mode", "value": "AUTO CANCEL", "inline": True},
+                            {"name": "Side", "value": side or "-", "inline": True},
+                            {"name": "Score", "value": f"{score:.1f}", "inline": True},
+                            {
+                                "name": "Signal",
+                                "value": f"{str(tracked.get('signal_label') or '-').upper()}/{str(tracked.get('stage') or '-').upper()}",
+                                "inline": True,
+                            },
+                            {"name": "Entry", "value": self._format_number(float(tracked.get("entry_price") or 0.0), 8), "inline": True},
+                            {"name": "Quantity", "value": str(tracked.get("quantity") or "-"), "inline": True},
+                            {"name": "Age", "value": f"{age_minutes:.1f} min", "inline": True},
+                            {"name": "Order ID", "value": str(tracked.get("order_id") or "-"), "inline": True},
+                            {"name": "Client ID", "value": str(tracked.get("client_order_id") or "-"), "inline": True},
+                            {"name": "Placed At", "value": placed_at_text, "inline": False},
+                            {"name": "Cancel Status", "value": str(cancel_resp.get("status") or "CANCELED"), "inline": True},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            self._post_webhook(request)
+        except Exception:
+            logger.exception("Pump hunter order cancel Discord alert failed: symbol=%s", symbol)
+
+    def _send_tp_success_discord_alert(self, tracked: dict[str, Any], tp_result: dict[str, Any]) -> None:
+        webhook_url = str(settings.pump_hunter_order_discord_webhook_url or "").strip()
+        if not webhook_url:
+            return
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        score = float(tracked.get("score") or 0.0)
+        payload = json.dumps(
+            {
+                "username": "Pump Hunter Executor",
+                "allowed_mentions": {"parse": []},
+                "embeds": [
+                    {
+                        "title": f"TP ORDER placed: {symbol}",
+                        "color": 0x1ABC9C,
+                        "fields": [
+                            {"name": "Mode", "value": "TP ORDER", "inline": True},
+                            {"name": "Side", "value": side or "-", "inline": True},
+                            {"name": "Score", "value": f"{score:.1f}", "inline": True},
+                            {
+                                "name": "Signal",
+                                "value": f"{str(tracked.get('signal_label') or '-').upper()}/{str(tracked.get('stage') or '-').upper()}",
+                                "inline": True,
+                            },
+                            {"name": "Entry", "value": self._format_number(float(tracked.get("entry_price") or 0.0), 8), "inline": True},
+                            {"name": "TP", "value": self._format_number(float(tracked.get("tp_price") or 0.0), 8), "inline": True},
+                            {"name": "Filled Qty", "value": str(tracked.get("filled_qty") or tracked.get("quantity") or "-"), "inline": True},
+                            {"name": "TP Order Qty", "value": str(tp_result.get("quantity") or "-"), "inline": True},
+                            {"name": "TP Order Side", "value": str(tp_result.get("side") or "-"), "inline": True},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            self._post_webhook(request)
+        except Exception:
+            logger.exception("Pump hunter TP Discord alert failed: symbol=%s", symbol)
+
+    @staticmethod
+    def _build_live_order_registry_key(symbol: str, order_id: Any, client_order_id: str | None) -> str | None:
+        symbol_text = str(symbol or "").strip()
+        if not symbol_text:
+            return None
+        if order_id is not None and str(order_id).strip():
+            return f"{symbol_text}:{int(order_id)}"
+        if client_order_id and str(client_order_id).strip():
+            return f"{symbol_text}:{str(client_order_id).strip()}"
+        return None
+
+    def _track_live_order(self, result: dict[str, Any]) -> None:
+        if bool(result.get("test_mode")):
+            return
+        exchange = result.get("exchange_response") if isinstance(result.get("exchange_response"), dict) else {}
+        symbol = str(result.get("symbol") or "").strip()
+        order_id = exchange.get("orderId")
+        client_order_id = exchange.get("clientOrderId") or exchange.get("origClientOrderId")
+        key = self._build_live_order_registry_key(symbol, order_id, client_order_id)
+        if not key:
+            return
+        signal = result.get("signal") if isinstance(result.get("signal"), dict) else {}
+        placed_at_ts = time.time()
+        transact_time = exchange.get("transactTime")
+        try:
+            if transact_time is not None:
+                placed_at_ts = float(transact_time) / 1000.0
+        except Exception:
+            placed_at_ts = time.time()
+        tracked = {
+            "symbol": symbol,
+            "order_id": int(order_id) if order_id is not None and str(order_id).strip() else None,
+            "client_order_id": str(client_order_id).strip() if client_order_id else None,
+            "side": str(signal.get("side") or result.get("side") or "").upper(),
+            "score": float(signal.get("score") or 0.0),
+            "signal_label": str(signal.get("signal_label") or "").upper(),
+            "stage": str(signal.get("stage") or "").upper(),
+            "entry_price": float(signal.get("entry") or result.get("entry_price") or 0.0),
+            "tp_price": float(signal.get("tp") or 0.0),
+            "sl_price": float(signal.get("sl") or 0.0),
+            "quantity": str(result.get("quantity") or "-"),
+            "placed_at_ts": placed_at_ts,
+            "placed_at_text": time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(placed_at_ts)),
+            "tp_order_placed": False,
+        }
+        with self._live_order_lock:
+            self._live_order_registry[key] = tracked
+
+    def _maybe_place_tp_for_tracked_order(self, tracked: dict[str, Any], status_resp: dict[str, Any]) -> bool:
+        if not settings.pump_hunter_live_place_tp_on_fill_enabled:
+            return False
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return False
+        if bool(tracked.get("tp_order_placed")):
+            return True
+        symbol = str(tracked.get("symbol") or "").strip()
+        tp_price = float(tracked.get("tp_price") or 0.0)
+        if not symbol or tp_price <= 0:
+            return False
+        executed_qty = float(status_resp.get("executedQty") or 0.0)
+        if executed_qty <= 0:
+            return False
+        tp_result = self.trade_client.place_reduce_only_tp_order(
+            symbol=symbol,
+            position_side=str(tracked.get("side") or "").upper(),
+            tp_price=tp_price,
+            quantity=executed_qty,
+            test_mode=False,
+        )
+        tracked["tp_order_placed"] = True
+        tracked["filled_qty"] = tp_result.get("quantity") or str(executed_qty)
+        self._send_tp_success_discord_alert(tracked, tp_result)
+        logger.info(
+            "Pump hunter TP order submitted: symbol=%s side=%s qty=%s tp=%s",
+            symbol,
+            tracked.get("side"),
+            tp_result.get("quantity"),
+            tp_result.get("tp_price"),
+        )
+        return True
+
+    def cancel_stale_live_orders(self) -> dict[str, Any]:
+        if (
+            not settings.pump_hunter_live_cancel_unfilled_enabled
+            and not settings.pump_hunter_live_place_tp_on_fill_enabled
+        ):
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0}
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0}
+        timeout_sec = max(300, int(settings.pump_hunter_live_cancel_after_minutes) * 60)
+        now_ts = time.time()
+        with self._live_order_lock:
+            snapshot = list(self._live_order_registry.items())
+        due_items = [
+            (key, tracked, (now_ts - float(tracked.get("placed_at_ts") or now_ts)) >= timeout_sec)
+            for key, tracked in snapshot
+        ]
+        canceled = 0
+        closed = 0
+        tp_placed = 0
+        errors = 0
+        for key, tracked, is_due in due_items:
+            symbol = str(tracked.get("symbol") or "").strip()
+            order_id = tracked.get("order_id")
+            client_order_id = tracked.get("client_order_id")
+            try:
+                status_resp = self.trade_client.get_order_status(
+                    symbol=symbol,
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                )
+                status = str(status_resp.get("status") or "").upper()
+                if status == "FILLED":
+                    if self._maybe_place_tp_for_tracked_order(tracked, status_resp):
+                        tp_placed += 1
+                    with self._live_order_lock:
+                        self._live_order_registry.pop(key, None)
+                    closed += 1
+                    continue
+                if status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                    with self._live_order_lock:
+                        self._live_order_registry.pop(key, None)
+                    closed += 1
+                    continue
+                if is_due and status in {"NEW", "PARTIALLY_FILLED"}:
+                    tracked["age_minutes"] = (now_ts - float(tracked.get("placed_at_ts") or now_ts)) / 60.0
+                    cancel_resp = self.trade_client.cancel_order(
+                        symbol=symbol,
+                        order_id=order_id,
+                        client_order_id=client_order_id,
+                    )
+                    if status == "PARTIALLY_FILLED":
+                        self._maybe_place_tp_for_tracked_order(tracked, status_resp)
+                    with self._live_order_lock:
+                        self._live_order_registry.pop(key, None)
+                    canceled += 1
+                    self._send_order_cancel_discord_alert(tracked, cancel_resp)
+                    logger.info(
+                        "Pump hunter stale Binance order canceled: symbol=%s side=%s order_id=%s age_min=%.1f",
+                        symbol,
+                        tracked.get("side"),
+                        order_id,
+                        tracked.get("age_minutes"),
+                    )
+            except Exception:
+                errors += 1
+                logger.exception(
+                    "Pump hunter stale Binance order check/cancel failed: symbol=%s order_id=%s client_order_id=%s",
+                    symbol,
+                    order_id,
+                    client_order_id,
+                )
+        return {
+            "tracked": len(snapshot),
+            "due": sum(1 for _, _, is_due in due_items if is_due),
+            "canceled": canceled,
+            "closed": closed,
+            "tp_placed": tp_placed,
+            "errors": errors,
+        }
 
     def _get_cached(self, key: str, allow_stale: bool = False) -> Any | None:
         item = self.cache.get(key)

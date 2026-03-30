@@ -36,6 +36,7 @@ paper_trade_repo: MySQLTradeRepository | None = None
 paper_trade_candle_repo: MySQLTradeRepository | None = None
 paper_trade_engine: PaperTradingEngine | None = None
 pump_hunter_bg_task: asyncio.Task | None = None
+pump_hunter_cancel_task: asyncio.Task | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,9 +82,30 @@ async def _pump_hunter_background_loop() -> None:
         await asyncio.sleep(interval_sec)
 
 
+async def _pump_hunter_cancel_loop() -> None:
+    interval_sec = max(30.0, float(settings.pump_hunter_live_cancel_check_interval_sec))
+    while True:
+        try:
+            payload = await asyncio.to_thread(pump_service.cancel_stale_live_orders)
+            if int(payload.get("canceled") or 0) > 0:
+                logger.info(
+                    "Pump hunter stale order cleanup: tracked=%s due=%s canceled=%s closed=%s errors=%s",
+                    int(payload.get("tracked") or 0),
+                    int(payload.get("due") or 0),
+                    int(payload.get("canceled") or 0),
+                    int(payload.get("closed") or 0),
+                    int(payload.get("errors") or 0),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Pump hunter stale order cleanup failed")
+        await asyncio.sleep(interval_sec)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
-    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine, pump_hunter_bg_task
+    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine, pump_hunter_bg_task, pump_hunter_cancel_task
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
@@ -346,11 +368,27 @@ async def on_startup() -> None:
         )
     else:
         logger.info("Pump hunter background scan disabled via settings")
+    if (
+        settings.pump_hunter_live_trade_enabled
+        and not settings.pump_hunter_live_order_test_mode
+        and (
+            settings.pump_hunter_live_cancel_unfilled_enabled
+            or settings.pump_hunter_live_place_tp_on_fill_enabled
+        )
+    ):
+        pump_hunter_cancel_task = asyncio.create_task(_pump_hunter_cancel_loop())
+        logger.info(
+            "Pump hunter live order monitor started: check_interval=%ss cancel_after=%smin tp_on_fill=%s cancel_unfilled=%s",
+            int(settings.pump_hunter_live_cancel_check_interval_sec),
+            int(settings.pump_hunter_live_cancel_after_minutes),
+            settings.pump_hunter_live_place_tp_on_fill_enabled,
+            settings.pump_hunter_live_cancel_unfilled_enabled,
+        )
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global pump_hunter_bg_task
+    global pump_hunter_bg_task, pump_hunter_cancel_task
     if pump_hunter_bg_task is not None:
         pump_hunter_bg_task.cancel()
         try:
@@ -358,6 +396,13 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         pump_hunter_bg_task = None
+    if pump_hunter_cancel_task is not None:
+        pump_hunter_cancel_task.cancel()
+        try:
+            await pump_hunter_cancel_task
+        except asyncio.CancelledError:
+            pass
+        pump_hunter_cancel_task = None
     if paper_trade_engine is not None:
         await paper_trade_engine.stop()
     await auto_trainer.stop()

@@ -93,6 +93,7 @@ class BinanceFuturesTradeService:
     def _signed_request(self, method: str, path: str, params: dict[str, Any]) -> Any:
         if not self.api_key or not self.api_secret:
             raise ValueError("BINANCE_API_KEY or BINANCE_API_SECRET is missing")
+        method_upper = method.upper()
         payload = {k: v for k, v in params.items() if v is not None}
         payload["recvWindow"] = self.recv_window_ms
         payload["timestamp"] = int(time.time() * 1000)
@@ -102,9 +103,15 @@ class BinanceFuturesTradeService:
             query.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        body = f"{query}&signature={signature}".encode("utf-8")
+        signed_query = f"{query}&signature={signature}"
+        url = f"{self.base_url}{path}"
+        body: bytes | None = None
+        if method_upper in {"GET", "DELETE"}:
+            url = f"{url}?{signed_query}"
+        else:
+            body = signed_query.encode("utf-8")
         request = Request(
-            f"{self.base_url}{path}",
+            url,
             data=body,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -112,7 +119,7 @@ class BinanceFuturesTradeService:
                 "Accept": "application/json",
                 "User-Agent": "binance-scalping-bot/1.0",
             },
-            method=method.upper(),
+            method=method_upper,
         )
         try:
             with urlopen(request, timeout=15) as response:
@@ -139,6 +146,23 @@ class BinanceFuturesTradeService:
                 message = f"{message}: {raw}"
             raise BinanceApiError(status_code=exc.code, message=message, payload=payload) from exc
         return json.loads(raw) if raw else {}
+
+    def _order_lookup_params(
+        self,
+        *,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol)
+        params: dict[str, Any] = {"symbol": normalized}
+        if order_id is not None and str(order_id).strip():
+            params["orderId"] = int(order_id)
+        elif client_order_id:
+            params["origClientOrderId"] = str(client_order_id).strip()
+        else:
+            raise ValueError("Missing order_id or client_order_id")
+        return params
 
     def get_symbol_rules(self, symbol: str) -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol)
@@ -215,6 +239,34 @@ class BinanceFuturesTradeService:
         self._mark_account_config(normalized, leverage, margin_type, payload)
         return payload
 
+    def get_order_status(
+        self,
+        *,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        params = self._order_lookup_params(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        return self._signed_request("GET", "/fapi/v1/order", params)
+
+    def cancel_order(
+        self,
+        *,
+        symbol: str,
+        order_id: int | str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        params = self._order_lookup_params(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        return self._signed_request("DELETE", "/fapi/v1/order", params)
+
     def build_limit_order(self, *, symbol: str, side: str, entry_price: float, order_usdt: float) -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol)
         rules = self.get_symbol_rules(normalized)
@@ -245,6 +297,42 @@ class BinanceFuturesTradeService:
             "price": self._format_decimal(entry_price, tick_size or (10 ** -6)),
             "newOrderRespType": "ACK",
             "newClientOrderId": f"codexph_{int(time.time() * 1000)}",
+        }
+
+    def build_reduce_only_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        price: float,
+        quantity: float | str,
+        client_order_prefix: str = "codexph_tp",
+    ) -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol)
+        rules = self.get_symbol_rules(normalized)
+        filters = {str(item.get("filterType")): item for item in rules.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER", {})
+        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE") or {}
+        tick_size = float(price_filter.get("tickSize") or 0.0)
+        step_size = float(lot_filter.get("stepSize") or 0.0)
+        min_qty = float(lot_filter.get("minQty") or 0.0)
+        qty_value = float(quantity)
+        qty_value = self._floor_to_step(qty_value, step_size or (10 ** -6))
+        if min_qty > 0 and qty_value < min_qty:
+            raise ValueError("Quantity below exchange minimum for TP order")
+        side_text = str(side or "").upper()
+        if side_text not in {"BUY", "SELL"}:
+            raise ValueError(f"Unsupported Binance order side {side}")
+        return {
+            "symbol": normalized,
+            "side": side_text,
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "reduceOnly": "true",
+            "quantity": self._format_decimal(qty_value, step_size or (10 ** -6)),
+            "price": self._format_decimal(price, tick_size or (10 ** -6)),
+            "newOrderRespType": "ACK",
+            "newClientOrderId": f"{client_order_prefix}_{int(time.time() * 1000)}",
         }
 
     def place_limit_order(
@@ -293,5 +381,36 @@ class BinanceFuturesTradeService:
             "leverage": leverage_value,
             "margin_type": str(margin_type or "ISOLATED").upper(),
             "config": config_resp,
+            "exchange_response": order_resp,
+        }
+
+    def place_reduce_only_tp_order(
+        self,
+        *,
+        symbol: str,
+        position_side: str,
+        tp_price: float,
+        quantity: float | str,
+        test_mode: bool,
+    ) -> dict[str, Any]:
+        position_side_text = str(position_side or "").upper()
+        if position_side_text not in {"LONG", "SHORT"}:
+            raise ValueError(f"Unsupported position side {position_side}")
+        exit_side = "SELL" if position_side_text == "LONG" else "BUY"
+        order_params = self.build_reduce_only_limit_order(
+            symbol=symbol,
+            side=exit_side,
+            price=tp_price,
+            quantity=quantity,
+        )
+        endpoint = "/fapi/v1/order/test" if test_mode else "/fapi/v1/order"
+        order_resp = self._signed_request("POST", endpoint, order_params)
+        return {
+            "test_mode": bool(test_mode),
+            "symbol": order_params["symbol"],
+            "side": order_params["side"],
+            "tp_price": order_params["price"],
+            "quantity": order_params["quantity"],
+            "reduce_only": True,
             "exchange_response": order_resp,
         }
