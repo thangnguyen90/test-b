@@ -349,6 +349,24 @@ class Settings(BaseModel):
         "PUMP_HUNTER_LIVE_PLACE_TP_ON_FILL_ENABLED",
         "true",
     ).lower() == "true"
+    pump_hunter_live_move_tp_to_entry_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_MOVE_TP_TO_ENTRY_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_move_tp_to_entry_pnl_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_MOVE_TP_TO_ENTRY_PNL_PCT", "-20")
+    )
+    pump_hunter_live_place_sl_on_fill_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_PLACE_SL_ON_FILL_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_move_sl_to_entry_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_MOVE_SL_TO_ENTRY_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_move_sl_to_entry_pnl_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_MOVE_SL_TO_ENTRY_PNL_PCT", "5")
+    )
     pump_hunter_live_cancel_unfilled_enabled: bool = os.getenv(
         "PUMP_HUNTER_LIVE_CANCEL_UNFILLED_ENABLED",
         "true",

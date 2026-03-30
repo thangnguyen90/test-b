@@ -90,6 +90,11 @@ class BinanceFuturesTradeService:
             self._exchange_info_ts = time.time()
             return self._exchange_info_cache
 
+    def get_mark_price(self, symbol: str) -> float:
+        normalized = self._normalize_symbol(symbol)
+        payload = self._public_request("/fapi/v1/premiumIndex", {"symbol": normalized})
+        return float(payload.get("markPrice") or 0.0)
+
     def _signed_request(self, method: str, path: str, params: dict[str, Any]) -> Any:
         if not self.api_key or not self.api_secret:
             raise ValueError("BINANCE_API_KEY or BINANCE_API_SECRET is missing")
@@ -335,6 +340,47 @@ class BinanceFuturesTradeService:
             "newClientOrderId": f"{client_order_prefix}_{int(time.time() * 1000)}",
         }
 
+    def build_reduce_only_stop_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        stop_price: float,
+        quantity: float | str,
+        client_order_prefix: str = "codexph_sl",
+    ) -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol)
+        rules = self.get_symbol_rules(normalized)
+        filters = {str(item.get("filterType")): item for item in rules.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER", {})
+        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE") or {}
+        tick_size = float(price_filter.get("tickSize") or 0.0)
+        step_size = float(lot_filter.get("stepSize") or 0.0)
+        min_qty = float(lot_filter.get("minQty") or 0.0)
+        side_text = str(side or "").upper()
+        if side_text not in {"BUY", "SELL"}:
+            raise ValueError(f"Unsupported Binance order side {side}")
+        if stop_price <= 0:
+            raise ValueError("Invalid stop_price")
+        qty_value = float(quantity)
+        qty_value = self._floor_to_step(qty_value, step_size or (10 ** -6))
+        if min_qty > 0 and qty_value < min_qty:
+            raise ValueError("Quantity below exchange minimum for SL order")
+        return {
+            "symbol": normalized,
+            "side": side_text,
+            "type": "STOP",
+            "timeInForce": "GTC",
+            "quantity": self._format_decimal(qty_value, step_size or (10 ** -6)),
+            "price": self._format_decimal(stop_price, tick_size or (10 ** -6)),
+            "stopPrice": self._format_decimal(stop_price, tick_size or (10 ** -6)),
+            "reduceOnly": "true",
+            "workingType": "MARK_PRICE",
+            "priceProtect": "true",
+            "newOrderRespType": "ACK",
+            "newClientOrderId": f"{client_order_prefix}_{int(time.time() * 1000)}",
+        }
+
     def place_limit_order(
         self,
         *,
@@ -411,6 +457,37 @@ class BinanceFuturesTradeService:
             "side": order_params["side"],
             "tp_price": order_params["price"],
             "quantity": order_params["quantity"],
+            "reduce_only": True,
+            "exchange_response": order_resp,
+        }
+
+    def place_close_position_sl_order(
+        self,
+        *,
+        symbol: str,
+        position_side: str,
+        stop_price: float,
+        quantity: float | str,
+        test_mode: bool,
+    ) -> dict[str, Any]:
+        position_side_text = str(position_side or "").upper()
+        if position_side_text not in {"LONG", "SHORT"}:
+            raise ValueError(f"Unsupported position side {position_side}")
+        exit_side = "SELL" if position_side_text == "LONG" else "BUY"
+        order_params = self.build_reduce_only_stop_order(
+            symbol=symbol,
+            side=exit_side,
+            stop_price=stop_price,
+            quantity=quantity,
+        )
+        endpoint = "/fapi/v1/order/test" if test_mode else "/fapi/v1/order"
+        order_resp = self._signed_request("POST", endpoint, order_params)
+        return {
+            "test_mode": bool(test_mode),
+            "symbol": order_params["symbol"],
+            "side": order_params["side"],
+            "quantity": order_params["quantity"],
+            "stop_price": order_params["stopPrice"],
             "reduce_only": True,
             "exchange_response": order_resp,
         }

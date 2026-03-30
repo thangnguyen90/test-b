@@ -87,13 +87,20 @@ async def _pump_hunter_cancel_loop() -> None:
     while True:
         try:
             payload = await asyncio.to_thread(pump_service.cancel_stale_live_orders)
-            if int(payload.get("canceled") or 0) > 0:
+            if any(
+                int(payload.get(key) or 0) > 0
+                for key in ("canceled", "closed", "tp_placed", "tp_moved", "sl_placed", "sl_moved", "errors")
+            ):
                 logger.info(
-                    "Pump hunter stale order cleanup: tracked=%s due=%s canceled=%s closed=%s errors=%s",
+                    "Pump hunter live order monitor: tracked=%s due=%s canceled=%s closed=%s tp=%s tp_moved=%s sl=%s sl_moved=%s errors=%s",
                     int(payload.get("tracked") or 0),
                     int(payload.get("due") or 0),
                     int(payload.get("canceled") or 0),
                     int(payload.get("closed") or 0),
+                    int(payload.get("tp_placed") or 0),
+                    int(payload.get("tp_moved") or 0),
+                    int(payload.get("sl_placed") or 0),
+                    int(payload.get("sl_moved") or 0),
                     int(payload.get("errors") or 0),
                 )
         except asyncio.CancelledError:
@@ -374,14 +381,20 @@ async def on_startup() -> None:
         and (
             settings.pump_hunter_live_cancel_unfilled_enabled
             or settings.pump_hunter_live_place_tp_on_fill_enabled
+            or settings.pump_hunter_live_move_tp_to_entry_enabled
+            or settings.pump_hunter_live_place_sl_on_fill_enabled
+            or settings.pump_hunter_live_move_sl_to_entry_enabled
         )
     ):
         pump_hunter_cancel_task = asyncio.create_task(_pump_hunter_cancel_loop())
         logger.info(
-            "Pump hunter live order monitor started: check_interval=%ss cancel_after=%smin tp_on_fill=%s cancel_unfilled=%s",
+            "Pump hunter live order monitor started: check_interval=%ss cancel_after=%smin tp_on_fill=%s tp_to_entry=%s sl_on_fill=%s sl_to_entry=%s cancel_unfilled=%s",
             int(settings.pump_hunter_live_cancel_check_interval_sec),
             int(settings.pump_hunter_live_cancel_after_minutes),
             settings.pump_hunter_live_place_tp_on_fill_enabled,
+            settings.pump_hunter_live_move_tp_to_entry_enabled,
+            settings.pump_hunter_live_place_sl_on_fill_enabled,
+            settings.pump_hunter_live_move_sl_to_entry_enabled,
             settings.pump_hunter_live_cancel_unfilled_enabled,
         )
 

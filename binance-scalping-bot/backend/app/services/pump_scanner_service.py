@@ -448,36 +448,51 @@ class PumpScannerService:
         except Exception:
             logger.exception("Pump hunter order cancel Discord alert failed: symbol=%s", symbol)
 
-    def _send_tp_success_discord_alert(self, tracked: dict[str, Any], tp_result: dict[str, Any]) -> None:
+    def _send_tp_success_discord_alert(
+        self,
+        tracked: dict[str, Any],
+        tp_result: dict[str, Any],
+        *,
+        moved_to_entry: bool = False,
+        trigger_pnl_pct: float | None = None,
+        mark_price: float | None = None,
+    ) -> None:
         webhook_url = str(settings.pump_hunter_order_discord_webhook_url or "").strip()
         if not webhook_url:
             return
         symbol = str(tracked.get("symbol") or "").strip()
         side = str(tracked.get("side") or "").upper()
         score = float(tracked.get("score") or 0.0)
+        mode_label = "TP MOVED TO ENTRY" if moved_to_entry else "TP ORDER"
+        color = 0x16A085 if moved_to_entry else 0x1ABC9C
+        fields: list[dict[str, Any]] = [
+            {"name": "Mode", "value": mode_label, "inline": True},
+            {"name": "Side", "value": side or "-", "inline": True},
+            {"name": "Score", "value": f"{score:.1f}", "inline": True},
+            {
+                "name": "Signal",
+                "value": f"{str(tracked.get('signal_label') or '-').upper()}/{str(tracked.get('stage') or '-').upper()}",
+                "inline": True,
+            },
+            {"name": "Entry", "value": self._format_number(float(tracked.get("entry_price") or 0.0), 8), "inline": True},
+            {"name": "TP", "value": self._format_number(float(tp_result.get("tp_price") or tracked.get("tp_price") or 0.0), 8), "inline": True},
+            {"name": "Filled Qty", "value": str(tracked.get("filled_qty") or tracked.get("quantity") or "-"), "inline": True},
+            {"name": "TP Order Qty", "value": str(tp_result.get("quantity") or "-"), "inline": True},
+            {"name": "TP Order Side", "value": str(tp_result.get("side") or "-"), "inline": True},
+        ]
+        if trigger_pnl_pct is not None:
+            fields.append({"name": "PnL Trigger", "value": self._format_signed_pct(trigger_pnl_pct), "inline": True})
+        if mark_price is not None and mark_price > 0:
+            fields.append({"name": "Mark", "value": self._format_number(mark_price, 8), "inline": True})
         payload = json.dumps(
             {
                 "username": "Pump Hunter Executor",
                 "allowed_mentions": {"parse": []},
                 "embeds": [
                     {
-                        "title": f"TP ORDER placed: {symbol}",
-                        "color": 0x1ABC9C,
-                        "fields": [
-                            {"name": "Mode", "value": "TP ORDER", "inline": True},
-                            {"name": "Side", "value": side or "-", "inline": True},
-                            {"name": "Score", "value": f"{score:.1f}", "inline": True},
-                            {
-                                "name": "Signal",
-                                "value": f"{str(tracked.get('signal_label') or '-').upper()}/{str(tracked.get('stage') or '-').upper()}",
-                                "inline": True,
-                            },
-                            {"name": "Entry", "value": self._format_number(float(tracked.get("entry_price") or 0.0), 8), "inline": True},
-                            {"name": "TP", "value": self._format_number(float(tracked.get("tp_price") or 0.0), 8), "inline": True},
-                            {"name": "Filled Qty", "value": str(tracked.get("filled_qty") or tracked.get("quantity") or "-"), "inline": True},
-                            {"name": "TP Order Qty", "value": str(tp_result.get("quantity") or "-"), "inline": True},
-                            {"name": "TP Order Side", "value": str(tp_result.get("side") or "-"), "inline": True},
-                        ],
+                        "title": f"{mode_label}: {symbol}",
+                        "color": color,
+                        "fields": fields,
                     }
                 ],
             },
@@ -496,7 +511,69 @@ class PumpScannerService:
         try:
             self._post_webhook(request)
         except Exception:
-            logger.exception("Pump hunter TP Discord alert failed: symbol=%s", symbol)
+            logger.exception("Pump hunter TP Discord alert failed: symbol=%s moved=%s", symbol, moved_to_entry)
+
+    def _send_sl_success_discord_alert(
+        self,
+        tracked: dict[str, Any],
+        sl_result: dict[str, Any],
+        *,
+        moved_to_entry: bool = False,
+        trigger_pnl_pct: float | None = None,
+        mark_price: float | None = None,
+    ) -> None:
+        webhook_url = str(settings.pump_hunter_order_discord_webhook_url or "").strip()
+        if not webhook_url:
+            return
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        score = float(tracked.get("score") or 0.0)
+        mode_label = "SL MOVED TO ENTRY" if moved_to_entry else "SL ORDER"
+        color = 0xF39C12 if moved_to_entry else 0xE74C3C
+        fields: list[dict[str, Any]] = [
+            {"name": "Mode", "value": mode_label, "inline": True},
+            {"name": "Side", "value": side or "-", "inline": True},
+            {"name": "Score", "value": f"{score:.1f}", "inline": True},
+            {
+                "name": "Signal",
+                "value": f"{str(tracked.get('signal_label') or '-').upper()}/{str(tracked.get('stage') or '-').upper()}",
+                "inline": True,
+            },
+            {"name": "Entry", "value": self._format_number(float(tracked.get("entry_price") or 0.0), 8), "inline": True},
+            {"name": "SL", "value": self._format_number(float(sl_result.get("stop_price") or tracked.get("sl_price") or 0.0), 8), "inline": True},
+        ]
+        if trigger_pnl_pct is not None:
+            fields.append({"name": "PnL Trigger", "value": self._format_signed_pct(trigger_pnl_pct), "inline": True})
+        if mark_price is not None and mark_price > 0:
+            fields.append({"name": "Mark", "value": self._format_number(mark_price, 8), "inline": True})
+        payload = json.dumps(
+            {
+                "username": "Pump Hunter Executor",
+                "allowed_mentions": {"parse": []},
+                "embeds": [
+                    {
+                        "title": f"{mode_label}: {symbol}",
+                        "color": color,
+                        "fields": fields,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            webhook_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "curl/8.7.1",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            self._post_webhook(request)
+        except Exception:
+            logger.exception("Pump hunter SL Discord alert failed: symbol=%s moved=%s", symbol, moved_to_entry)
 
     @staticmethod
     def _build_live_order_registry_key(symbol: str, order_id: Any, client_order_id: str | None) -> str | None:
@@ -539,12 +616,103 @@ class PumpScannerService:
             "tp_price": float(signal.get("tp") or 0.0),
             "sl_price": float(signal.get("sl") or 0.0),
             "quantity": str(result.get("quantity") or "-"),
+            "leverage": int(result.get("leverage") or settings.pump_hunter_live_leverage or 1),
+            "margin_type": str(result.get("margin_type") or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
             "placed_at_ts": placed_at_ts,
             "placed_at_text": time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(placed_at_ts)),
+            "entry_filled": False,
+            "filled_qty": "0",
             "tp_order_placed": False,
+            "tp_order_id": None,
+            "tp_client_order_id": None,
+            "tp_moved_to_entry": False,
+            "sl_order_placed": False,
+            "sl_order_id": None,
+            "sl_client_order_id": None,
+            "sl_moved_to_entry": False,
         }
         with self._live_order_lock:
             self._live_order_registry[key] = tracked
+
+    @staticmethod
+    def _register_child_order(tracked: dict[str, Any], prefix: str, result: dict[str, Any]) -> None:
+        exchange = result.get("exchange_response") if isinstance(result.get("exchange_response"), dict) else {}
+        order_id = exchange.get("orderId")
+        client_order_id = exchange.get("clientOrderId") or exchange.get("origClientOrderId")
+        tracked[f"{prefix}_order_placed"] = True
+        tracked[f"{prefix}_order_id"] = int(order_id) if order_id is not None and str(order_id).strip() else None
+        tracked[f"{prefix}_client_order_id"] = str(client_order_id).strip() if client_order_id else None
+
+    @staticmethod
+    def _calc_live_pnl_pct(*, side: str, entry_price: float, mark_price: float, leverage: int) -> float:
+        if entry_price <= 0 or mark_price <= 0 or leverage <= 0:
+            return 0.0
+        side_text = str(side or "").upper()
+        if side_text == "LONG":
+            return ((mark_price - entry_price) / entry_price) * leverage * 100.0
+        return ((entry_price - mark_price) / entry_price) * leverage * 100.0
+
+    def _maybe_place_sl_for_tracked_order(self, tracked: dict[str, Any]) -> bool:
+        if not settings.pump_hunter_live_place_sl_on_fill_enabled:
+            return False
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return False
+        if bool(tracked.get("sl_order_placed")):
+            return True
+        symbol = str(tracked.get("symbol") or "").strip()
+        stop_price = float(tracked.get("sl_price") or 0.0)
+        executed_qty = float(tracked.get("filled_qty") or 0.0)
+        if not symbol or stop_price <= 0 or executed_qty <= 0:
+            return False
+        sl_result = self.trade_client.place_close_position_sl_order(
+            symbol=symbol,
+            position_side=str(tracked.get("side") or "").upper(),
+            stop_price=stop_price,
+            quantity=executed_qty,
+            test_mode=False,
+        )
+        self._register_child_order(tracked, "sl", sl_result)
+        self._send_sl_success_discord_alert(tracked, sl_result, moved_to_entry=False)
+        logger.info(
+            "Pump hunter SL order submitted: symbol=%s side=%s stop=%s",
+            symbol,
+            tracked.get("side"),
+            sl_result.get("stop_price"),
+        )
+        return True
+
+    def _get_tracked_child_order_status(self, tracked: dict[str, Any], prefix: str) -> tuple[str, dict[str, Any]]:
+        if not bool(tracked.get(f"{prefix}_order_placed")):
+            return "", {}
+        symbol = str(tracked.get("symbol") or "").strip()
+        order_id = tracked.get(f"{prefix}_order_id")
+        client_order_id = tracked.get(f"{prefix}_client_order_id")
+        if not symbol:
+            return "", {}
+        status_resp = self.trade_client.get_order_status(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        return str(status_resp.get("status") or "").upper(), status_resp
+
+    def _cancel_tracked_child_order(self, tracked: dict[str, Any], prefix: str) -> bool:
+        if not bool(tracked.get(f"{prefix}_order_placed")):
+            return False
+        symbol = str(tracked.get("symbol") or "").strip()
+        order_id = tracked.get(f"{prefix}_order_id")
+        client_order_id = tracked.get(f"{prefix}_client_order_id")
+        if not symbol:
+            return False
+        self.trade_client.cancel_order(
+            symbol=symbol,
+            order_id=order_id,
+            client_order_id=client_order_id,
+        )
+        tracked[f"{prefix}_order_placed"] = False
+        tracked[f"{prefix}_order_id"] = None
+        tracked[f"{prefix}_client_order_id"] = None
+        return True
 
     def _maybe_place_tp_for_tracked_order(self, tracked: dict[str, Any], status_resp: dict[str, Any]) -> bool:
         if not settings.pump_hunter_live_place_tp_on_fill_enabled:
@@ -567,7 +735,7 @@ class PumpScannerService:
             quantity=executed_qty,
             test_mode=False,
         )
-        tracked["tp_order_placed"] = True
+        self._register_child_order(tracked, "tp", tp_result)
         tracked["filled_qty"] = tp_result.get("quantity") or str(executed_qty)
         self._send_tp_success_discord_alert(tracked, tp_result)
         logger.info(
@@ -579,14 +747,129 @@ class PumpScannerService:
         )
         return True
 
+    def _maybe_move_tp_to_entry_for_tracked_order(self, tracked: dict[str, Any]) -> bool:
+        if not settings.pump_hunter_live_move_tp_to_entry_enabled:
+            return False
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return False
+        if not bool(tracked.get("entry_filled")):
+            return False
+        if not bool(tracked.get("tp_order_placed")):
+            return False
+        if bool(tracked.get("tp_moved_to_entry")):
+            return False
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        entry_price = float(tracked.get("entry_price") or 0.0)
+        leverage = max(1, int(tracked.get("leverage") or settings.pump_hunter_live_leverage or 1))
+        executed_qty = float(tracked.get("filled_qty") or 0.0)
+        if not symbol or entry_price <= 0 or executed_qty <= 0:
+            return False
+        mark_price = float(self.trade_client.get_mark_price(symbol))
+        pnl_pct = self._calc_live_pnl_pct(
+            side=side,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            leverage=leverage,
+        )
+        if pnl_pct > float(settings.pump_hunter_live_move_tp_to_entry_pnl_pct):
+            return False
+        self._cancel_tracked_child_order(tracked, "tp")
+        tp_result = self.trade_client.place_reduce_only_tp_order(
+            symbol=symbol,
+            position_side=side,
+            tp_price=entry_price,
+            quantity=executed_qty,
+            test_mode=False,
+        )
+        self._register_child_order(tracked, "tp", tp_result)
+        tracked["tp_price"] = entry_price
+        tracked["tp_moved_to_entry"] = True
+        self._send_tp_success_discord_alert(
+            tracked,
+            tp_result,
+            moved_to_entry=True,
+            trigger_pnl_pct=pnl_pct,
+            mark_price=mark_price,
+        )
+        logger.info(
+            "Pump hunter TP moved to entry: symbol=%s side=%s entry=%s mark=%s pnl_pct=%.2f",
+            symbol,
+            side,
+            entry_price,
+            mark_price,
+            pnl_pct,
+        )
+        return True
+
+    def _maybe_move_sl_to_entry_for_tracked_order(self, tracked: dict[str, Any]) -> bool:
+        if not settings.pump_hunter_live_move_sl_to_entry_enabled:
+            return False
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return False
+        if not bool(tracked.get("entry_filled")):
+            return False
+        if not bool(tracked.get("sl_order_placed")):
+            return False
+        if bool(tracked.get("sl_moved_to_entry")):
+            return False
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        entry_price = float(tracked.get("entry_price") or 0.0)
+        leverage = max(1, int(tracked.get("leverage") or settings.pump_hunter_live_leverage or 1))
+        if not symbol or entry_price <= 0:
+            return False
+        mark_price = float(self.trade_client.get_mark_price(symbol))
+        pnl_pct = self._calc_live_pnl_pct(
+            side=side,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            leverage=leverage,
+        )
+        if pnl_pct < float(settings.pump_hunter_live_move_sl_to_entry_pnl_pct):
+            return False
+        executed_qty = float(tracked.get("filled_qty") or 0.0)
+        if executed_qty <= 0:
+            return False
+        self._cancel_tracked_child_order(tracked, "sl")
+        sl_result = self.trade_client.place_close_position_sl_order(
+            symbol=symbol,
+            position_side=side,
+            stop_price=entry_price,
+            quantity=executed_qty,
+            test_mode=False,
+        )
+        self._register_child_order(tracked, "sl", sl_result)
+        tracked["sl_price"] = entry_price
+        tracked["sl_moved_to_entry"] = True
+        self._send_sl_success_discord_alert(
+            tracked,
+            sl_result,
+            moved_to_entry=True,
+            trigger_pnl_pct=pnl_pct,
+            mark_price=mark_price,
+        )
+        logger.info(
+            "Pump hunter SL moved to entry: symbol=%s side=%s entry=%s mark=%s pnl_pct=%.2f",
+            symbol,
+            side,
+            entry_price,
+            mark_price,
+            pnl_pct,
+        )
+        return True
+
     def cancel_stale_live_orders(self) -> dict[str, Any]:
         if (
             not settings.pump_hunter_live_cancel_unfilled_enabled
+            and not settings.pump_hunter_live_move_tp_to_entry_enabled
+            and not settings.pump_hunter_live_place_sl_on_fill_enabled
+            and not settings.pump_hunter_live_move_sl_to_entry_enabled
             and not settings.pump_hunter_live_place_tp_on_fill_enabled
         ):
-            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0}
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
         if bool(settings.pump_hunter_live_order_test_mode):
-            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0}
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
         timeout_sec = max(300, int(settings.pump_hunter_live_cancel_after_minutes) * 60)
         now_ts = time.time()
         with self._live_order_lock:
@@ -598,12 +881,48 @@ class PumpScannerService:
         canceled = 0
         closed = 0
         tp_placed = 0
+        tp_moved = 0
+        sl_placed = 0
+        sl_moved = 0
         errors = 0
         for key, tracked, is_due in due_items:
             symbol = str(tracked.get("symbol") or "").strip()
             order_id = tracked.get("order_id")
             client_order_id = tracked.get("client_order_id")
             try:
+                if bool(tracked.get("entry_filled")):
+                    tp_status, _ = self._get_tracked_child_order_status(tracked, "tp")
+                    sl_status, _ = self._get_tracked_child_order_status(tracked, "sl")
+                    if tp_status == "FILLED":
+                        if sl_status in {"NEW", "PARTIALLY_FILLED"}:
+                            self._cancel_tracked_child_order(tracked, "sl")
+                        with self._live_order_lock:
+                            self._live_order_registry.pop(key, None)
+                        closed += 1
+                        continue
+                    if sl_status == "FILLED":
+                        if tp_status in {"NEW", "PARTIALLY_FILLED"}:
+                            self._cancel_tracked_child_order(tracked, "tp")
+                        with self._live_order_lock:
+                            self._live_order_registry.pop(key, None)
+                        closed += 1
+                        continue
+                    if not bool(tracked.get("tp_order_placed")) and self._maybe_place_tp_for_tracked_order(
+                        tracked,
+                        {"executedQty": tracked.get("filled_qty") or tracked.get("quantity") or 0.0},
+                    ):
+                        tp_placed += 1
+                    if self._maybe_move_tp_to_entry_for_tracked_order(tracked):
+                        tp_moved += 1
+                    if not bool(tracked.get("sl_order_placed")) and self._maybe_place_sl_for_tracked_order(tracked):
+                        sl_placed += 1
+                    if self._maybe_move_sl_to_entry_for_tracked_order(tracked):
+                        sl_moved += 1
+                    if tp_status in {"CANCELED", "EXPIRED", "REJECTED"} and sl_status in {"CANCELED", "EXPIRED", "REJECTED"}:
+                        with self._live_order_lock:
+                            self._live_order_registry.pop(key, None)
+                        closed += 1
+                    continue
                 status_resp = self.trade_client.get_order_status(
                     symbol=symbol,
                     order_id=order_id,
@@ -611,11 +930,16 @@ class PumpScannerService:
                 )
                 status = str(status_resp.get("status") or "").upper()
                 if status == "FILLED":
+                    tracked["entry_filled"] = True
+                    tracked["filled_qty"] = status_resp.get("executedQty") or tracked.get("quantity") or "0"
                     if self._maybe_place_tp_for_tracked_order(tracked, status_resp):
                         tp_placed += 1
-                    with self._live_order_lock:
-                        self._live_order_registry.pop(key, None)
-                    closed += 1
+                    if self._maybe_move_tp_to_entry_for_tracked_order(tracked):
+                        tp_moved += 1
+                    if self._maybe_place_sl_for_tracked_order(tracked):
+                        sl_placed += 1
+                    if self._maybe_move_sl_to_entry_for_tracked_order(tracked):
+                        sl_moved += 1
                     continue
                 if status in {"CANCELED", "EXPIRED", "REJECTED"}:
                     with self._live_order_lock:
@@ -630,9 +954,18 @@ class PumpScannerService:
                         client_order_id=client_order_id,
                     )
                     if status == "PARTIALLY_FILLED":
-                        self._maybe_place_tp_for_tracked_order(tracked, status_resp)
-                    with self._live_order_lock:
-                        self._live_order_registry.pop(key, None)
+                        tracked["entry_filled"] = True
+                        tracked["filled_qty"] = status_resp.get("executedQty") or tracked.get("quantity") or "0"
+                        if self._maybe_place_tp_for_tracked_order(tracked, status_resp):
+                            tp_placed += 1
+                        if self._maybe_move_tp_to_entry_for_tracked_order(tracked):
+                            tp_moved += 1
+                        if self._maybe_place_sl_for_tracked_order(tracked):
+                            sl_placed += 1
+                    else:
+                        with self._live_order_lock:
+                            self._live_order_registry.pop(key, None)
+                        closed += 1
                     canceled += 1
                     self._send_order_cancel_discord_alert(tracked, cancel_resp)
                     logger.info(
@@ -656,6 +989,9 @@ class PumpScannerService:
             "canceled": canceled,
             "closed": closed,
             "tp_placed": tp_placed,
+            "tp_moved": tp_moved,
+            "sl_placed": sl_placed,
+            "sl_moved": sl_moved,
             "errors": errors,
         }
 
