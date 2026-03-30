@@ -304,6 +304,34 @@ class BinanceFuturesTradeService:
             "newClientOrderId": f"codexph_{int(time.time() * 1000)}",
         }
 
+    def build_market_order(self, *, symbol: str, side: str, reference_price: float, order_usdt: float) -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol)
+        rules = self.get_symbol_rules(normalized)
+        filters = {str(item.get("filterType")): item for item in rules.get("filters", [])}
+        lot_filter = filters.get("LOT_SIZE") or filters.get("MARKET_LOT_SIZE") or {}
+        step_size = float(lot_filter.get("stepSize") or 0.0)
+        min_qty = float(lot_filter.get("minQty") or 0.0)
+        if reference_price <= 0 or order_usdt <= 0:
+            raise ValueError("Invalid reference_price or notional_usdt")
+        quantity_raw = order_usdt / reference_price
+        quantity = self._floor_to_step(quantity_raw, step_size or (10 ** -6))
+        if min_qty > 0 and quantity < min_qty:
+            quantity = min_qty
+        if quantity <= 0:
+            raise ValueError("Calculated quantity is too small")
+        side_text = str(side or "").upper()
+        if side_text not in {"LONG", "SHORT"}:
+            raise ValueError(f"Unsupported side {side}")
+        order_side = "BUY" if side_text == "LONG" else "SELL"
+        return {
+            "symbol": normalized,
+            "side": order_side,
+            "type": "MARKET",
+            "quantity": self._format_decimal(quantity, step_size or (10 ** -6)),
+            "newOrderRespType": "ACK",
+            "newClientOrderId": f"codexphm_{int(time.time() * 1000)}",
+        }
+
     def build_reduce_only_limit_order(
         self,
         *,
@@ -428,6 +456,57 @@ class BinanceFuturesTradeService:
             "margin_type": str(margin_type or "ISOLATED").upper(),
             "config": config_resp,
             "exchange_response": order_resp,
+            "order_type": "LIMIT",
+        }
+
+    def place_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        reference_price: float,
+        order_usdt: float,
+        leverage: int,
+        margin_type: str,
+        test_mode: bool,
+    ) -> dict[str, Any]:
+        margin_usdt = float(order_usdt)
+        leverage_value = int(leverage)
+        if margin_usdt <= 0:
+            raise ValueError("Margin USDT must be positive")
+        if leverage_value <= 0:
+            raise ValueError("Leverage must be positive")
+        notional_usdt = margin_usdt * leverage_value
+        if notional_usdt < BINANCE_MIN_NOTIONAL_USDT:
+            raise ValueError(
+                f"Notional {notional_usdt:.2f} USDT is below Binance minimum {BINANCE_MIN_NOTIONAL_USDT:.2f} USDT"
+            )
+        config_resp = self.ensure_margin_and_leverage(
+            symbol,
+            leverage=leverage_value,
+            margin_type=str(margin_type or "ISOLATED").upper(),
+        )
+        order_params = self.build_market_order(
+            symbol=symbol,
+            side=side,
+            reference_price=reference_price,
+            order_usdt=notional_usdt,
+        )
+        endpoint = "/fapi/v1/order/test" if test_mode else "/fapi/v1/order"
+        order_resp = self._signed_request("POST", endpoint, order_params)
+        return {
+            "test_mode": bool(test_mode),
+            "symbol": order_params["symbol"],
+            "side": order_params["side"],
+            "entry_price": str(reference_price),
+            "quantity": order_params["quantity"],
+            "margin_usdt": margin_usdt,
+            "notional_usdt": notional_usdt,
+            "leverage": leverage_value,
+            "margin_type": str(margin_type or "ISOLATED").upper(),
+            "config": config_resp,
+            "exchange_response": order_resp,
+            "order_type": "MARKET",
         }
 
     def place_reduce_only_tp_order(

@@ -158,6 +158,24 @@ class PumpScannerService:
                 sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
         return float(tp_pct), float(sl_pct)
 
+    @staticmethod
+    def _notes_match_market_entry_pattern(notes: Any) -> bool:
+        if not isinstance(notes, list) or not notes:
+            return False
+        text = " | ".join(str(item) for item in notes).lower()
+        return (
+            "15m volume spike x" in text
+            and "5m acceleration x" in text
+            and "ema13 > ema25 > ema99" in text
+        )
+
+    def _should_use_market_entry(self, row: dict[str, Any], tp_pct: float) -> bool:
+        if not settings.pump_hunter_live_note_market_entry_enabled:
+            return False
+        if float(tp_pct) <= float(settings.pump_hunter_live_note_market_min_tp_pct):
+            return False
+        return self._notes_match_market_entry_pattern(row.get("notes"))
+
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_discord_alert_enabled:
             return
@@ -300,24 +318,37 @@ class PumpScannerService:
         if not self._claim_alert_slot(order_key, ttl_sec=cooldown_sec):
             return
         try:
-            result = self.trade_client.place_limit_order(
-                symbol=symbol,
-                side=side,
-                entry_price=entry,
-                order_usdt=float(settings.pump_hunter_live_order_usdt),
-                leverage=leverage,
-                margin_type=str(settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
-                test_mode=bool(settings.pump_hunter_live_order_test_mode),
-            )
+            use_market_entry = self._should_use_market_entry(row, tp_pct)
+            if use_market_entry:
+                result = self.trade_client.place_market_order(
+                    symbol=symbol,
+                    side=side,
+                    reference_price=float(row.get("mark_price") or entry),
+                    order_usdt=float(settings.pump_hunter_live_order_usdt),
+                    leverage=leverage,
+                    margin_type=str(settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+                    test_mode=bool(settings.pump_hunter_live_order_test_mode),
+                )
+            else:
+                result = self.trade_client.place_limit_order(
+                    symbol=symbol,
+                    side=side,
+                    entry_price=entry,
+                    order_usdt=float(settings.pump_hunter_live_order_usdt),
+                    leverage=leverage,
+                    margin_type=str(settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+                    test_mode=bool(settings.pump_hunter_live_order_test_mode),
+                )
             result = self._attach_signal_to_order_result(result, row)
             self._set_cache(order_key, result, ttl_sec=cooldown_sec)
             self._track_live_order(result)
             self._send_order_success_discord_alert(result)
             logger.info(
-                "Pump hunter Binance order submitted: symbol=%s side=%s test_mode=%s qty=%s entry=%s",
+                "Pump hunter Binance order submitted: symbol=%s side=%s test_mode=%s order_type=%s qty=%s entry=%s",
                 symbol,
                 side,
                 bool(settings.pump_hunter_live_order_test_mode),
+                result.get("order_type"),
                 result.get("quantity"),
                 result.get("entry_price"),
             )
@@ -334,15 +365,35 @@ class PumpScannerService:
         leverage: int | None = None,
         margin_type: str | None = None,
     ) -> dict[str, Any]:
-        result = self.trade_client.place_limit_order(
-            symbol=str(row.get("symbol") or "").strip(),
-            side=self._derive_trade_plan(row)[0],
-            entry_price=self._derive_trade_plan(row)[1],
-            order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
-            leverage=int(leverage or settings.pump_hunter_live_leverage),
-            margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
-            test_mode=bool(test_mode),
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        leverage_value = int(leverage or settings.pump_hunter_live_leverage)
+        tp_pct, _ = self._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            leverage=leverage_value,
         )
+        if self._should_use_market_entry(row, tp_pct):
+            result = self.trade_client.place_market_order(
+                symbol=str(row.get("symbol") or "").strip(),
+                side=side,
+                reference_price=float(row.get("mark_price") or entry),
+                order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
+                leverage=leverage_value,
+                margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+                test_mode=bool(test_mode),
+            )
+        else:
+            result = self.trade_client.place_limit_order(
+                symbol=str(row.get("symbol") or "").strip(),
+                side=side,
+                entry_price=entry,
+                order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
+                leverage=leverage_value,
+                margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
+                test_mode=bool(test_mode),
+            )
         result = self._attach_signal_to_order_result(result, row)
         self._track_live_order(result)
         self._send_order_success_discord_alert(result)
@@ -352,6 +403,9 @@ class PumpScannerService:
         side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
         symbol = str(row.get("symbol") or "").strip()
         score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        actual_entry = float(result.get("entry_price") or 0.0)
+        if actual_entry > 0:
+            entry = actual_entry
         result["signal"] = {
             "symbol": symbol,
             "side": side,
@@ -373,6 +427,7 @@ class PumpScannerService:
         side = str(signal.get("side") or result.get("side") or "").upper()
         test_mode = bool(result.get("test_mode"))
         mode_label = "TEST ORDER" if test_mode else "LIVE ORDER"
+        order_type = str(result.get("order_type") or "LIMIT").upper()
         score = float(signal.get("score") or 0.0)
         tp_pct, sl_pct = self._calc_trade_pct_metrics(
             side=side,
@@ -392,6 +447,7 @@ class PumpScannerService:
                         "color": color,
                         "fields": [
                             {"name": "Mode", "value": mode_label, "inline": True},
+                            {"name": "Order Type", "value": order_type, "inline": True},
                             {"name": "Side", "value": side or "-", "inline": True},
                             {"name": "Score", "value": f"{score:.1f}", "inline": True},
                             {"name": "Signal", "value": f"{str(signal.get('signal_label') or '-').upper()}/{str(signal.get('stage') or '-').upper()}", "inline": True},
@@ -962,6 +1018,9 @@ class PumpScannerService:
                 if status == "FILLED":
                     tracked["entry_filled"] = True
                     tracked["filled_qty"] = status_resp.get("executedQty") or tracked.get("quantity") or "0"
+                    avg_price = float(status_resp.get("avgPrice") or 0.0)
+                    if avg_price > 0:
+                        tracked["entry_price"] = avg_price
                     if self._maybe_place_tp_for_tracked_order(tracked, status_resp):
                         tp_placed += 1
                     if self._maybe_move_tp_to_entry_for_tracked_order(tracked):
@@ -986,6 +1045,9 @@ class PumpScannerService:
                     if status == "PARTIALLY_FILLED":
                         tracked["entry_filled"] = True
                         tracked["filled_qty"] = status_resp.get("executedQty") or tracked.get("quantity") or "0"
+                        avg_price = float(status_resp.get("avgPrice") or 0.0)
+                        if avg_price > 0:
+                            tracked["entry_price"] = avg_price
                         if self._maybe_place_tp_for_tracked_order(tracked, status_resp):
                             tp_placed += 1
                         if self._maybe_move_tp_to_entry_for_tracked_order(tracked):

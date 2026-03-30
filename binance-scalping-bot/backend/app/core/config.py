@@ -346,6 +346,13 @@ class Settings(BaseModel):
     pump_hunter_live_margin_type: str = os.getenv("PUMP_HUNTER_LIVE_MARGIN_TYPE", "ISOLATED").upper()
     pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
     pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "10"))
+    pump_hunter_live_note_market_entry_enabled: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_NOTE_MARKET_ENTRY_ENABLED",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_note_market_min_tp_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_NOTE_MARKET_MIN_TP_PCT", "20")
+    )
     pump_hunter_live_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_LIVE_SIGNAL_COOLDOWN_SEC", "900"))
     pump_hunter_live_place_tp_on_fill_enabled: bool = os.getenv(
         "PUMP_HUNTER_LIVE_PLACE_TP_ON_FILL_ENABLED",
