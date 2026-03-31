@@ -232,6 +232,8 @@ async def on_startup() -> None:
                 candles_bg_long_strict_hours_vn=settings.paper_trade_candles_bg_long_strict_hours_vn,
                 candles_bg_short_strict_hours_vn=settings.paper_trade_candles_bg_short_strict_hours_vn,
                 candles_bg_strict_min_win_bonus=settings.paper_trade_candles_bg_strict_min_win_bonus,
+                candles_bg_bullish_short_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_short_entry_buffer_pct,
+                candles_bg_bullish_short_nonfollow_extra_buffer_pct=settings.paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct,
                 candles_bg_discord_webhook_enabled=settings.paper_trade_ml_candles_bg_discord_webhook_enabled,
                 candles_bg_discord_webhook_url=settings.paper_trade_ml_candles_bg_discord_webhook_url,
                 candles_bg_discord_webhook_username=settings.paper_trade_ml_candles_bg_discord_webhook_username,
@@ -506,3 +508,5 @@ async def prices_socket(
         return
     except Exception:
         return
+
+

@@ -345,6 +345,12 @@ class Settings(BaseModel):
     paper_trade_candles_bg_strict_min_win_bonus: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_STRICT_MIN_WIN_BONUS", "0.04")
     )
+    paper_trade_candles_bg_bullish_short_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_SHORT_ENTRY_BUFFER_PCT", "0.003")
+    )
+    paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_SHORT_NONFOLLOW_EXTRA_BUFFER_PCT", "0.001")
+    )
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
@@ -444,3 +450,6 @@ class Settings(BaseModel):
     ml_feedback_severe_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_WEIGHT_MULTIPLIER", "8.0"))
 
 settings = Settings()
+
+
+

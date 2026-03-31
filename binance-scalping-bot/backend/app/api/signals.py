@@ -463,6 +463,15 @@ def _evaluate_paper_entry_gate(
 
         if normalized_entry_type == "ML_CANDLES_BG":
             try:
+                entry, take_profit, stop_loss = engine._adjust_ml_candles_bg_entry_for_btc_regime(
+                    symbol=symbol,
+                    side=side,
+                    entry=entry,
+                    take_profit=take_profit,
+                    stop_loss=stop_loss,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
                 entry_timing_reason = engine._ml_candles_bg_entry_timing_reason(
                     symbol=symbol,
                     side=side,
@@ -1017,5 +1026,6 @@ def list_candle_pattern_samples(
         "items": items[:limit],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
 
 

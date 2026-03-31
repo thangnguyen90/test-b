@@ -191,6 +191,8 @@ class PaperTradingEngine:
         candles_bg_long_strict_hours_vn: str = "01,07,13,14,16,23",
         candles_bg_short_strict_hours_vn: str = "",
         candles_bg_strict_min_win_bonus: float = 0.04,
+        candles_bg_bullish_short_entry_buffer_pct: float = 0.003,
+        candles_bg_bullish_short_nonfollow_extra_buffer_pct: float = 0.001,
         candles_bg_discord_webhook_enabled: bool = False,
         candles_bg_discord_webhook_url: str = "",
         candles_bg_discord_webhook_username: str = "ML Candles BG Bot",
@@ -457,6 +459,11 @@ class PaperTradingEngine:
         self.candles_bg_short_strict_hours_vn = str(candles_bg_short_strict_hours_vn or "").strip()
         self._candles_bg_short_strict_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_short_strict_hours_vn)
         self.candles_bg_strict_min_win_bonus = max(0.0, min(float(candles_bg_strict_min_win_bonus), 0.25))
+        self.candles_bg_bullish_short_entry_buffer_pct = max(0.0, min(float(candles_bg_bullish_short_entry_buffer_pct), 0.02))
+        self.candles_bg_bullish_short_nonfollow_extra_buffer_pct = max(
+            0.0,
+            min(float(candles_bg_bullish_short_nonfollow_extra_buffer_pct), 0.02),
+        )
         self.candles_bg_discord_notifier = DiscordWebhookNotifier(
             enabled=bool(candles_bg_discord_webhook_enabled),
             webhook_url=candles_bg_discord_webhook_url,
@@ -887,14 +894,8 @@ class PaperTradingEngine:
                 )
 
                 # Trigger condition: market touches/gets through entry.
-                entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
-                    symbol=symbol,
-                    side=side,
-                    market_price=float(market_price),
-                    entry=entry,
-                    btc_guard=btc_guard,
-                )
-                if entry_timing_reason:
+                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
+                if not touched:
                     continue
                 if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
                     target_side=side,
@@ -1106,14 +1107,8 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
-                entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
-                    symbol=symbol,
-                    side=side,
-                    market_price=float(market_price),
-                    entry=entry,
-                    btc_guard=btc_guard,
-                )
-                if entry_timing_reason:
+                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
+                if not touched:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -1341,6 +1336,24 @@ class PaperTradingEngine:
                 sl = float(candles_signal.stop_loss)
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
+
+                entry, tp, sl = self._adjust_entry_for_btc_kill_short(
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
+                entry, tp, sl = self._adjust_ml_candles_bg_entry_for_btc_regime(
+                    symbol=symbol,
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
 
                 entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
                     symbol=symbol,
@@ -5255,6 +5268,48 @@ class PaperTradingEngine:
             return market_price >= entry
         return False
 
+    def _resolve_ml_candles_bg_bullish_short_buffer_pct(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return 0.0
+        if not self._is_btc_bullish_regime(btc_guard):
+            return 0.0
+        buffer_pct = float(self.candles_bg_bullish_short_entry_buffer_pct)
+        if not self._is_symbol_following_btc(symbol):
+            buffer_pct += float(self.candles_bg_bullish_short_nonfollow_extra_buffer_pct)
+        return max(0.0, buffer_pct)
+
+    def _adjust_ml_candles_bg_entry_for_btc_regime(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        market_price: float,
+        btc_guard: dict[str, Any] | None,
+    ) -> tuple[float, float, float]:
+        buffer_pct = self._resolve_ml_candles_bg_bullish_short_buffer_pct(
+            symbol=symbol,
+            side=side,
+            btc_guard=btc_guard,
+        )
+        if buffer_pct <= 0.0 or entry <= 0 or take_profit <= 0 or stop_loss <= 0 or market_price <= 0:
+            return entry, take_profit, stop_loss
+
+        adjusted_entry = max(entry * (1.0 + buffer_pct), market_price * (1.0 + max(0.001, buffer_pct * 0.5)))
+        scale = adjusted_entry / max(entry, 1e-12)
+        adjusted_tp = take_profit * scale
+        adjusted_sl = stop_loss * scale
+        return float(adjusted_entry), float(adjusted_tp), float(adjusted_sl)
+
     def _ml_candles_bg_entry_timing_reason(
         self,
         *,
@@ -5660,6 +5715,13 @@ class PaperTradingEngine:
 
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
         return held_seconds >= (self.max_hold_minutes * 60)
+
+
+
+
+
+
+
 
 
 
