@@ -346,6 +346,28 @@ class Settings(BaseModel):
     pump_hunter_live_margin_type: str = os.getenv("PUMP_HUNTER_LIVE_MARGIN_TYPE", "ISOLATED").upper()
     pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
     pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "10"))
+    pump_hunter_live_low_expected_pnl_threshold_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_LOW_EXPECTED_PNL_THRESHOLD_PCT", "30")
+    )
+    pump_hunter_live_low_expected_pnl_target_tp_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_LOW_EXPECTED_PNL_TARGET_TP_PCT", "10")
+    )
+    pump_hunter_live_profit_timeout_hours: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_PROFIT_TIMEOUT_HOURS", "8")
+    )
+    pump_hunter_live_profit_timeout_min_pnl_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_PROFIT_TIMEOUT_MIN_PNL_PCT", "0")
+    )
+    pump_hunter_live_market_entry_volume_ratio_15m_threshold: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_MARKET_ENTRY_VOLUME_RATIO_15M_THRESHOLD", "3")
+    )
+    pump_hunter_live_market_entry_require_above_ema_stack: bool = os.getenv(
+        "PUMP_HUNTER_LIVE_MARKET_ENTRY_REQUIRE_ABOVE_EMA_STACK",
+        "true",
+    ).lower() == "true"
+    pump_hunter_live_market_entry_max_distance_pct: float = float(
+        os.getenv("PUMP_HUNTER_LIVE_MARKET_ENTRY_MAX_DISTANCE_PCT", "0.2")
+    )
     pump_hunter_live_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_LIVE_SIGNAL_COOLDOWN_SEC", "900"))
     pump_hunter_live_place_tp_on_fill_enabled: bool = os.getenv(
         "PUMP_HUNTER_LIVE_PLACE_TP_ON_FILL_ENABLED",

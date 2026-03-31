@@ -101,6 +101,36 @@ class PumpScannerService:
             return entry - (distance * factor)
         return entry + (distance * factor)
 
+    @staticmethod
+    def _price_for_target_pnl_pct(*, side: str, entry: float, leverage: int, pnl_pct: float) -> float:
+        if entry <= 0 or leverage <= 0 or pnl_pct <= 0:
+            return entry
+        move_ratio = pnl_pct / (float(leverage) * 100.0)
+        side_text = str(side or "").upper()
+        if side_text == "SHORT":
+            return max(0.0, entry * (1.0 - move_ratio))
+        return entry * (1.0 + move_ratio)
+
+    @classmethod
+    def _normalize_live_take_profit(cls, *, side: str, entry: float, take_profit: float, leverage: int) -> float:
+        if entry <= 0 or take_profit <= 0 or leverage <= 0:
+            return take_profit
+        tp_pct, _ = cls._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=entry,
+            leverage=leverage,
+        )
+        if tp_pct < float(settings.pump_hunter_live_low_expected_pnl_threshold_pct):
+            take_profit = cls._price_for_target_pnl_pct(
+                side=side,
+                entry=entry,
+                leverage=leverage,
+                pnl_pct=float(settings.pump_hunter_live_low_expected_pnl_target_tp_pct),
+            )
+        return cls._compress_take_profit_if_needed(side=side, entry=entry, take_profit=take_profit)
+
     @classmethod
     def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
         signal_label = str(row.get("signal_label") or "").upper()
@@ -111,6 +141,7 @@ class PumpScannerService:
         invalidation_price = float(row.get("invalidation_price") or 0.0)
         zone_low = float(row.get("est_liq_target_low") or 0.0)
         zone_high = float(row.get("est_liq_target_high") or 0.0)
+        leverage = max(1, int(settings.pump_hunter_live_leverage or 5))
         if side == "SHORT":
             entry = cls._derive_post_sweep_short_entry(
                 current_price=mark_price,
@@ -124,10 +155,11 @@ class PumpScannerService:
             entry = mark_price
             take_profit = float(row.get("est_liq_target_price") or 0.0)
             stop_loss = invalidation_price
-        take_profit = cls._compress_take_profit_if_needed(
+        take_profit = cls._normalize_live_take_profit(
             side=side,
             entry=entry,
             take_profit=take_profit,
+            leverage=leverage,
         )
         return side, entry, take_profit, stop_loss
 
@@ -271,6 +303,62 @@ class PumpScannerService:
                 score,
             )
 
+    @staticmethod
+    def _calc_entry_distance_pct(*, mark_price: float, entry_price: float) -> float:
+        if mark_price <= 0 or entry_price <= 0:
+            return 999999.0
+        return abs((mark_price - entry_price) / entry_price) * 100.0
+
+    def _should_use_market_entry(self, row: dict[str, Any], *, entry: float) -> bool:
+        volume_ratio_15m = float(row.get("volume_ratio_15m") or 0.0)
+        if volume_ratio_15m < float(settings.pump_hunter_live_market_entry_volume_ratio_15m_threshold):
+            return False
+        if settings.pump_hunter_live_market_entry_require_above_ema_stack and not bool(row.get("above_ema_stack")):
+            return False
+        mark_price = float(row.get("mark_price") or 0.0)
+        distance_pct = self._calc_entry_distance_pct(mark_price=mark_price, entry_price=entry)
+        if distance_pct > float(settings.pump_hunter_live_market_entry_max_distance_pct):
+            return False
+        return True
+
+    def _submit_binance_entry_order(
+        self,
+        row: dict[str, Any],
+        *,
+        test_mode: bool,
+        order_usdt: float,
+        leverage: int,
+        margin_type: str,
+    ) -> dict[str, Any]:
+        symbol = str(row.get("symbol") or "").strip()
+        side, entry, _take_profit, _stop_loss = self._derive_trade_plan(row)
+        use_market = self._should_use_market_entry(row, entry=entry)
+        if use_market:
+            result = self.trade_client.place_market_order(
+                symbol=symbol,
+                side=side,
+                order_usdt=order_usdt,
+                leverage=leverage,
+                margin_type=margin_type,
+                test_mode=test_mode,
+            )
+        else:
+            result = self.trade_client.place_limit_order(
+                symbol=symbol,
+                side=side,
+                entry_price=entry,
+                order_usdt=order_usdt,
+                leverage=leverage,
+                margin_type=margin_type,
+                test_mode=test_mode,
+            )
+        result["entry_order_type"] = "MARKET" if use_market else "LIMIT"
+        result["market_entry_distance_pct"] = self._calc_entry_distance_pct(
+            mark_price=float(row.get("mark_price") or 0.0),
+            entry_price=entry,
+        )
+        return result
+
     def _maybe_execute_live_order(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_live_trade_enabled:
             return
@@ -300,23 +388,22 @@ class PumpScannerService:
         if not self._claim_alert_slot(order_key, ttl_sec=cooldown_sec):
             return
         try:
-            result = self.trade_client.place_limit_order(
-                symbol=symbol,
-                side=side,
-                entry_price=entry,
+            result = self._submit_binance_entry_order(
+                row,
+                test_mode=bool(settings.pump_hunter_live_order_test_mode),
                 order_usdt=float(settings.pump_hunter_live_order_usdt),
                 leverage=leverage,
                 margin_type=str(settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
-                test_mode=bool(settings.pump_hunter_live_order_test_mode),
             )
             result = self._attach_signal_to_order_result(result, row)
             self._set_cache(order_key, result, ttl_sec=cooldown_sec)
             self._track_live_order(result)
             self._send_order_success_discord_alert(result)
             logger.info(
-                "Pump hunter Binance order submitted: symbol=%s side=%s test_mode=%s qty=%s entry=%s",
+                "Pump hunter Binance order submitted: symbol=%s side=%s type=%s test_mode=%s qty=%s entry=%s",
                 symbol,
                 side,
+                result.get("entry_order_type"),
                 bool(settings.pump_hunter_live_order_test_mode),
                 result.get("quantity"),
                 result.get("entry_price"),
@@ -334,14 +421,12 @@ class PumpScannerService:
         leverage: int | None = None,
         margin_type: str | None = None,
     ) -> dict[str, Any]:
-        result = self.trade_client.place_limit_order(
-            symbol=str(row.get("symbol") or "").strip(),
-            side=self._derive_trade_plan(row)[0],
-            entry_price=self._derive_trade_plan(row)[1],
+        result = self._submit_binance_entry_order(
+            row,
+            test_mode=bool(test_mode),
             order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
             leverage=int(leverage or settings.pump_hunter_live_leverage),
             margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
-            test_mode=bool(test_mode),
         )
         result = self._attach_signal_to_order_result(result, row)
         self._track_live_order(result)
@@ -352,15 +437,26 @@ class PumpScannerService:
         side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
         symbol = str(row.get("symbol") or "").strip()
         score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        entry_order_type = str(result.get("entry_order_type") or result.get("order_type") or "LIMIT").upper()
+        signal_entry = float(result.get("entry_price") or entry or 0.0) if entry_order_type == "MARKET" else entry
+        leverage = int(result.get("leverage") or settings.pump_hunter_live_leverage or 1)
+        signal_tp = self._normalize_live_take_profit(
+            side=side,
+            entry=signal_entry,
+            take_profit=take_profit,
+            leverage=leverage,
+        )
         result["signal"] = {
             "symbol": symbol,
             "side": side,
             "score": score,
             "signal_label": str(row.get("signal_label") or "").upper(),
             "stage": str(row.get("stage") or "").upper(),
-            "entry": entry,
-            "tp": take_profit,
+            "entry": signal_entry,
+            "tp": signal_tp,
             "sl": stop_loss,
+            "entry_order_type": entry_order_type,
+            "market_entry_distance_pct": float(result.get("market_entry_distance_pct") or 0.0),
         }
         return result
 
@@ -639,6 +735,7 @@ class PumpScannerService:
             "order_id": int(order_id) if order_id is not None and str(order_id).strip() else None,
             "client_order_id": str(client_order_id).strip() if client_order_id else None,
             "side": str(signal.get("side") or result.get("side") or "").upper(),
+            "entry_order_type": str(signal.get("entry_order_type") or result.get("entry_order_type") or result.get("order_type") or exchange.get("type") or "LIMIT").upper(),
             "score": float(signal.get("score") or 0.0),
             "signal_label": str(signal.get("signal_label") or "").upper(),
             "stage": str(signal.get("stage") or "").upper(),
@@ -661,6 +758,14 @@ class PumpScannerService:
             "sl_client_order_id": None,
             "sl_moved_to_entry": False,
         }
+        exchange_status = str(exchange.get("status") or "").upper()
+        if exchange_status == "FILLED":
+            tracked["entry_filled"] = True
+            tracked["filled_qty"] = exchange.get("executedQty") or tracked.get("quantity") or "0"
+            try:
+                tracked["entry_price"] = float(exchange.get("avgPrice") or exchange.get("price") or tracked.get("entry_price") or 0.0)
+            except Exception:
+                pass
         with self._live_order_lock:
             self._live_order_registry[key] = tracked
 
@@ -681,6 +786,59 @@ class PumpScannerService:
         if side_text == "LONG":
             return ((mark_price - entry_price) / entry_price) * leverage * 100.0
         return ((entry_price - mark_price) / entry_price) * leverage * 100.0
+
+    def _maybe_close_profitable_timeout_position(self, tracked: dict[str, Any], *, now_ts: float) -> bool:
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return False
+        if not bool(tracked.get("entry_filled")):
+            return False
+        timeout_hours = float(settings.pump_hunter_live_profit_timeout_hours)
+        if timeout_hours <= 0:
+            return False
+        placed_at_ts = float(tracked.get("placed_at_ts") or now_ts)
+        age_sec = max(0.0, now_ts - placed_at_ts)
+        if age_sec < (timeout_hours * 3600.0):
+            return False
+        symbol = str(tracked.get("symbol") or "").strip()
+        side = str(tracked.get("side") or "").upper()
+        entry_price = float(tracked.get("entry_price") or 0.0)
+        leverage = max(1, int(tracked.get("leverage") or settings.pump_hunter_live_leverage or 1))
+        executed_qty = float(tracked.get("filled_qty") or 0.0)
+        if not symbol or entry_price <= 0 or executed_qty <= 0:
+            return False
+        mark_price = float(self.trade_client.get_mark_price(symbol))
+        pnl_pct = self._calc_live_pnl_pct(
+            side=side,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            leverage=leverage,
+        )
+        if pnl_pct <= float(settings.pump_hunter_live_profit_timeout_min_pnl_pct):
+            return False
+        tp_status, _ = self._get_tracked_child_order_status(tracked, "tp")
+        sl_status, _ = self._get_tracked_child_order_status(tracked, "sl")
+        if tp_status == "FILLED" or sl_status == "FILLED":
+            return False
+        if tp_status in {"NEW", "PARTIALLY_FILLED"}:
+            self._cancel_tracked_child_order(tracked, "tp")
+        if sl_status in {"NEW", "PARTIALLY_FILLED"}:
+            self._cancel_tracked_child_order(tracked, "sl")
+        close_result = self.trade_client.place_close_position_market_order(
+            symbol=symbol,
+            position_side=side,
+            quantity=executed_qty,
+            test_mode=False,
+        )
+        tracked["age_minutes"] = age_sec / 60.0
+        logger.info(
+            "Pump hunter profitable timeout close: symbol=%s side=%s age_min=%.1f pnl_pct=%.2f mark=%s",
+            symbol,
+            side,
+            tracked["age_minutes"],
+            pnl_pct,
+            mark_price,
+        )
+        return True
 
     def _maybe_place_sl_for_tracked_order(self, tracked: dict[str, Any]) -> bool:
         if not settings.pump_hunter_live_place_sl_on_fill_enabled:
@@ -896,10 +1054,11 @@ class PumpScannerService:
             and not settings.pump_hunter_live_place_sl_on_fill_enabled
             and not settings.pump_hunter_live_move_sl_to_entry_enabled
             and not settings.pump_hunter_live_place_tp_on_fill_enabled
+            and float(settings.pump_hunter_live_profit_timeout_hours) <= 0
         ):
-            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "profit_closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
         if bool(settings.pump_hunter_live_order_test_mode):
-            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
+            return {"tracked": 0, "due": 0, "canceled": 0, "closed": 0, "profit_closed": 0, "errors": 0, "tp_placed": 0, "tp_moved": 0, "sl_placed": 0, "sl_moved": 0}
         timeout_sec = max(300, int(settings.pump_hunter_live_cancel_after_minutes) * 60)
         now_ts = time.time()
         with self._live_order_lock:
@@ -910,6 +1069,7 @@ class PumpScannerService:
         ]
         canceled = 0
         closed = 0
+        profit_closed = 0
         tp_placed = 0
         tp_moved = 0
         sl_placed = 0
@@ -948,6 +1108,12 @@ class PumpScannerService:
                         sl_placed += 1
                     if self._maybe_move_sl_to_entry_for_tracked_order(tracked):
                         sl_moved += 1
+                    if self._maybe_close_profitable_timeout_position(tracked, now_ts=now_ts):
+                        with self._live_order_lock:
+                            self._live_order_registry.pop(key, None)
+                        profit_closed += 1
+                        closed += 1
+                        continue
                     if tp_status in {"CANCELED", "EXPIRED", "REJECTED"} and sl_status in {"CANCELED", "EXPIRED", "REJECTED"}:
                         with self._live_order_lock:
                             self._live_order_registry.pop(key, None)
@@ -1018,6 +1184,7 @@ class PumpScannerService:
             "due": sum(1 for _, _, is_due in due_items if is_due),
             "canceled": canceled,
             "closed": closed,
+            "profit_closed": profit_closed,
             "tp_placed": tp_placed,
             "tp_moved": tp_moved,
             "sl_placed": sl_placed,
