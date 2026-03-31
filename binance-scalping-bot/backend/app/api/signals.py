@@ -147,31 +147,81 @@ def _evaluate_paper_entry_gate(
             return False, "Invalid TP/SL", raw_win_probability, None
 
         normalized_entry_type = str(entry_type or "LIMIT").strip().upper() or "LIMIT"
-
         try:
-            if bool(engine._is_open_paused()):
-                pause_reason = str(getattr(engine, "_open_pause_reason", "") or "").strip()
-                return False, (pause_reason or "Open paused"), raw_win_probability, None
+            skip_btc_guards = bool(engine._skip_btc_guards_for_entry_type(normalized_entry_type))
         except Exception:
-            pass
+            skip_btc_guards = normalized_entry_type.startswith("ML_CANDLES") and normalized_entry_type != "ML_CANDLES_BG"
+
+        btc_guard: dict = {}
+        if not skip_btc_guards:
+            try:
+                btc_guard = engine._resolve_btc_trend_guard()
+            except Exception:
+                btc_guard = {}
+
+        btc_following: bool | None
+        try:
+            btc_following = bool(engine._is_symbol_following_btc(symbol))
+        except Exception:
+            btc_following = None
+
+        if normalized_entry_type == "LIMIT":
+            try:
+                basic_ml_short_guard_reason = engine._basic_ml_post_dump_short_guard_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_short_guard_reason:
+                    return False, str(basic_ml_short_guard_reason), raw_win_probability, btc_following
+            except Exception:
+                pass
+            try:
+                basic_ml_long_guard_reason = engine._basic_ml_post_pump_long_guard_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_long_guard_reason:
+                    return False, str(basic_ml_long_guard_reason), raw_win_probability, btc_following
+            except Exception:
+                pass
+            try:
+                basic_ml_candle_confirm_reason = engine._basic_ml_btc_candle_confirmation_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_candle_confirm_reason:
+                    return False, str(basic_ml_candle_confirm_reason), raw_win_probability, btc_following
+            except Exception:
+                pass
+
         try:
             entry_block_reason = engine._entry_block_reason(
                 symbol=symbol,
                 side=side,
                 entry_type=normalized_entry_type,
+                btc_guard=btc_guard,
             )
             if entry_block_reason:
-                return False, str(entry_block_reason), raw_win_probability, None
+                return False, str(entry_block_reason), raw_win_probability, btc_following
         except Exception:
             pass
         try:
-            instant_sl_guard_reason = engine._instant_sl_guard_reason(symbol=symbol, side=side)
-            if instant_sl_guard_reason:
-                return False, str(instant_sl_guard_reason), raw_win_probability, None
+            if bool(engine._is_open_paused()):
+                if not engine._should_bypass_instant_sl_global_pause_for_entry_type(normalized_entry_type):
+                    pause_reason = str(getattr(engine, "_open_pause_reason", "") or "").strip()
+                    return False, (pause_reason or "Open paused"), raw_win_probability, btc_following
         except Exception:
             pass
-
-        skip_btc_guards = normalized_entry_type.startswith("ML_CANDLES")
+        try:
+            if not engine._should_bypass_instant_sl_symbol_guard_for_entry_type(normalized_entry_type):
+                instant_sl_guard_reason = engine._instant_sl_guard_reason(symbol=symbol, side=side)
+                if instant_sl_guard_reason:
+                    return False, str(instant_sl_guard_reason), raw_win_probability, btc_following
+        except Exception:
+            pass
 
         try:
             if bool(
@@ -182,9 +232,9 @@ def _evaluate_paper_entry_gate(
                     force_entry_type_scope=force_entry_type_scope,
                 )
             ):
-                return False, "Duplicate", raw_win_probability, None
+                return False, "Duplicate", raw_win_probability, btc_following
         except Exception:
-            return False, "Repo unavailable", raw_win_probability, None
+            return False, "Repo unavailable", raw_win_probability, btc_following
         try:
             reentry_cooldown_reason = engine._reentry_cooldown_reason(
                 symbol=symbol,
@@ -193,12 +243,10 @@ def _evaluate_paper_entry_gate(
                 force_entry_type_scope=force_entry_type_scope,
             )
             if reentry_cooldown_reason:
-                return False, str(reentry_cooldown_reason), raw_win_probability, None
+                return False, str(reentry_cooldown_reason), raw_win_probability, btc_following
         except Exception:
             pass
 
-        # Align precheck with engine flip rule:
-        # opposite-direction open trades must be profitable before allowing a flip.
         try:
             open_rows = repo.list_open_trades()
         except Exception:
@@ -240,13 +288,13 @@ def _evaluate_paper_entry_gate(
                         has_non_positive_pnl = True
                         break
                 if has_non_positive_pnl:
-                    return False, "Opposite open PnL<=0", raw_win_probability, None
+                    return False, "Opposite open PnL<=0", raw_win_probability, btc_following
             except Exception:
-                return False, "Opposite check unavailable", raw_win_probability, None
+                return False, "Opposite check unavailable", raw_win_probability, btc_following
 
         min_win = float(getattr(engine, "min_win_probability", 0.75))
         if raw_win_probability < min_win:
-            return False, f"Win<{min_win * 100:.1f}%", raw_win_probability, None
+            return False, f"Win<{min_win * 100:.1f}%", raw_win_probability, btc_following
 
         try:
             hist_acc = repo.symbol_accuracy(symbol=symbol, lookback=300)
@@ -271,21 +319,8 @@ def _evaluate_paper_entry_gate(
                 penalty_reason = None
         if effective_probability < min_win:
             if penalty_reason:
-                return False, str(penalty_reason), effective_probability, None
-            return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, None
-
-        btc_guard: dict = {}
-        if not skip_btc_guards:
-            try:
-                btc_guard = engine._resolve_btc_trend_guard()
-            except Exception:
-                btc_guard = {}
-
-        btc_following: bool | None
-        try:
-            btc_following = bool(engine._is_symbol_following_btc(symbol))
-        except Exception:
-            btc_following = None
+                return False, str(penalty_reason), effective_probability, btc_following
+            return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, btc_following
 
         if normalized_entry_type == "LIMIT":
             try:
@@ -323,7 +358,14 @@ def _evaluate_paper_entry_gate(
                 pass
 
             try:
-                required_min_win = float(min_win)
+                can_open_now, required_min_win = engine._evaluate_hourly_bad_window_guard(
+                    side=side,
+                    entry_type=normalized_entry_type,
+                    base_min_win=min_win,
+                    btc_guard=btc_guard,
+                )
+                if not can_open_now:
+                    return False, "Hourly bad window", effective_probability, btc_following
                 required_min_win = float(
                     engine._apply_bullish_short_nonfollow_min_win_bonus(
                         required_min_win=required_min_win,
@@ -332,6 +374,23 @@ def _evaluate_paper_entry_gate(
                         btc_guard=btc_guard,
                     )
                 )
+                if normalized_entry_type == "LIMIT":
+                    required_min_win = float(
+                        engine._apply_basic_ml_post_dump_short_min_win(
+                            required_min_win=required_min_win,
+                            symbol=symbol,
+                            side=side,
+                            btc_guard=btc_guard,
+                        )
+                    )
+                    required_min_win = float(
+                        engine._apply_basic_ml_post_pump_long_min_win(
+                            required_min_win=required_min_win,
+                            symbol=symbol,
+                            side=side,
+                            btc_guard=btc_guard,
+                        )
+                    )
                 if effective_probability < required_min_win:
                     return False, f"EffectiveWin<{required_min_win * 100:.1f}%", effective_probability, btc_following
             except Exception:
@@ -402,12 +461,26 @@ def _evaluate_paper_entry_gate(
         except Exception:
             pass
 
-        try:
-            touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
-        except Exception:
-            touched = False
-        if not touched:
-            return False, "Entry not touched", effective_probability, btc_following
+        if normalized_entry_type == "ML_CANDLES_BG":
+            try:
+                entry_timing_reason = engine._ml_candles_bg_entry_timing_reason(
+                    symbol=symbol,
+                    side=side,
+                    market_price=float(market_price),
+                    entry=entry,
+                    btc_guard=btc_guard,
+                )
+            except Exception:
+                entry_timing_reason = "Entry not touched"
+            if entry_timing_reason:
+                return False, str(entry_timing_reason), effective_probability, btc_following
+        else:
+            try:
+                touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
+            except Exception:
+                touched = False
+            if not touched:
+                return False, "Entry not touched", effective_probability, btc_following
 
         try:
             leverage = max(1, int(engine._resolve_symbol_leverage(symbol)))
@@ -944,3 +1017,5 @@ def list_candle_pattern_samples(
         "items": items[:limit],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+

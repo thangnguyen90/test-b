@@ -84,6 +84,9 @@ class Settings(BaseModel):
     signal_candle_pattern_auto_refresh_enabled: bool = os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_ENABLED", "true").lower() == "true"
     signal_candle_pattern_auto_refresh_minutes: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_MINUTES", "15"))
     signal_candle_pattern_auto_refresh_startup_delay_sec: int = int(os.getenv("SIGNAL_CANDLE_PATTERN_AUTO_REFRESH_STARTUP_DELAY_SEC", "45"))
+    paper_trade_ml_candles_bg_discord_webhook_enabled: bool = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_ENABLED", "false").lower() == "true"
+    paper_trade_ml_candles_bg_discord_webhook_url: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_URL", "").strip()
+    paper_trade_ml_candles_bg_discord_webhook_username: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_USERNAME", "ML Candles BG Bot").strip() or "ML Candles BG Bot"
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
@@ -322,6 +325,26 @@ class Settings(BaseModel):
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
     paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "557"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
+    paper_trade_candles_bg_block_hours_vn: str = os.getenv("PAPER_TRADE_CANDLES_BG_BLOCK_HOURS_VN", "").strip()
+    paper_trade_candles_bg_long_block_hours_vn: str = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_LONG_BLOCK_HOURS_VN",
+        "00,04,05,06,11,12,15,18,21,22",
+    ).strip()
+    paper_trade_candles_bg_short_block_hours_vn: str = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_SHORT_BLOCK_HOURS_VN",
+        "03,12,17",
+    ).strip()
+    paper_trade_candles_bg_long_strict_hours_vn: str = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_LONG_STRICT_HOURS_VN",
+        "01,07,13,14,16,23",
+    ).strip()
+    paper_trade_candles_bg_short_strict_hours_vn: str = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_SHORT_STRICT_HOURS_VN",
+        "",
+    ).strip()
+    paper_trade_candles_bg_strict_min_win_bonus: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_STRICT_MIN_WIN_BONUS", "0.04")
+    )
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))

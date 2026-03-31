@@ -28,6 +28,8 @@ http://127.0.0.1:5199/?view=paper
 http://127.0.0.1:5199/?view=daily
 http://127.0.0.1:5199/?view=ml-candles-signals
 http://127.0.0.1:5199/?view=ml-candles-compare
+http://localhost:5199/ml-candles-bg
+http://localhost:5199/ml-candles-test
 
 
 

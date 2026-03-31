@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 from app.api.signals import get_cached_symbols_snapshot, get_scan_snapshot
 from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
+from app.services.discord_webhook_notifier import DiscordWebhookNotifier
 from app.services.liquidation_ml_predictor import LiquidationMLPredictor
 from app.services.ml_predictor import MLPredictor
 from app.services.mysql_trade_repo import MySQLTradeRepository
@@ -24,6 +26,9 @@ from app.services.risk_manager import (
     calc_quantity_from_order_usdt,
     normalize_tp_sl,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
@@ -152,6 +157,25 @@ class PaperTradingEngine:
         base_ml_max_symbols: int = 200,
         basic_ml_pattern_gate_enabled: bool = True,
         basic_ml_pattern_min_win_rate_pct: float = 90.0,
+        basic_ml_btc_candle_confirm_enabled: bool = True,
+        basic_ml_btc_candle_confirm_min_trend_confidence: float = 0.58,
+        basic_ml_btc_candle_confirm_min_1h_confidence: float = 0.60,
+        basic_ml_btc_candle_confirm_min_body_pct: float = 0.12,
+        basic_ml_btc_candle_confirm_cluster_score: float = 0.18,
+        basic_ml_post_dump_short_guard_enabled: bool = True,
+        basic_ml_post_dump_short_block_minutes: int = 120,
+        basic_ml_post_dump_short_recovery_minutes: int = 180,
+        basic_ml_post_dump_short_min_1h_confidence: float = 0.68,
+        basic_ml_post_dump_short_nonfollow_min_win: float = 0.90,
+        basic_ml_post_dump_short_follow_min_win: float = 0.84,
+        basic_ml_reversal_short_guard_enabled: bool = True,
+        basic_ml_post_pump_long_guard_enabled: bool = True,
+        basic_ml_post_pump_long_block_minutes: int = 120,
+        basic_ml_post_pump_long_recovery_minutes: int = 180,
+        basic_ml_post_pump_long_min_1h_confidence: float = 0.68,
+        basic_ml_post_pump_long_nonfollow_min_win: float = 0.90,
+        basic_ml_post_pump_long_follow_min_win: float = 0.84,
+        basic_ml_reversal_long_guard_enabled: bool = True,
         test_ml_enabled: bool = False,
         test_ml_min_win_probability: float = 0.75,
         test_ml_max_symbols: int = 80,
@@ -161,6 +185,15 @@ class PaperTradingEngine:
         candles_bg_max_symbols: int = 80,
         candles_bg_max_orders_per_cycle: int = 2,
         candles_bg_entry_type: str = "ML_CANDLES_BG",
+        candles_bg_block_hours_vn: str = "",
+        candles_bg_long_block_hours_vn: str = "00,04,05,06,11,12,15,18,21,22",
+        candles_bg_short_block_hours_vn: str = "03,12,17",
+        candles_bg_long_strict_hours_vn: str = "01,07,13,14,16,23",
+        candles_bg_short_strict_hours_vn: str = "",
+        candles_bg_strict_min_win_bonus: float = 0.04,
+        candles_bg_discord_webhook_enabled: bool = False,
+        candles_bg_discord_webhook_url: str = "",
+        candles_bg_discord_webhook_username: str = "ML Candles BG Bot",
         single_position_per_symbol_side: bool = True,
         reentry_cooldown_minutes: int = 0,
         reentry_after_sl_cooldown_minutes: int = 30,
@@ -349,6 +382,61 @@ class PaperTradingEngine:
         self.base_ml_max_symbols = max(10, min(600, int(base_ml_max_symbols)))
         self.basic_ml_pattern_gate_enabled = bool(basic_ml_pattern_gate_enabled)
         self.basic_ml_pattern_min_win_rate_pct = max(0.0, min(100.0, float(basic_ml_pattern_min_win_rate_pct)))
+        self.basic_ml_btc_candle_confirm_enabled = bool(basic_ml_btc_candle_confirm_enabled)
+        self.basic_ml_btc_candle_confirm_min_trend_confidence = max(
+            0.0,
+            min(float(basic_ml_btc_candle_confirm_min_trend_confidence), 0.99),
+        )
+        self.basic_ml_btc_candle_confirm_min_1h_confidence = max(
+            0.0,
+            min(float(basic_ml_btc_candle_confirm_min_1h_confidence), 0.99),
+        )
+        self.basic_ml_btc_candle_confirm_min_body_pct = max(
+            0.01,
+            float(basic_ml_btc_candle_confirm_min_body_pct),
+        )
+        self.basic_ml_btc_candle_confirm_cluster_score = max(
+            0.05,
+            min(float(basic_ml_btc_candle_confirm_cluster_score), 0.95),
+        )
+        self.basic_ml_post_dump_short_guard_enabled = bool(basic_ml_post_dump_short_guard_enabled)
+        self.basic_ml_post_dump_short_block_minutes = max(0, int(basic_ml_post_dump_short_block_minutes))
+        self.basic_ml_post_dump_short_recovery_minutes = max(
+            self.basic_ml_post_dump_short_block_minutes,
+            int(basic_ml_post_dump_short_recovery_minutes),
+        )
+        self.basic_ml_post_dump_short_min_1h_confidence = max(
+            0.0,
+            min(float(basic_ml_post_dump_short_min_1h_confidence), 0.99),
+        )
+        self.basic_ml_post_dump_short_nonfollow_min_win = max(
+            0.0,
+            min(float(basic_ml_post_dump_short_nonfollow_min_win), 1.0),
+        )
+        self.basic_ml_post_dump_short_follow_min_win = max(
+            0.0,
+            min(float(basic_ml_post_dump_short_follow_min_win), 1.0),
+        )
+        self.basic_ml_reversal_short_guard_enabled = bool(basic_ml_reversal_short_guard_enabled)
+        self.basic_ml_post_pump_long_guard_enabled = bool(basic_ml_post_pump_long_guard_enabled)
+        self.basic_ml_post_pump_long_block_minutes = max(0, int(basic_ml_post_pump_long_block_minutes))
+        self.basic_ml_post_pump_long_recovery_minutes = max(
+            self.basic_ml_post_pump_long_block_minutes,
+            int(basic_ml_post_pump_long_recovery_minutes),
+        )
+        self.basic_ml_post_pump_long_min_1h_confidence = max(
+            0.0,
+            min(float(basic_ml_post_pump_long_min_1h_confidence), 0.99),
+        )
+        self.basic_ml_post_pump_long_nonfollow_min_win = max(
+            0.0,
+            min(float(basic_ml_post_pump_long_nonfollow_min_win), 1.0),
+        )
+        self.basic_ml_post_pump_long_follow_min_win = max(
+            0.0,
+            min(float(basic_ml_post_pump_long_follow_min_win), 1.0),
+        )
+        self.basic_ml_reversal_long_guard_enabled = bool(basic_ml_reversal_long_guard_enabled)
         self.test_ml_enabled = bool(test_ml_enabled)
         self.test_ml_min_win_probability = max(0.0, min(float(test_ml_min_win_probability), 1.0))
         self.test_ml_max_symbols = max(10, min(600, int(test_ml_max_symbols)))
@@ -358,6 +446,22 @@ class PaperTradingEngine:
         self.candles_bg_max_symbols = max(10, min(600, int(candles_bg_max_symbols)))
         self.candles_bg_max_orders_per_cycle = max(1, min(20, int(candles_bg_max_orders_per_cycle)))
         self.candles_bg_entry_type = str(candles_bg_entry_type or "ML_CANDLES_BG").strip().upper() or "ML_CANDLES_BG"
+        self.candles_bg_block_hours_vn = str(candles_bg_block_hours_vn or "").strip()
+        self._candles_bg_block_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_block_hours_vn)
+        self.candles_bg_long_block_hours_vn = str(candles_bg_long_block_hours_vn or "").strip()
+        self._candles_bg_long_block_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_long_block_hours_vn)
+        self.candles_bg_short_block_hours_vn = str(candles_bg_short_block_hours_vn or "").strip()
+        self._candles_bg_short_block_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_short_block_hours_vn)
+        self.candles_bg_long_strict_hours_vn = str(candles_bg_long_strict_hours_vn or "").strip()
+        self._candles_bg_long_strict_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_long_strict_hours_vn)
+        self.candles_bg_short_strict_hours_vn = str(candles_bg_short_strict_hours_vn or "").strip()
+        self._candles_bg_short_strict_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_short_strict_hours_vn)
+        self.candles_bg_strict_min_win_bonus = max(0.0, min(float(candles_bg_strict_min_win_bonus), 0.25))
+        self.candles_bg_discord_notifier = DiscordWebhookNotifier(
+            enabled=bool(candles_bg_discord_webhook_enabled),
+            webhook_url=candles_bg_discord_webhook_url,
+            username=candles_bg_discord_webhook_username,
+        )
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
         self.reentry_after_sl_cooldown_minutes = max(0, int(reentry_after_sl_cooldown_minutes))
@@ -457,6 +561,8 @@ class PaperTradingEngine:
         self._btc_reversal_block_side: str = "NEUTRAL"
         self._btc_up_shock_long_block_until_ts: float = 0.0
         self._btc_down_shock_short_block_until_ts: float = 0.0
+        self._btc_last_up_shock_ts: float = 0.0
+        self._btc_last_down_shock_ts: float = 0.0
         self._hourly_profiles_cache: dict[str, dict[str, dict[int, dict[str, Any]]]] = {}
         self._hourly_profiles_refreshed_ts: float = 0.0
         self._short_sl_pause_until_ts: float = 0.0
@@ -623,9 +729,16 @@ class PaperTradingEngine:
         await asyncio.to_thread(self._refresh_short_sl_streak_guard_if_needed)
         open_paused = self._is_open_paused()
         entry_hard_blocked = self._is_entry_hard_blocked_now()
+        scan_signal_sides_by_symbol: dict[str, set[str]] = {}
+        for item in signals:
+            self._register_active_signal_side(
+                scan_signal_sides_by_symbol,
+                symbol=str(item.get("symbol") or ""),
+                side=str(item.get("side") or ""),
+            )
 
         # 1) Open simulated orders when price reaches predicted entry for >=75% setups.
-        if (not open_paused) and (not entry_hard_blocked):
+        if not entry_hard_blocked:
             for item in signals:
                 raw_prob = float(item.get("win_probability") or 0.0)
                 if raw_prob < self.min_win_probability:
@@ -633,13 +746,39 @@ class PaperTradingEngine:
 
                 symbol = str(item.get("symbol"))
                 side = str(item.get("side"))
+                if open_paused and not self._should_bypass_instant_sl_global_pause_for_entry_type("LIMIT"):
+                    continue
                 if self._entry_block_reason(symbol=symbol, side=side, entry_type="LIMIT", btc_guard=btc_guard):
+                    continue
+                basic_ml_short_guard_reason = self._basic_ml_post_dump_short_guard_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_short_guard_reason:
+                    continue
+                basic_ml_long_guard_reason = self._basic_ml_post_pump_long_guard_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_long_guard_reason:
+                    continue
+                basic_ml_candle_confirm_reason = self._basic_ml_btc_candle_confirmation_reason(
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                if basic_ml_candle_confirm_reason:
                     continue
                 if self._has_conflicting_open_trade(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
                 if self._is_reentry_cooldown_active(symbol=symbol, side=side, entry_type="LIMIT"):
                     continue
-                if not self._pass_instant_sl_guard(symbol=symbol, side=side):
+                if (
+                    not self._should_bypass_instant_sl_symbol_guard_for_entry_type("LIMIT")
+                    and not self._pass_instant_sl_guard(symbol=symbol, side=side)
+                ):
                     continue
 
                 entry = float(item.get("predicted_entry_price") or 0.0)
@@ -694,6 +833,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                 )
+                required_min_win = self._apply_basic_ml_post_dump_short_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                required_min_win = self._apply_basic_ml_post_pump_long_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
                     continue
                 if not self._pass_short_sl_streak_guard(side=side):
@@ -736,8 +887,14 @@ class PaperTradingEngine:
                 )
 
                 # Trigger condition: market touches/gets through entry.
-                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
-                if not touched:
+                entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
+                    symbol=symbol,
+                    side=side,
+                    market_price=float(market_price),
+                    entry=entry,
+                    btc_guard=btc_guard,
+                )
+                if entry_timing_reason:
                     continue
                 if not self._close_profitable_opposite_trades_on_btc_follow_cluster(
                     target_side=side,
@@ -745,6 +902,7 @@ class PaperTradingEngine:
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                     market_prices=market_prices,
+                    scan_signal_sides_by_symbol=scan_signal_sides_by_symbol,
                 ):
                     continue
                 if not self._handle_opposite_signal_on_touch(
@@ -912,6 +1070,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                 )
+                required_min_win = self._apply_basic_ml_post_dump_short_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                required_min_win = self._apply_basic_ml_post_pump_long_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
                     continue
                 if not self._pass_short_sl_streak_guard(side=side):
@@ -936,8 +1106,14 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
-                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
-                if not touched:
+                entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
+                    symbol=symbol,
+                    side=side,
+                    market_price=float(market_price),
+                    entry=entry,
+                    btc_guard=btc_guard,
+                )
+                if entry_timing_reason:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
@@ -947,6 +1123,7 @@ class PaperTradingEngine:
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                     market_prices=market_prices,
+                    scan_signal_sides_by_symbol=scan_signal_sides_by_symbol,
                 ):
                     continue
                 if not self._handle_opposite_signal_on_touch(
@@ -1091,6 +1268,8 @@ class PaperTradingEngine:
                 if raw_prob < self.candles_bg_min_win_probability:
                     continue
                 side = str(candles_signal.side)
+                if self._candles_bg_block_reason(entry_type=candles_entry_type, side=side):
+                    continue
                 if self._btc_reversal_entry_block_reason(side=side, btc_guard=btc_guard):
                     continue
                 skip_btc_guards = self._skip_btc_guards_for_entry_type(candles_entry_type)
@@ -1115,6 +1294,12 @@ class PaperTradingEngine:
                 )
                 if not can_open_now:
                     continue
+                candles_bg_strict_bonus = self._candles_bg_strict_min_win_bonus_for_now(
+                    entry_type=candles_entry_type,
+                    side=side,
+                )
+                if candles_bg_strict_bonus > 0:
+                    required_min_win = min(0.99, required_min_win + candles_bg_strict_bonus)
                 if not skip_btc_guards:
                     required_min_win = self._apply_bullish_short_nonfollow_min_win_bonus(
                         required_min_win=required_min_win,
@@ -1157,8 +1342,14 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
-                touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
-                if not touched:
+                entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
+                    symbol=symbol,
+                    side=side,
+                    market_price=float(market_price),
+                    entry=entry,
+                    btc_guard=btc_guard,
+                )
+                if entry_timing_reason:
                     continue
                 # ML Candles BG should still honor BTC shock / directional entry blocks like normal ML.
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
@@ -1169,6 +1360,7 @@ class PaperTradingEngine:
                     open_trades_by_symbol=candles_open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                     market_prices=market_prices,
+                    scan_signal_sides_by_symbol=scan_signal_sides_by_symbol,
                 ):
                     continue
                 if not self._handle_opposite_signal_on_touch(
@@ -1289,6 +1481,20 @@ class PaperTradingEngine:
                     entry_price=entry,
                     quantity=quantity,
                 )
+                self._enqueue_ml_candles_bg_open_notification(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
+                    entry=entry,
+                    take_profit=normalized_tp,
+                    stop_loss=normalized_sl,
+                    leverage=leverage,
+                    margin_usdt=margin_usdt,
+                    btc_following=btc_following,
+                    raw_probability=raw_prob,
+                    effective_probability=effective_prob,
+                    pattern_sample=pattern_sample,
+                )
                 opened_candles_orders += 1
 
         # 1b) Separate liquidation+EMA99 model on top volatility symbols.
@@ -1363,6 +1569,18 @@ class PaperTradingEngine:
                     symbol=symbol,
                     btc_guard=btc_guard,
                 )
+                required_min_win = self._apply_basic_ml_post_dump_short_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
+                required_min_win = self._apply_basic_ml_post_pump_long_min_win(
+                    required_min_win=required_min_win,
+                    symbol=symbol,
+                    side=side,
+                    btc_guard=btc_guard,
+                )
                 if effective_prob < required_min_win:
                     continue
                 if not self._pass_short_sl_streak_guard(side=side):
@@ -1382,6 +1600,7 @@ class PaperTradingEngine:
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                     market_prices=market_prices,
+                    scan_signal_sides_by_symbol=scan_signal_sides_by_symbol,
                 ):
                     continue
                 if not self._handle_opposite_signal_on_touch(
@@ -2241,6 +2460,8 @@ class PaperTradingEngine:
     @staticmethod
     def _skip_btc_guards_for_entry_type(entry_type: str | None) -> bool:
         normalized_entry_type = str(entry_type or "").strip().upper()
+        if normalized_entry_type == "ML_CANDLES_BG":
+            return False
         return normalized_entry_type.startswith("ML_CANDLES")
 
     def _apply_bullish_short_nonfollow_min_win_bonus(
@@ -2553,6 +2774,46 @@ class PaperTradingEngine:
         hour_vn, _ = self._current_vn_hour_weekday()
         return f"LIMIT LONG block hour VN ({hour_vn:02d}h)"
 
+    def _is_candles_bg_blocked_now(self, *, entry_type: str, side: str) -> bool:
+        if self._normalize_entry_type_name(entry_type) != self.candles_bg_entry_type:
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        hour_key = int(hour_vn)
+        side_key = str(side or "").upper()
+        if hour_key in self._candles_bg_block_hours_set:
+            return True
+        if side_key == "LONG" and hour_key in self._candles_bg_long_block_hours_set:
+            return True
+        if side_key == "SHORT" and hour_key in self._candles_bg_short_block_hours_set:
+            return True
+        return False
+
+    def _candles_bg_block_reason(self, *, entry_type: str, side: str) -> str | None:
+        if self._normalize_entry_type_name(entry_type) != self.candles_bg_entry_type:
+            return None
+        hour_vn, _ = self._current_vn_hour_weekday()
+        hour_key = int(hour_vn)
+        side_key = str(side or "").upper()
+        if hour_key in self._candles_bg_block_hours_set:
+            return f"ML_CANDLES_BG hour block VN ({hour_vn:02d}h)"
+        if side_key == "LONG" and hour_key in self._candles_bg_long_block_hours_set:
+            return f"ML_CANDLES_BG LONG hour block VN ({hour_vn:02d}h)"
+        if side_key == "SHORT" and hour_key in self._candles_bg_short_block_hours_set:
+            return f"ML_CANDLES_BG SHORT hour block VN ({hour_vn:02d}h)"
+        return None
+
+    def _candles_bg_strict_min_win_bonus_for_now(self, *, entry_type: str, side: str) -> float:
+        if self._normalize_entry_type_name(entry_type) != self.candles_bg_entry_type:
+            return 0.0
+        hour_vn, _ = self._current_vn_hour_weekday()
+        hour_key = int(hour_vn)
+        side_key = str(side or "").upper()
+        if side_key == "LONG" and hour_key in self._candles_bg_long_strict_hours_set:
+            return float(self.candles_bg_strict_min_win_bonus)
+        if side_key == "SHORT" and hour_key in self._candles_bg_short_strict_hours_set:
+            return float(self.candles_bg_strict_min_win_bonus)
+        return 0.0
+
     @staticmethod
     def _normalize_entry_type_name(entry_type: str | None) -> str:
         return str(entry_type or "").strip().upper()
@@ -2647,6 +2908,156 @@ class PaperTradingEngine:
 
         sample_name = str(sample.get("sample_code") or sample.get("sample_key") or "pattern").strip() or "pattern"
         return f"Basic blocked {sample_name} tier C", sample, snapshot
+
+    @staticmethod
+    def _format_notification_price(value: float | None) -> str:
+        if value is None:
+            return "-"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "-"
+        if not math.isfinite(numeric):
+            return "-"
+        text = f"{numeric:.10f}".rstrip("0").rstrip(".")
+        return text or "0"
+
+    @staticmethod
+    def _format_notification_pct(value: float | None) -> str:
+        if value is None:
+            return "-"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return "-"
+        if not math.isfinite(numeric):
+            return "-"
+        return f"{numeric:+.2f}%"
+
+    @staticmethod
+    def _resolve_margin_move_pct(*, side: str, entry: float, price: float, leverage: int) -> float | None:
+        if entry <= 0 or price <= 0 or leverage <= 0:
+            return None
+        if str(side or "").upper() == "LONG":
+            raw_pct = ((price - entry) / entry) * 100.0
+        else:
+            raw_pct = ((entry - price) / entry) * 100.0
+        return raw_pct * float(leverage)
+
+    def _build_pattern_summary(self, sample: dict[str, Any] | None) -> str:
+        sample_obj = self._coerce_pattern_sample(sample)
+        if not sample_obj:
+            return "-"
+        sample_name = str(sample_obj.get("sample_code") or sample_obj.get("sample_name") or "-").strip() or "-"
+        tier = self._pattern_sample_quality_tier(sample_obj) or "-"
+        win_rate = self._pattern_sample_win_rate_pct(sample_obj)
+        notes = str(sample_obj.get("sample_notes") or "").strip()
+        parts = [f"{sample_name} {tier}"]
+        if math.isfinite(win_rate):
+            parts.append(f"{win_rate:.1f}%")
+        if notes:
+            parts.append(notes)
+        return " | ".join(parts)
+
+    async def _send_ml_candles_bg_open_notification(
+        self,
+        *,
+        trade_id: int,
+        symbol: str,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        leverage: int,
+        margin_usdt: float,
+        btc_following: bool,
+        raw_probability: float,
+        effective_probability: float,
+        pattern_sample: dict[str, Any] | None,
+    ) -> None:
+        notifier = self.candles_bg_discord_notifier
+        if not notifier.is_enabled:
+            return
+        tp_margin_pct = self._resolve_margin_move_pct(
+            side=side,
+            entry=entry,
+            price=take_profit,
+            leverage=leverage,
+        )
+        sl_margin_pct = self._resolve_margin_move_pct(
+            side=side,
+            entry=entry,
+            price=stop_loss,
+            leverage=leverage,
+        )
+        pattern_summary = self._build_pattern_summary(pattern_sample)
+        now_vn = datetime.now(self._vn_tz).strftime("%Y-%m-%d %H:%M:%S ICT")
+        embed = {
+            "title": f"ML_CANDLES_BG {str(side or '').upper()} filled: {symbol}",
+            "color": 5763719 if str(side or '').upper() == "LONG" else 15548997,
+            "fields": [
+                {"name": "Trade ID", "value": str(trade_id), "inline": True},
+                {"name": "Side", "value": str(side or "-").upper(), "inline": True},
+                {"name": "BTC Follow", "value": "YES" if btc_following else "NO", "inline": True},
+                {"name": "Entry", "value": self._format_notification_price(entry), "inline": True},
+                {"name": "TP", "value": f"{self._format_notification_price(take_profit)} ({self._format_notification_pct(tp_margin_pct)})", "inline": True},
+                {"name": "SL", "value": f"{self._format_notification_price(stop_loss)} ({self._format_notification_pct(sl_margin_pct)})", "inline": True},
+                {"name": "Leverage", "value": f"{int(leverage)}x", "inline": True},
+                {"name": "Margin", "value": f"{float(margin_usdt):.2f}", "inline": True},
+                {"name": "Win Prob", "value": f"raw {float(raw_probability):.4f} | eff {float(effective_probability):.4f}", "inline": True},
+                {"name": "Pattern", "value": pattern_summary[:1024] or "-", "inline": False},
+                {"name": "Opened At", "value": now_vn, "inline": False},
+            ],
+        }
+        await asyncio.to_thread(notifier.send, embeds=[embed])
+
+    def _enqueue_ml_candles_bg_open_notification(
+        self,
+        *,
+        trade_id: int,
+        symbol: str,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        leverage: int,
+        margin_usdt: float,
+        btc_following: bool,
+        raw_probability: float,
+        effective_probability: float,
+        pattern_sample: dict[str, Any] | None,
+    ) -> None:
+        notifier = self.candles_bg_discord_notifier
+        if not notifier.is_enabled:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._send_ml_candles_bg_open_notification(
+                trade_id=trade_id,
+                symbol=symbol,
+                side=side,
+                entry=entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                leverage=leverage,
+                margin_usdt=margin_usdt,
+                btc_following=btc_following,
+                raw_probability=raw_probability,
+                effective_probability=effective_probability,
+                pattern_sample=pattern_sample,
+            )
+        )
+        task.add_done_callback(lambda task: self._log_notification_task_error(task, symbol=symbol))
+
+    @staticmethod
+    def _log_notification_task_error(task: asyncio.Task[Any], *, symbol: str) -> None:
+        try:
+            task.result()
+        except Exception as exc:
+            logger.warning("ML_CANDLES_BG Discord notification failed for %s: %s", symbol, exc)
 
     def _evaluate_ml_candles_bg_pattern_gate(
         self,
@@ -3194,6 +3605,66 @@ class PaperTradingEngine:
             return float(value) != 0.0
         return str(value).strip().lower() in {"1", "true", "yes", "y", "t", "on"}
 
+    def _register_active_signal_side(
+        self,
+        active_sides_by_symbol: dict[str, set[str]],
+        *,
+        symbol: str,
+        side: str,
+    ) -> None:
+        key = self._normalize_symbol_key(symbol)
+        side_key = str(side or "").upper()
+        if not key or side_key not in {"LONG", "SHORT"}:
+            return
+        active_sides_by_symbol.setdefault(key, set()).add(side_key)
+
+    def _trade_has_active_same_side_signal(
+        self,
+        *,
+        trade: dict[str, Any],
+        market_prices: dict[str, float],
+        scan_signal_sides_by_symbol: dict[str, set[str]] | None = None,
+    ) -> bool:
+        symbol = str(trade.get("symbol") or "").strip()
+        side_key = str(trade.get("side") or "").upper()
+        if not symbol or side_key not in {"LONG", "SHORT"}:
+            return False
+
+        symbol_key = self._normalize_symbol_key(symbol)
+        active_scan_sides = (scan_signal_sides_by_symbol or {}).get(symbol_key, set())
+        if side_key in active_scan_sides:
+            return True
+
+        entry_type = self._normalize_entry_type_name(trade.get("entry_type"))
+        market_price = market_prices.get(symbol)
+        if market_price is None:
+            market_price = self._resolve_market_price(symbol)
+        if market_price is None or float(market_price) <= 0:
+            return False
+
+        try:
+            if entry_type == "ML_TEST" and self.predictor_test is not None:
+                signal = self.predictor_test.predict(symbol, float(market_price))
+                return (
+                    float(getattr(signal, "win_probability", 0.0)) >= self.test_ml_min_win_probability
+                    and str(getattr(signal, "side", "")).upper() == side_key
+                )
+            if entry_type == self.candles_bg_entry_type and self.predictor_candles is not None:
+                signal = self.predictor_candles.predict(symbol, float(market_price))
+                return (
+                    float(getattr(signal, "win_probability", 0.0)) >= self.candles_bg_min_win_probability
+                    and str(getattr(signal, "side", "")).upper() == side_key
+                )
+            if entry_type == "LIQ_EMA99" and self.liquid_predictor is not None:
+                signal = self.liquid_predictor.predict(symbol, float(market_price))
+                return (
+                    float(getattr(signal, "win_probability", 0.0)) >= self.liquid_min_win_probability
+                    and str(getattr(signal, "side", "")).upper() == side_key
+                )
+        except Exception:
+            return False
+        return False
+
     def _close_profitable_opposite_trades_on_btc_follow_cluster(
         self,
         *,
@@ -3202,6 +3673,7 @@ class PaperTradingEngine:
         open_trades_by_symbol: dict[str, list[dict[str, Any]]],
         closed_trade_ids: set[int],
         market_prices: dict[str, float],
+        scan_signal_sides_by_symbol: dict[str, set[str]] | None = None,
     ) -> bool:
         if current_btc_following is not True:
             return True
@@ -3238,6 +3710,12 @@ class PaperTradingEngine:
                     continue
                 side = str(row.get("side") or "").upper()
                 if side not in {"LONG", "SHORT"} or side == target_side_key:
+                    continue
+                if self._trade_has_active_same_side_signal(
+                    trade=row,
+                    market_prices=resolved_prices,
+                    scan_signal_sides_by_symbol=scan_signal_sides_by_symbol,
+                ):
                     continue
 
                 symbol = str(row.get("symbol") or "")
@@ -3537,6 +4015,11 @@ class PaperTradingEngine:
             "kill_short_15m_active": False,
             "kill_short_15m_confirmation_ready": False,
             "kill_short_15m_entry_buffer_pct": 0.0,
+            "basic_ml_15m_cluster_side": "NEUTRAL",
+            "basic_ml_15m_cluster_score": 0.0,
+            "basic_ml_15m_last_candle_side": "NEUTRAL",
+            "basic_ml_15m_long_confirmation_ready": False,
+            "basic_ml_15m_short_confirmation_ready": False,
         }
         if not self.btc_filter_enabled and not self.btc_shock_pause_enabled:
             return neutral
@@ -3611,6 +4094,7 @@ class PaperTradingEngine:
                     shock_direction = "FLAT"
 
                 kill_short_15m = self._analyze_btc_kill_short_15m(rows)
+                basic_ml_candle_confirm = self._analyze_basic_ml_btc_confirmation_15m(rows)
                 payload = {
                     "side": trend_side,
                     "confidence": float(confidence),
@@ -3636,6 +4120,11 @@ class PaperTradingEngine:
                     "kill_short_15m_active": bool(kill_short_15m.get("active")),
                     "kill_short_15m_confirmation_ready": bool(kill_short_15m.get("confirmation_ready")),
                     "kill_short_15m_entry_buffer_pct": float(kill_short_15m.get("entry_buffer_pct") or 0.0),
+                    "basic_ml_15m_cluster_side": str(basic_ml_candle_confirm.get("cluster_side") or "NEUTRAL").upper(),
+                    "basic_ml_15m_cluster_score": float(basic_ml_candle_confirm.get("cluster_score") or 0.0),
+                    "basic_ml_15m_last_candle_side": str(basic_ml_candle_confirm.get("last_candle_side") or "NEUTRAL").upper(),
+                    "basic_ml_15m_long_confirmation_ready": bool(basic_ml_candle_confirm.get("long_confirmation_ready")),
+                    "basic_ml_15m_short_confirmation_ready": bool(basic_ml_candle_confirm.get("short_confirmation_ready")),
                 }
         except Exception:
             payload = cached[1] if cached is not None else neutral
@@ -3867,6 +4356,130 @@ class PaperTradingEngine:
         remain_minutes = max(1, int(math.ceil((self._btc_reversal_block_until_ts - now_ts) / 60.0)))
         return f"BTC 1H reversal cooldown {side_key} ({remain_minutes}m left)"
 
+    def _resolve_recent_btc_down_shock_age_minutes(self) -> float | None:
+        if self._btc_last_down_shock_ts <= 0:
+            return None
+        return max(0.0, (time.time() - self._btc_last_down_shock_ts) / 60.0)
+
+    def _is_basic_ml_strong_btc_1h_short(self, btc_guard: dict[str, Any] | None) -> bool:
+        guard = btc_guard or {}
+        trend_1h_side = str(guard.get("trend_1h_side") or guard.get("side_1h") or "NEUTRAL").upper()
+        try:
+            trend_1h_confidence = float(guard.get("trend_1h_confidence") or guard.get("confidence_1h") or 0.0)
+        except Exception:
+            trend_1h_confidence = 0.0
+        return trend_1h_side == "SHORT" and trend_1h_confidence >= self.basic_ml_post_dump_short_min_1h_confidence
+
+    def _basic_ml_post_dump_short_guard_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> str | None:
+        del symbol
+        if not self.basic_ml_post_dump_short_guard_enabled:
+            return None
+        if str(side or "").upper() != "SHORT":
+            return None
+        if self.basic_ml_reversal_short_guard_enabled and self._resolve_btc_1h_reversal_block_side(btc_guard=btc_guard) == "SHORT":
+            return "Basic ML blocked by BTC 1H reversal short"
+        shock_age_minutes = self._resolve_recent_btc_down_shock_age_minutes()
+        if shock_age_minutes is None:
+            return None
+        if shock_age_minutes > self.basic_ml_post_dump_short_recovery_minutes:
+            return None
+        if shock_age_minutes < self.basic_ml_post_dump_short_block_minutes:
+            remain = max(1, int(math.ceil(self.basic_ml_post_dump_short_block_minutes - shock_age_minutes)))
+            return f"Basic ML blocked after BTC down shock ({remain}m left)"
+        if self._is_basic_ml_strong_btc_1h_short(btc_guard):
+            return None
+        remain = max(1, int(math.ceil(self.basic_ml_post_dump_short_recovery_minutes - shock_age_minutes)))
+        return f"Basic ML blocked in BTC bottom regime ({remain}m left)"
+
+    def _apply_basic_ml_post_dump_short_min_win(
+        self,
+        *,
+        required_min_win: float,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        if not self.basic_ml_post_dump_short_guard_enabled:
+            return required_min_win
+        if str(side or "").upper() != "SHORT":
+            return required_min_win
+        shock_age_minutes = self._resolve_recent_btc_down_shock_age_minutes()
+        if shock_age_minutes is None or shock_age_minutes > self.basic_ml_post_dump_short_recovery_minutes:
+            return required_min_win
+        follows_btc = self._is_symbol_following_btc(symbol)
+        floor = self.basic_ml_post_dump_short_follow_min_win if follows_btc else self.basic_ml_post_dump_short_nonfollow_min_win
+        if not self._is_basic_ml_strong_btc_1h_short(btc_guard):
+            floor = max(floor, self.basic_ml_post_dump_short_nonfollow_min_win)
+        return max(float(required_min_win), float(floor))
+
+    def _resolve_recent_btc_up_shock_age_minutes(self) -> float | None:
+        if self._btc_last_up_shock_ts <= 0:
+            return None
+        return max(0.0, (time.time() - self._btc_last_up_shock_ts) / 60.0)
+
+    def _is_basic_ml_strong_btc_1h_long(self, btc_guard: dict[str, Any] | None) -> bool:
+        guard = btc_guard or {}
+        trend_1h_side = str(guard.get("trend_1h_side") or guard.get("side_1h") or "NEUTRAL").upper()
+        try:
+            trend_1h_confidence = float(guard.get("trend_1h_confidence") or guard.get("confidence_1h") or 0.0)
+        except Exception:
+            trend_1h_confidence = 0.0
+        return trend_1h_side == "LONG" and trend_1h_confidence >= self.basic_ml_post_pump_long_min_1h_confidence
+
+    def _basic_ml_post_pump_long_guard_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> str | None:
+        del symbol
+        if not self.basic_ml_post_pump_long_guard_enabled:
+            return None
+        if str(side or "").upper() != "LONG":
+            return None
+        if self.basic_ml_reversal_long_guard_enabled and self._resolve_btc_1h_reversal_block_side(btc_guard=btc_guard) == "LONG":
+            return "Basic ML blocked by BTC 1H reversal long"
+        shock_age_minutes = self._resolve_recent_btc_up_shock_age_minutes()
+        if shock_age_minutes is None:
+            return None
+        if shock_age_minutes > self.basic_ml_post_pump_long_recovery_minutes:
+            return None
+        if shock_age_minutes < self.basic_ml_post_pump_long_block_minutes:
+            remain = max(1, int(math.ceil(self.basic_ml_post_pump_long_block_minutes - shock_age_minutes)))
+            return f"Basic ML blocked after BTC up shock ({remain}m left)"
+        if self._is_basic_ml_strong_btc_1h_long(btc_guard):
+            return None
+        remain = max(1, int(math.ceil(self.basic_ml_post_pump_long_recovery_minutes - shock_age_minutes)))
+        return f"Basic ML blocked in BTC top regime ({remain}m left)"
+
+    def _apply_basic_ml_post_pump_long_min_win(
+        self,
+        *,
+        required_min_win: float,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        if not self.basic_ml_post_pump_long_guard_enabled:
+            return required_min_win
+        if str(side or "").upper() != "LONG":
+            return required_min_win
+        shock_age_minutes = self._resolve_recent_btc_up_shock_age_minutes()
+        if shock_age_minutes is None or shock_age_minutes > self.basic_ml_post_pump_long_recovery_minutes:
+            return required_min_win
+        follows_btc = self._is_symbol_following_btc(symbol)
+        floor = self.basic_ml_post_pump_long_follow_min_win if follows_btc else self.basic_ml_post_pump_long_nonfollow_min_win
+        if not self._is_basic_ml_strong_btc_1h_long(btc_guard):
+            floor = max(floor, self.basic_ml_post_pump_long_nonfollow_min_win)
+        return max(float(required_min_win), float(floor))
+
     def _should_close_profit_on_btc_trend(
         self,
         *,
@@ -4067,10 +4680,12 @@ class PaperTradingEngine:
         if shock_direction == "UP" and self.btc_shock_up_long_block_minutes > 0:
             block_minutes = max(self.btc_shock_cooldown_minutes, self.btc_shock_up_long_block_minutes)
             long_block_until = now + (block_minutes * 60)
+            self._btc_last_up_shock_ts = max(self._btc_last_up_shock_ts, now)
             self._btc_up_shock_long_block_until_ts = max(self._btc_up_shock_long_block_until_ts, long_block_until)
         if shock_direction == "DOWN" and self.btc_shock_down_short_block_minutes > 0:
             block_minutes = max(self.btc_shock_cooldown_minutes, self.btc_shock_down_short_block_minutes)
             short_block_until = now + (block_minutes * 60)
+            self._btc_last_down_shock_ts = max(self._btc_last_down_shock_ts, now)
             self._btc_down_shock_short_block_until_ts = max(self._btc_down_shock_short_block_until_ts, short_block_until)
 
     def _pass_btc_shock_directional_guard(self, symbol: str, side: str, btc_guard: dict[str, Any]) -> bool:
@@ -4316,6 +4931,193 @@ class PaperTradingEngine:
             return None
         return "BTC 15m kill-short guard (wait red confirmation)"
 
+    def _classify_basic_ml_btc_candle_side(
+        self,
+        *,
+        candle: list[Any],
+        min_body_pct: float,
+    ) -> tuple[str, float]:
+        if len(candle) < 5:
+            return "NEUTRAL", 0.0
+        try:
+            open_px = float(candle[1])
+            close_px = float(candle[4])
+        except Exception:
+            return "NEUTRAL", 0.0
+        if open_px <= 0:
+            return "NEUTRAL", 0.0
+        body_pct = ((close_px - open_px) / open_px) * 100.0
+        threshold = max(0.01, float(min_body_pct))
+        if body_pct >= threshold:
+            return "LONG", float(body_pct)
+        if body_pct <= -threshold:
+            return "SHORT", float(body_pct)
+        return "NEUTRAL", float(body_pct)
+
+    def _analyze_basic_ml_btc_confirmation_15m(self, rows: list[list[Any]]) -> dict[str, Any]:
+        payload = {
+            "cluster_side": "NEUTRAL",
+            "cluster_score": 0.0,
+            "last_candle_side": "NEUTRAL",
+            "long_confirmation_ready": False,
+            "short_confirmation_ready": False,
+        }
+        if not self.basic_ml_btc_candle_confirm_enabled:
+            return payload
+        candles = [row for row in rows if len(row) >= 5]
+        if len(candles) < 6:
+            return payload
+
+        current_row = candles[-1]
+        closed_rows = candles[:-1]
+        if len(closed_rows) < 4:
+            return payload
+        closes = [float(row[4]) for row in closed_rows]
+        if len(closes) < 60:
+            return payload
+
+        current_close = float(current_row[4])
+        current_closes = closes + [current_close]
+        ema_fast = self._ema_last(current_closes[-120:], period=21)
+        ema_slow = self._ema_last(current_closes[-160:], period=55)
+        recent_rows = (closed_rows[-2:] + [current_row]) if len(closed_rows) >= 2 else candles[-3:]
+        weights = (0.75, 1.0, 1.35)
+        body_denominator = max(self.basic_ml_btc_candle_confirm_min_body_pct * 2.5, 0.2)
+        body_score = 0.0
+        weight_sum = 0.0
+        directions: list[str] = []
+        for weight, candle in zip(weights, recent_rows):
+            candle_side, body_pct = self._classify_basic_ml_btc_candle_side(
+                candle=candle,
+                min_body_pct=self.basic_ml_btc_candle_confirm_min_body_pct,
+            )
+            directions.append(candle_side)
+            body_component = self._clamp(body_pct / body_denominator, -1.0, 1.0)
+            body_score += body_component * weight
+            weight_sum += weight
+        weighted_body_score = body_score / max(weight_sum, 1e-12)
+
+        anchor_close = float(closed_rows[-3][4]) if len(closed_rows) >= 3 else float(closed_rows[0][4])
+        momentum_pct = 0.0
+        if abs(anchor_close) > 1e-12:
+            momentum_pct = ((current_close - anchor_close) / anchor_close) * 100.0
+        momentum_denominator = max(self.basic_ml_btc_candle_confirm_min_body_pct * 4.0, 0.45)
+        momentum_component = self._clamp(momentum_pct / momentum_denominator, -1.0, 1.0)
+
+        ema_component = 0.0
+        if ema_fast > 0 and ema_slow > 0:
+            if current_close >= ema_fast and ema_fast >= (ema_slow * 0.9995):
+                ema_component = 1.0
+            elif current_close <= ema_fast and ema_fast <= (ema_slow * 1.0005):
+                ema_component = -1.0
+            elif current_close > ema_fast:
+                ema_component = 0.35
+            elif current_close < ema_fast:
+                ema_component = -0.35
+
+        cluster_score = (weighted_body_score * 0.58) + (momentum_component * 0.22) + (ema_component * 0.20)
+        threshold = self.basic_ml_btc_candle_confirm_cluster_score
+        if cluster_score >= threshold:
+            cluster_side = "LONG"
+        elif cluster_score <= -threshold:
+            cluster_side = "SHORT"
+        else:
+            cluster_side = "NEUTRAL"
+
+        green_count = sum(1 for item in directions if item == "LONG")
+        red_count = sum(1 for item in directions if item == "SHORT")
+        last_candle_side = directions[-1] if directions else "NEUTRAL"
+        long_confirmation_ready = bool(
+            cluster_side == "LONG"
+            and last_candle_side == "LONG"
+            and green_count >= 2
+            and (ema_fast <= 0 or current_close >= (ema_fast * 0.9992))
+        )
+        short_confirmation_ready = bool(
+            cluster_side == "SHORT"
+            and last_candle_side == "SHORT"
+            and red_count >= 2
+            and (ema_fast <= 0 or current_close <= (ema_fast * 1.0008))
+        )
+
+        payload.update(
+            {
+                "cluster_side": cluster_side,
+                "cluster_score": float(cluster_score),
+                "last_candle_side": last_candle_side,
+                "long_confirmation_ready": long_confirmation_ready,
+                "short_confirmation_ready": short_confirmation_ready,
+            }
+        )
+        return payload
+
+    def _basic_ml_btc_candle_confirmation_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> str | None:
+        del symbol
+        if not self.basic_ml_btc_candle_confirm_enabled:
+            return None
+        side_key = str(side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        if side_key == "SHORT":
+            kill_short_reason = self._btc_kill_short_guard_reason(side=side_key, btc_guard=btc_guard or {})
+            if kill_short_reason:
+                return kill_short_reason
+
+        guard = btc_guard or {}
+        cluster_side = str(guard.get("basic_ml_15m_cluster_side") or "NEUTRAL").upper()
+        last_candle_side = str(guard.get("basic_ml_15m_last_candle_side") or "NEUTRAL").upper()
+        try:
+            cluster_score = abs(float(guard.get("basic_ml_15m_cluster_score") or 0.0))
+        except Exception:
+            cluster_score = 0.0
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        trend_1h_side = str(guard.get("trend_1h_side") or "NEUTRAL").upper()
+        try:
+            trend_confidence = float(guard.get("confidence") or 0.0)
+        except Exception:
+            trend_confidence = 0.0
+        try:
+            trend_1h_confidence = float(guard.get("trend_1h_confidence") or 0.0)
+        except Exception:
+            trend_1h_confidence = 0.0
+
+        ready_flag = bool(
+            guard.get("basic_ml_15m_long_confirmation_ready")
+            if side_key == "LONG"
+            else guard.get("basic_ml_15m_short_confirmation_ready")
+        )
+        trend_confirms = (
+            trend_side == side_key
+            and trend_confidence >= self.basic_ml_btc_candle_confirm_min_trend_confidence
+        )
+        trend_1h_confirms = (
+            trend_1h_side == side_key
+            and trend_1h_confidence >= self.basic_ml_btc_candle_confirm_min_1h_confidence
+        )
+        if ready_flag or (trend_confirms and last_candle_side == side_key) or (trend_confirms and trend_1h_confirms):
+            return None
+
+        opposite_side = "SHORT" if side_key == "LONG" else "LONG"
+        opposite_strong = bool(
+            (cluster_side == opposite_side and cluster_score >= (self.basic_ml_btc_candle_confirm_cluster_score * 0.85))
+            or (trend_side == opposite_side and trend_confidence >= self.basic_ml_btc_candle_confirm_min_trend_confidence)
+            or (trend_1h_side == opposite_side and trend_1h_confidence >= self.basic_ml_btc_candle_confirm_min_1h_confidence)
+        )
+        wait_label = "green" if side_key == "LONG" else "red"
+        if opposite_strong:
+            return f"Basic ML wait BTC 15m {wait_label} confirmation"
+        if last_candle_side != side_key:
+            return f"Basic ML wait BTC 15m {wait_label} confirmation"
+        if cluster_side == "NEUTRAL" and not trend_confirms:
+            return f"Basic ML wait BTC 15m {wait_label} confirmation"
+        return None
+
     def _pass_btc_up_shock_long_guard(self, side: str, btc_guard: dict[str, Any]) -> bool:
         # Backward-compatible helper used by external precheck code.
         if str(side or "").upper() != "LONG":
@@ -4362,6 +5164,17 @@ class PaperTradingEngine:
             self._open_pause_reason = None
             return False
         return True
+
+    def _should_bypass_instant_sl_global_pause_for_entry_type(self, entry_type: str) -> bool:
+        entry_type_key = str(entry_type or "").strip().upper()
+        if entry_type_key != "LIMIT":
+            return False
+        reason = str(self._open_pause_reason or "").strip().upper()
+        return reason.startswith("INSTANT-SL GLOBAL PAUSE")
+
+    def _should_bypass_instant_sl_symbol_guard_for_entry_type(self, entry_type: str) -> bool:
+        entry_type_key = str(entry_type or "").strip().upper()
+        return entry_type_key == "LIMIT"
 
     @staticmethod
     def _ema_last(values: list[float], period: int) -> float:
@@ -4430,6 +5243,40 @@ class PaperTradingEngine:
         if side_key == "SHORT":
             return market_price >= (entry * (1.0 - buffer_pct))
         return False
+
+    @staticmethod
+    def _entry_touched_strict(side: str, market_price: float, entry: float) -> bool:
+        side_key = str(side or "").upper()
+        if entry <= 0:
+            return False
+        if side_key == "LONG":
+            return market_price <= entry
+        if side_key == "SHORT":
+            return market_price >= entry
+        return False
+
+    def _ml_candles_bg_entry_timing_reason(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        market_price: float,
+        entry: float,
+        btc_guard: dict[str, Any] | None,
+    ) -> str | None:
+        if not self._entry_touched(side=side, market_price=market_price, entry=entry):
+            return "Entry not touched"
+
+        side_key = str(side or "").upper()
+        if side_key != "SHORT":
+            return None
+        if not self._is_btc_bullish_regime(btc_guard):
+            return None
+        if not self._entry_touched_strict(side=side_key, market_price=market_price, entry=entry):
+            return "ML_CANDLES_BG short wait retest"
+        if not self._is_short_top_test_rejection(symbol=symbol):
+            return "ML_CANDLES_BG short wait rejection"
+        return None
 
     @staticmethod
     def _pct_returns(closes: list[float]) -> list[float]:
@@ -4813,3 +5660,6 @@ class PaperTradingEngine:
 
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
         return held_seconds >= (self.max_hold_minutes * 60)
+
+
+
