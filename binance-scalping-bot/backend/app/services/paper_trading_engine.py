@@ -193,6 +193,8 @@ class PaperTradingEngine:
         candles_bg_strict_min_win_bonus: float = 0.04,
         candles_bg_bullish_short_entry_buffer_pct: float = 0.003,
         candles_bg_bullish_short_nonfollow_extra_buffer_pct: float = 0.001,
+        candles_bg_bad_hour_aligned_entry_buffer_pct: float = 0.0025,
+        candles_bg_block_countertrend_strong_btc: bool = True,
         candles_bg_discord_webhook_enabled: bool = False,
         candles_bg_discord_webhook_url: str = "",
         candles_bg_discord_webhook_username: str = "ML Candles BG Bot",
@@ -230,6 +232,7 @@ class PaperTradingEngine:
         hourly_bad_window_strict_win_rate_pct: float = 53.0,
         hourly_bad_window_strict_min_win_bonus: float = 0.04,
         hourly_bad_window_countertrend_hard_block: bool = True,
+        bad_hour_aligned_entry_buffer_pct: float = 0.002,
         bullish_short_nonfollow_max_open_ratio: float = 0.25,
         bullish_short_nonfollow_min_win_bonus: float = 0.05,
         short_sl_streak_guard_enabled: bool = True,
@@ -464,6 +467,11 @@ class PaperTradingEngine:
             0.0,
             min(float(candles_bg_bullish_short_nonfollow_extra_buffer_pct), 0.02),
         )
+        self.candles_bg_bad_hour_aligned_entry_buffer_pct = max(
+            0.0,
+            min(float(candles_bg_bad_hour_aligned_entry_buffer_pct), 0.02),
+        )
+        self.candles_bg_block_countertrend_strong_btc = bool(candles_bg_block_countertrend_strong_btc)
         self.candles_bg_discord_notifier = DiscordWebhookNotifier(
             enabled=bool(candles_bg_discord_webhook_enabled),
             webhook_url=candles_bg_discord_webhook_url,
@@ -522,6 +530,7 @@ class PaperTradingEngine:
             self.hourly_bad_window_strict_win_rate_pct = self.hourly_bad_window_block_win_rate_pct
         self.hourly_bad_window_strict_min_win_bonus = max(0.0, min(float(hourly_bad_window_strict_min_win_bonus), 0.25))
         self.hourly_bad_window_countertrend_hard_block = bool(hourly_bad_window_countertrend_hard_block)
+        self.bad_hour_aligned_entry_buffer_pct = max(0.0, min(float(bad_hour_aligned_entry_buffer_pct), 0.02))
         self.bullish_short_nonfollow_max_open_ratio = max(0.0, min(float(bullish_short_nonfollow_max_open_ratio), 0.9))
         self.bullish_short_nonfollow_min_win_bonus = max(0.0, min(float(bullish_short_nonfollow_min_win_bonus), 0.25))
         self.short_sl_streak_guard_enabled = bool(short_sl_streak_guard_enabled)
@@ -892,6 +901,15 @@ class PaperTradingEngine:
                     market_price=float(market_price),
                     btc_guard=btc_guard,
                 )
+                entry, tp, sl = self._adjust_entry_for_bad_hour_aligned_btc_trend(
+                    entry_type="LIMIT",
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
 
                 # Trigger condition: market touches/gets through entry.
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
@@ -1107,6 +1125,15 @@ class PaperTradingEngine:
                 if entry <= 0 or tp <= 0 or sl <= 0:
                     continue
 
+                entry, tp, sl = self._adjust_entry_for_bad_hour_aligned_btc_trend(
+                    entry_type="ML_TEST",
+                    side=side,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
@@ -1266,6 +1293,8 @@ class PaperTradingEngine:
                 if self._candles_bg_block_reason(entry_type=candles_entry_type, side=side):
                     continue
                 if self._btc_reversal_entry_block_reason(side=side, btc_guard=btc_guard):
+                    continue
+                if self._ml_candles_bg_countertrend_reason(side=side, btc_guard=btc_guard):
                     continue
                 skip_btc_guards = self._skip_btc_guards_for_entry_type(candles_entry_type)
                 effective_prob = self._apply_hourly_profile_to_probability(
@@ -2435,6 +2464,15 @@ class PaperTradingEngine:
             confidence = 0.0
         return trend_side == "LONG" and confidence >= self.btc_filter_min_confidence
 
+    def _is_btc_bearish_regime(self, btc_guard: dict[str, Any] | None) -> bool:
+        guard = btc_guard or {}
+        trend_side = str(guard.get("side") or "NEUTRAL").upper()
+        try:
+            confidence = float(guard.get("confidence") or 0.0)
+        except Exception:
+            confidence = 0.0
+        return trend_side == "SHORT" and confidence >= self.btc_filter_min_confidence
+
     @staticmethod
     def _count_open_positions_by_side(
         open_trades_by_symbol: dict[str, list[dict[str, Any]]],
@@ -2826,6 +2864,18 @@ class PaperTradingEngine:
         if side_key == "SHORT" and hour_key in self._candles_bg_short_strict_hours_set:
             return float(self.candles_bg_strict_min_win_bonus)
         return 0.0
+
+    def _is_candles_bg_strict_hour_now(self, *, entry_type: str, side: str) -> bool:
+        if self._normalize_entry_type_name(entry_type) != self.candles_bg_entry_type:
+            return False
+        hour_vn, _ = self._current_vn_hour_weekday()
+        hour_key = int(hour_vn)
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            return hour_key in self._candles_bg_long_strict_hours_set
+        if side_key == "SHORT":
+            return hour_key in self._candles_bg_short_strict_hours_set
+        return False
 
     @staticmethod
     def _normalize_entry_type_name(entry_type: str | None) -> str:
@@ -5285,6 +5335,134 @@ class PaperTradingEngine:
             buffer_pct += float(self.candles_bg_bullish_short_nonfollow_extra_buffer_pct)
         return max(0.0, buffer_pct)
 
+    def _ml_candles_bg_countertrend_reason(
+        self,
+        *,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> str | None:
+        if not self.candles_bg_block_countertrend_strong_btc:
+            return None
+        side_key = str(side or "").upper()
+        if side_key == "SHORT" and self._is_btc_bullish_regime(btc_guard):
+            return "ML_CANDLES_BG blocked SHORT in strong BTC LONG trend"
+        if side_key == "LONG" and self._is_btc_bearish_regime(btc_guard):
+            return "ML_CANDLES_BG blocked LONG in strong BTC SHORT trend"
+        return None
+
+    def _is_hourly_bad_window_strict_now(
+        self,
+        *,
+        side: str,
+        entry_type: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> bool:
+        if not self.hourly_bad_window_enabled:
+            return False
+        profile = self._find_hourly_profile_for_now(
+            side=side,
+            entry_type=entry_type,
+            btc_guard=btc_guard or {},
+            min_total_orders=self.hourly_bad_window_min_samples,
+        )
+        if not profile:
+            return False
+        wins = int(profile.get("wins") or 0)
+        losses = int(profile.get("losses") or 0)
+        win_rate_pct = float(profile.get("win_rate_pct") or 0.0)
+        net_pnl = float(profile.get("net_pnl") or 0.0)
+        block_bad_window = (
+            win_rate_pct <= self.hourly_bad_window_block_win_rate_pct
+            or (losses > wins and net_pnl < 0.0)
+        )
+        if block_bad_window:
+            return False
+        return win_rate_pct <= self.hourly_bad_window_strict_win_rate_pct or net_pnl < 0.0
+
+    def _resolve_ml_candles_bg_bad_hour_entry_buffer_pct(
+        self,
+        *,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        side_key = str(side or "").upper()
+        aligned_with_strong_btc = (side_key == "LONG" and self._is_btc_bullish_regime(btc_guard)) or (
+            side_key == "SHORT" and self._is_btc_bearish_regime(btc_guard)
+        )
+        if not aligned_with_strong_btc:
+            return 0.0
+        if not (
+            self._is_candles_bg_strict_hour_now(entry_type=self.candles_bg_entry_type, side=side_key)
+            or self._is_hourly_bad_window_strict_now(
+                side=side_key,
+                entry_type=self.candles_bg_entry_type,
+                btc_guard=btc_guard,
+            )
+        ):
+            return 0.0
+        return max(0.0, float(self.candles_bg_bad_hour_aligned_entry_buffer_pct))
+
+    def _resolve_bad_hour_aligned_entry_buffer_pct(
+        self,
+        *,
+        entry_type: str,
+        side: str,
+        btc_guard: dict[str, Any] | None,
+    ) -> float:
+        entry_type_key = self._normalize_entry_type_name(entry_type)
+        side_key = str(side or "").upper()
+        if entry_type_key == self.candles_bg_entry_type:
+            return self._resolve_ml_candles_bg_bad_hour_entry_buffer_pct(side=side_key, btc_guard=btc_guard)
+        if entry_type_key not in {"LIMIT", "ML_TEST"}:
+            return 0.0
+        aligned_with_strong_btc = (side_key == "LONG" and self._is_btc_bullish_regime(btc_guard)) or (
+            side_key == "SHORT" and self._is_btc_bearish_regime(btc_guard)
+        )
+        if not aligned_with_strong_btc:
+            return 0.0
+        if not self._is_hourly_bad_window_strict_now(
+            side=side_key,
+            entry_type=entry_type_key,
+            btc_guard=btc_guard,
+        ):
+            return 0.0
+        return max(0.0, float(self.bad_hour_aligned_entry_buffer_pct))
+
+    def _adjust_entry_for_bad_hour_aligned_btc_trend(
+        self,
+        *,
+        entry_type: str,
+        side: str,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        market_price: float,
+        btc_guard: dict[str, Any] | None,
+    ) -> tuple[float, float, float]:
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0 or market_price <= 0:
+            return entry, take_profit, stop_loss
+        side_key = str(side or "").upper()
+        buffer_pct = self._resolve_bad_hour_aligned_entry_buffer_pct(
+            entry_type=entry_type,
+            side=side_key,
+            btc_guard=btc_guard,
+        )
+        if buffer_pct <= 0.0:
+            return entry, take_profit, stop_loss
+        touch_guard_pct = max(0.001, buffer_pct * 0.5)
+        if side_key == "LONG":
+            adjusted_entry = min(entry * (1.0 - buffer_pct), market_price * (1.0 - touch_guard_pct))
+        elif side_key == "SHORT":
+            adjusted_entry = max(entry * (1.0 + buffer_pct), market_price * (1.0 + touch_guard_pct))
+        else:
+            return entry, take_profit, stop_loss
+        if adjusted_entry <= 0:
+            return entry, take_profit, stop_loss
+        scale = adjusted_entry / max(entry, 1e-12)
+        adjusted_tp = take_profit * scale
+        adjusted_sl = stop_loss * scale
+        return float(adjusted_entry), float(adjusted_tp), float(adjusted_sl)
+
     def _adjust_ml_candles_bg_entry_for_btc_regime(
         self,
         *,
@@ -5296,15 +5474,35 @@ class PaperTradingEngine:
         market_price: float,
         btc_guard: dict[str, Any] | None,
     ) -> tuple[float, float, float]:
-        buffer_pct = self._resolve_ml_candles_bg_bullish_short_buffer_pct(
-            symbol=symbol,
-            side=side,
-            btc_guard=btc_guard,
-        )
-        if buffer_pct <= 0.0 or entry <= 0 or take_profit <= 0 or stop_loss <= 0 or market_price <= 0:
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0 or market_price <= 0:
             return entry, take_profit, stop_loss
 
-        adjusted_entry = max(entry * (1.0 + buffer_pct), market_price * (1.0 + max(0.001, buffer_pct * 0.5)))
+        side_key = str(side or "").upper()
+        buffer_pct = self._resolve_ml_candles_bg_bullish_short_buffer_pct(
+            symbol=symbol,
+            side=side_key,
+            btc_guard=btc_guard,
+        )
+        buffer_pct = max(
+            buffer_pct,
+            self._resolve_ml_candles_bg_bad_hour_entry_buffer_pct(
+                side=side_key,
+                btc_guard=btc_guard,
+            ),
+        )
+        if buffer_pct <= 0.0:
+            return entry, take_profit, stop_loss
+
+        touch_guard_pct = max(0.001, buffer_pct * 0.5)
+        if side_key == "LONG":
+            adjusted_entry = min(entry * (1.0 - buffer_pct), market_price * (1.0 - touch_guard_pct))
+        elif side_key == "SHORT":
+            adjusted_entry = max(entry * (1.0 + buffer_pct), market_price * (1.0 + touch_guard_pct))
+        else:
+            return entry, take_profit, stop_loss
+
+        if adjusted_entry <= 0:
+            return entry, take_profit, stop_loss
         scale = adjusted_entry / max(entry, 1e-12)
         adjusted_tp = take_profit * scale
         adjusted_sl = stop_loss * scale

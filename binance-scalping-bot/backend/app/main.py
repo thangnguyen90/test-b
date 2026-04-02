@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketState
 from app.api.market import router as market_router
 from app.api.ml import router as ml_router
 from app.api.analytics import router as analytics_router
+from app.api.binance_execution import router as binance_execution_router
 from app.api.orders import router as orders_router
 from app.api.paper_trades import paper_trade_api
 from app.api.paper_trades import router as paper_trades_router
@@ -63,6 +64,7 @@ app.include_router(signals_router)
 app.include_router(ml_router)
 app.include_router(market_router)
 app.include_router(analytics_router)
+app.include_router(binance_execution_router)
 app.include_router(paper_trades_router)
 
 
@@ -234,6 +236,8 @@ async def on_startup() -> None:
                 candles_bg_strict_min_win_bonus=settings.paper_trade_candles_bg_strict_min_win_bonus,
                 candles_bg_bullish_short_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_short_entry_buffer_pct,
                 candles_bg_bullish_short_nonfollow_extra_buffer_pct=settings.paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct,
+                candles_bg_bad_hour_aligned_entry_buffer_pct=settings.paper_trade_candles_bg_bad_hour_aligned_entry_buffer_pct,
+                candles_bg_block_countertrend_strong_btc=settings.paper_trade_candles_bg_block_countertrend_strong_btc,
                 candles_bg_discord_webhook_enabled=settings.paper_trade_ml_candles_bg_discord_webhook_enabled,
                 candles_bg_discord_webhook_url=settings.paper_trade_ml_candles_bg_discord_webhook_url,
                 candles_bg_discord_webhook_username=settings.paper_trade_ml_candles_bg_discord_webhook_username,
@@ -271,6 +275,7 @@ async def on_startup() -> None:
                 hourly_bad_window_strict_win_rate_pct=settings.paper_trade_hourly_bad_window_strict_win_rate_pct,
                 hourly_bad_window_strict_min_win_bonus=settings.paper_trade_hourly_bad_window_strict_min_win_bonus,
                 hourly_bad_window_countertrend_hard_block=settings.paper_trade_hourly_bad_window_countertrend_hard_block,
+                bad_hour_aligned_entry_buffer_pct=settings.paper_trade_bad_hour_aligned_entry_buffer_pct,
                 bullish_short_nonfollow_max_open_ratio=settings.paper_trade_bullish_short_nonfollow_max_open_ratio,
                 bullish_short_nonfollow_min_win_bonus=settings.paper_trade_bullish_short_nonfollow_min_win_bonus,
                 short_sl_streak_guard_enabled=settings.paper_trade_short_sl_streak_guard_enabled,

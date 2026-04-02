@@ -351,6 +351,13 @@ class Settings(BaseModel):
     paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_SHORT_NONFOLLOW_EXTRA_BUFFER_PCT", "0.001")
     )
+    paper_trade_candles_bg_bad_hour_aligned_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BAD_HOUR_ALIGNED_ENTRY_BUFFER_PCT", "0.0025")
+    )
+    paper_trade_candles_bg_block_countertrend_strong_btc: bool = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_BLOCK_COUNTERTREND_STRONG_BTC",
+        "true",
+    ).lower() == "true"
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
@@ -417,6 +424,9 @@ class Settings(BaseModel):
     paper_trade_hourly_bad_window_strict_win_rate_pct: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_WIN_RATE_PCT", "53"))
     paper_trade_hourly_bad_window_strict_min_win_bonus: float = float(os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_STRICT_MIN_WIN_BONUS", "0.04"))
     paper_trade_hourly_bad_window_countertrend_hard_block: bool = os.getenv("PAPER_TRADE_HOURLY_BAD_WINDOW_COUNTERTREND_HARD_BLOCK", "true").lower() == "true"
+    paper_trade_bad_hour_aligned_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_BAD_HOUR_ALIGNED_ENTRY_BUFFER_PCT", "0.002")
+    )
     paper_trade_bullish_short_nonfollow_max_open_ratio: float = float(
         os.getenv("PAPER_TRADE_BULLISH_SHORT_NONFOLLOW_MAX_OPEN_RATIO", "0.25")
     )
@@ -448,6 +458,14 @@ class Settings(BaseModel):
     ml_feedback_severe_loss_min_abs_mae_pct: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_MIN_ABS_MAE_PCT", "12.0"))
     ml_feedback_severe_loss_max_mfe_pct: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_MAX_MFE_PCT", "1.0"))
     ml_feedback_severe_loss_weight_multiplier: float = float(os.getenv("ML_FEEDBACK_SEVERE_LOSS_WEIGHT_MULTIPLIER", "8.0"))
+
+    binance_api_key: str = os.getenv("BINANCE_API_KEY", "").strip()
+    binance_api_secret: str = os.getenv("BINANCE_API_SECRET", "").strip()
+    binance_api_base_url: str = os.getenv("BINANCE_API_BASE_URL", "https://fapi.binance.com").strip() or "https://fapi.binance.com"
+    binance_execution_mode: str = os.getenv("BINANCE_EXECUTION_MODE", "disabled").strip().lower() or "disabled"
+    binance_execution_allow_live: bool = os.getenv("BINANCE_EXECUTION_ALLOW_LIVE", "false").lower() == "true"
+    binance_execution_recv_window_ms: int = int(os.getenv("BINANCE_EXECUTION_RECV_WINDOW_MS", "5000"))
+    binance_execution_set_leverage_before_order: bool = os.getenv("BINANCE_EXECUTION_SET_LEVERAGE_BEFORE_ORDER", "false").lower() == "true"
 
 settings = Settings()
 

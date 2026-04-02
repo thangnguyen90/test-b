@@ -1713,6 +1713,18 @@ function App() {
     ],
     [paperOpenTrades, mlCandlesOpenTradesDb, mlCompareHistory, paperLivePrices, mlCompareDate],
   )
+  const mlCompareDailyOrderCounts = useMemo(() => {
+    const byLabel = new Map(mlCompareDailyBuckets.map((bucket) => [bucket.label, bucket.open + bucket.closed]))
+    const ml = byLabel.get('ML') ?? 0
+    const candlesBg = byLabel.get('ML Candles BG') ?? 0
+    const candlesTest = byLabel.get('ML Candles Test') ?? 0
+    return {
+      ALL: ml + candlesBg + candlesTest,
+      ML: ml,
+      ML_CANDLES_BG: candlesBg,
+      ML_CANDLES_TEST: candlesTest,
+    }
+  }, [mlCompareDailyBuckets])
   const mlCandlesOpenTrades = useMemo(() => {
     const rows = [
       ...paperOpenTrades.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === 'ML'),
@@ -4018,6 +4030,13 @@ function App() {
 
           <h3 className="section-title">Recent ML vs ML Candles Compare</h3>
           <div className="history-header">
+            <div className="scan-actions">
+              <span className="badge neutral">Date {mlCompareDate}</span>
+              <span className="badge neutral">Today ALL {mlCompareDailyOrderCounts.ALL}</span>
+              <span className="badge neutral">ML {mlCompareDailyOrderCounts.ML}</span>
+              <span className="badge neutral">CANDLES_BG {mlCompareDailyOrderCounts.ML_CANDLES_BG}</span>
+              <span className="badge neutral">CANDLES_TEST {mlCompareDailyOrderCounts.ML_CANDLES_TEST}</span>
+            </div>
             <div className="scan-actions">
               <button
                 type="button"

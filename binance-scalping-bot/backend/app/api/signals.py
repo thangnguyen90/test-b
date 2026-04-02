@@ -358,6 +358,13 @@ def _evaluate_paper_entry_gate(
                 pass
 
             try:
+                if normalized_entry_type == "ML_CANDLES_BG":
+                    countertrend_reason = engine._ml_candles_bg_countertrend_reason(
+                        side=side,
+                        btc_guard=btc_guard,
+                    )
+                    if countertrend_reason:
+                        return False, str(countertrend_reason), effective_probability, btc_following
                 can_open_now, required_min_win = engine._evaluate_hourly_bad_window_guard(
                     side=side,
                     entry_type=normalized_entry_type,
@@ -460,6 +467,20 @@ def _evaluate_paper_entry_gate(
             )
         except Exception:
             pass
+
+        if normalized_entry_type in {"LIMIT", "ML_TEST"}:
+            try:
+                entry, take_profit, stop_loss = engine._adjust_entry_for_bad_hour_aligned_btc_trend(
+                    entry_type=normalized_entry_type,
+                    side=side,
+                    entry=entry,
+                    take_profit=take_profit,
+                    stop_loss=stop_loss,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
+            except Exception:
+                pass
 
         if normalized_entry_type == "ML_CANDLES_BG":
             try:
