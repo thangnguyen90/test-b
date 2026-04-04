@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.services.data_pipeline import DEFAULT_SYMBOLS, FEATURE_COLUMNS
 from app.services.ml_predictor import MLPredictor, SignalResult
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.signal_candle_pattern_service import signal_candle_pattern_service
 
 
 class MLCandlesPredictor(MLPredictor):
@@ -33,6 +34,10 @@ class MLCandlesPredictor(MLPredictor):
     SL_STRENGTH_SCALE_MIN = 0.9
     SL_STRENGTH_SCALE_MAX = 1.35
     DEFAULT_TP_ATR_MULTIPLIER = 1.25
+    BTC_REGIME_SIDE_BIAS = 0.045
+    BTC_REGIME_STRONG_SIDE_BIAS = 0.07
+    BTC_REGIME_COUNTERTREND_SHORT_PENALTY = 0.09
+    BTC_REGIME_COUNTERTREND_LONG_PENALTY = 0.09
 
     def __init__(
         self,
@@ -164,6 +169,11 @@ class MLCandlesPredictor(MLPredictor):
                 probs = self.model.predict_proba(row_df)[:, 1]
                 long_prob = float(probs[0])
                 short_prob = float(probs[1])
+                long_prob, short_prob = self._apply_btc_regime_side_bias(
+                    row=row,
+                    long_prob=long_prob,
+                    short_prob=short_prob,
+                )
                 if long_prob >= short_prob:
                     side = "LONG"
                     win_prob = long_prob
@@ -239,6 +249,165 @@ class MLCandlesPredictor(MLPredictor):
             ),
             profile=profile,
             side=side,
+        )
+
+    def _apply_btc_regime_side_bias(
+        self,
+        *,
+        row: pd.Series,
+        long_prob: float,
+        short_prob: float,
+    ) -> tuple[float, float]:
+        long_prob = float(np.clip(long_prob, 0.0, 0.99))
+        short_prob = float(np.clip(short_prob, 0.0, 0.99))
+        long_snapshot = self._build_feature_snapshot(row=row, side="LONG")
+        short_snapshot = self._build_feature_snapshot(row=row, side="SHORT")
+        bullish_btc = self._is_btc_bullish_regime_row(row)
+        bearish_btc = self._is_btc_bearish_regime_row(row)
+        strong_bullish_btc = bullish_btc and self._is_btc_strong_regime_row(row, side="LONG")
+        strong_bearish_btc = bearish_btc and self._is_btc_strong_regime_row(row, side="SHORT")
+
+        long_sample = (
+            signal_candle_pattern_service.match_signal(
+                signal_source="ML_CANDLES",
+                side="LONG",
+                feature_snapshot=long_snapshot,
+            )
+            if long_snapshot is not None
+            else None
+        )
+        short_sample = (
+            signal_candle_pattern_service.match_signal(
+                signal_source="ML_CANDLES",
+                side="SHORT",
+                feature_snapshot=short_snapshot,
+            )
+            if short_snapshot is not None
+            else None
+        )
+
+        if bullish_btc:
+            long_prob += self.BTC_REGIME_SIDE_BIAS
+            if strong_bullish_btc:
+                long_prob += self.BTC_REGIME_STRONG_SIDE_BIAS
+            if self._is_countertrend_short_pattern(short_sample):
+                short_prob -= self.BTC_REGIME_COUNTERTREND_SHORT_PENALTY
+            elif self._is_supportive_long_pattern(long_sample):
+                long_prob += 0.02
+
+        if bearish_btc:
+            short_prob += self.BTC_REGIME_SIDE_BIAS
+            if strong_bearish_btc:
+                short_prob += self.BTC_REGIME_STRONG_SIDE_BIAS
+            if self._is_countertrend_long_pattern(long_sample):
+                long_prob -= self.BTC_REGIME_COUNTERTREND_LONG_PENALTY
+            elif self._is_supportive_short_pattern(short_sample):
+                short_prob += 0.02
+
+        return float(np.clip(long_prob, 0.0, 0.99)), float(np.clip(short_prob, 0.0, 0.99))
+
+    @staticmethod
+    def _safe_row_float(row: pd.Series | None, key: str) -> float:
+        if row is None:
+            return 0.0
+        try:
+            value = float(row.get(key) or 0.0)
+        except Exception:
+            value = 0.0
+        if not np.isfinite(value):
+            return 0.0
+        return float(value)
+
+    def _is_btc_bullish_regime_row(self, row: pd.Series | None) -> bool:
+        close_h1 = self._safe_row_float(row, "close_h1")
+        ema8_h1 = self._safe_row_float(row, "ema8_h1")
+        ema13_h1 = self._safe_row_float(row, "ema13_h1")
+        ema21_h1 = self._safe_row_float(row, "ema21_h1")
+        close_m5 = self._safe_row_float(row, "close_m5")
+        ema8_m5 = self._safe_row_float(row, "ema8_m5")
+        macd_m5 = self._safe_row_float(row, "macd_m5")
+        macd_signal_m5 = self._safe_row_float(row, "macd_signal_m5")
+        rsi_h1 = self._safe_row_float(row, "rsi14_h1")
+        return bool(
+            close_h1 > ema8_h1 > ema13_h1 > ema21_h1
+            and close_m5 >= ema8_m5
+            and macd_m5 >= macd_signal_m5
+            and rsi_h1 >= 54.0
+        )
+
+    def _is_btc_bearish_regime_row(self, row: pd.Series | None) -> bool:
+        close_h1 = self._safe_row_float(row, "close_h1")
+        ema8_h1 = self._safe_row_float(row, "ema8_h1")
+        ema13_h1 = self._safe_row_float(row, "ema13_h1")
+        ema21_h1 = self._safe_row_float(row, "ema21_h1")
+        close_m5 = self._safe_row_float(row, "close_m5")
+        ema8_m5 = self._safe_row_float(row, "ema8_m5")
+        macd_m5 = self._safe_row_float(row, "macd_m5")
+        macd_signal_m5 = self._safe_row_float(row, "macd_signal_m5")
+        rsi_h1 = self._safe_row_float(row, "rsi14_h1")
+        return bool(
+            close_h1 < ema8_h1 < ema13_h1 < ema21_h1
+            and close_m5 <= ema8_m5
+            and macd_m5 <= macd_signal_m5
+            and rsi_h1 <= 46.0
+        )
+
+    def _is_btc_strong_regime_row(self, row: pd.Series | None, *, side: str) -> bool:
+        side_key = str(side or "").upper()
+        rsi_h1 = self._safe_row_float(row, "rsi14_h1")
+        vol_spike = self._safe_row_float(row, "vol_spike_z_m5")
+        close_m5 = self._safe_row_float(row, "close_m5")
+        ema8_m5 = self._safe_row_float(row, "ema8_m5")
+        if side_key == "LONG":
+            return bool(rsi_h1 >= 58.0 and close_m5 >= ema8_m5 and vol_spike >= 0.2)
+        if side_key == "SHORT":
+            return bool(rsi_h1 <= 42.0 and close_m5 <= ema8_m5 and vol_spike >= 0.2)
+        return False
+
+    @staticmethod
+    def _sample_value(sample: dict[str, Any] | None, key: str) -> str:
+        if not isinstance(sample, dict):
+            return ""
+        return str(sample.get(key) or "").strip().upper()
+
+    def _is_countertrend_short_pattern(self, sample: dict[str, Any] | None) -> bool:
+        market_phase = self._sample_value(sample, "market_phase")
+        setup_kind = self._sample_value(sample, "setup_kind")
+        volatility_kind = self._sample_value(sample, "volatility_kind")
+        return (
+            market_phase in {"RANGE_TRANSITION", "BULL_RETRACE", "BULL_PULLBACK"}
+            and setup_kind == "EMA_RECLAIM"
+            and volatility_kind == "CALM"
+        )
+
+    def _is_countertrend_long_pattern(self, sample: dict[str, Any] | None) -> bool:
+        market_phase = self._sample_value(sample, "market_phase")
+        setup_kind = self._sample_value(sample, "setup_kind")
+        volatility_kind = self._sample_value(sample, "volatility_kind")
+        return (
+            market_phase in {"RANGE_TRANSITION", "BEAR_RETRACE", "BEAR_PULLBACK"}
+            and setup_kind == "EMA_RECLAIM"
+            and volatility_kind == "CALM"
+        )
+
+    def _is_supportive_long_pattern(self, sample: dict[str, Any] | None) -> bool:
+        market_phase = self._sample_value(sample, "market_phase")
+        setup_kind = self._sample_value(sample, "setup_kind")
+        quality_tier = self._sample_value(sample, "quality_tier")
+        return (
+            market_phase in {"BULL_RETRACE", "BULL_PULLBACK", "RANGE_TRANSITION"}
+            and setup_kind in {"EMA_RECLAIM", "STRUCTURED_CONTINUATION"}
+            and quality_tier in {"A", "B"}
+        )
+
+    def _is_supportive_short_pattern(self, sample: dict[str, Any] | None) -> bool:
+        market_phase = self._sample_value(sample, "market_phase")
+        setup_kind = self._sample_value(sample, "setup_kind")
+        quality_tier = self._sample_value(sample, "quality_tier")
+        return (
+            market_phase in {"BEAR_RETRACE", "BEAR_PULLBACK", "RANGE_TRANSITION"}
+            and setup_kind in {"EMA_RECLAIM", "STRUCTURED_CONTINUATION"}
+            and quality_tier in {"A", "B"}
         )
 
     def _resolve_entry_anchor(self, *, mark_price: float, row_close: float) -> float:

@@ -36,6 +36,9 @@ class PaperTrade(BaseModel):
     margin_usdt: Optional[float] = None
     result: Optional[int] = None
     candle_pattern_sample: Optional[dict] = None
+    ten_x_score: Optional[float] = None
+    ten_x_ready: Optional[bool] = None
+    ten_x_reason: Optional[str] = None
 
 
 class PaperTradeStats(BaseModel):

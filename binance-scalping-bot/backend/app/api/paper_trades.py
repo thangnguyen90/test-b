@@ -36,6 +36,7 @@ from app.deps import get_paper_trade_runtime
 from app.services.binance_client import BinanceFuturesClient
 from app.services.data_pipeline import DataPipeline
 from app.services.mysql_trade_repo import MySQLTradeRepository
+from app.services.ml_candles_conviction import assess_basic_ml_10x, assess_ml_candles_bg_10x
 from app.services.signal_candle_pattern_service import signal_candle_pattern_service
 from app.services.risk_manager import (
     calc_atr_from_ohlcv,
@@ -252,11 +253,13 @@ class PaperTradeAPI:
 
     @classmethod
     def _map_trade(cls, row: dict, btc_following: bool | None = None) -> PaperTrade:
+        entry_type = str(row.get("entry_type") or "LIMIT")
         entry_price = float(row["entry_price"])
         quantity = float(row["quantity"])
         leverage = int(row["leverage"])
         close_price = float(row["close_price"]) if row.get("close_price") is not None else None
         pnl = float(row["pnl"]) if row.get("pnl") is not None else None
+        effective_win_probability = float(row.get("effective_win_probability") or row["signal_win_probability"])
         margin_usdt = (
             float(row["margin_usdt"])
             if row.get("margin_usdt") is not None
@@ -268,15 +271,31 @@ class PaperTradeAPI:
 
         row_btc_follow = cls._coerce_optional_bool(row.get("btc_following"))
         resolved_btc_follow = row_btc_follow if row_btc_follow is not None else btc_following
+        pattern_sample = cls._match_trade_candle_pattern(row)
+        normalized_entry_type = entry_type.strip().upper()
+        if normalized_entry_type == "ML_CANDLES_BG":
+            ten_x_assessment = assess_ml_candles_bg_10x(
+                pattern_sample,
+                effective_prob=effective_win_probability,
+                btc_following=resolved_btc_follow,
+            )
+        elif normalized_entry_type in {"LIMIT", "ML_TEST"}:
+            ten_x_assessment = assess_basic_ml_10x(
+                pattern_sample,
+                effective_prob=effective_win_probability,
+                btc_following=resolved_btc_follow,
+            )
+        else:
+            ten_x_assessment = {"score": None, "ready": None, "reason": None}
 
         return PaperTrade(
             id=int(row["id"]),
             symbol=str(row["symbol"]),
             side=str(row["side"]),
             btc_following=resolved_btc_follow,
-            entry_type=str(row.get("entry_type") or "LIMIT"),
+            entry_type=entry_type,
             signal_win_probability=float(row["signal_win_probability"]),
-            effective_win_probability=float(row.get("effective_win_probability") or row["signal_win_probability"]),
+            effective_win_probability=effective_win_probability,
             entry_price=entry_price,
             take_profit=float(row["take_profit"]),
             stop_loss=float(row["stop_loss"]),
@@ -300,7 +319,10 @@ class PaperTradeAPI:
             mfe_pct=float(row["mfe_pct"]) if row.get("mfe_pct") is not None else None,
             margin_usdt=margin_usdt,
             result=int(row["result"]) if row.get("result") is not None else None,
-            candle_pattern_sample=cls._match_trade_candle_pattern(row),
+            candle_pattern_sample=pattern_sample,
+            ten_x_score=ten_x_assessment.get("score"),
+            ten_x_ready=ten_x_assessment.get("ready"),
+            ten_x_reason=ten_x_assessment.get("reason"),
         )
 
     def get_open(

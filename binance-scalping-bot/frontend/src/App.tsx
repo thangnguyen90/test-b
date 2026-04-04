@@ -216,6 +216,9 @@ type PaperTrade = {
   mfe_pct?: number | null
   margin_usdt?: number | null
   result?: number | null
+  ten_x_score?: number | null
+  ten_x_ready?: boolean | null
+  ten_x_reason?: string | null
 }
 
 type PaperTradeStats = {
@@ -730,6 +733,26 @@ function renderCandlePatternSample(sample?: CandlePatternSample | null) {
       </span>
       {sample.live_btc_phase ? (
         <span className="signal-model-meta">BTC: {sample.live_btc_phase}</span>
+      ) : null}
+    </div>
+  )
+}
+
+function renderTenXAssessment(trade: PaperTrade) {
+  const entryType = (trade.entry_type ?? '').trim().toUpperCase()
+  if (!['ML_CANDLES_BG', 'LIMIT', 'ML_TEST'].includes(entryType)) return '-'
+  const score = typeof trade.ten_x_score === 'number' ? trade.ten_x_score : null
+  const ready = trade.ten_x_ready === true
+  return (
+    <div className="signal-model-stack">
+      <span className={`badge ${ready ? 'success' : 'neutral'}`}>
+        {ready ? '10X READY' : '10X WATCH'}
+      </span>
+      <span className="signal-model-meta">
+        Score {score != null ? `${score.toFixed(1)}/100` : '-'}
+      </span>
+      {trade.ten_x_reason ? (
+        <span className="signal-model-meta">{trade.ten_x_reason}</span>
       ) : null}
     </div>
   )
@@ -1253,7 +1276,9 @@ function App() {
   const [mlComparePage, setMlComparePage] = useState(1)
   const [mlComparePageSize, setMlComparePageSize] = useState(20)
   const [mlCandlesOpenModelFilter, setMlCandlesOpenModelFilter] = useState<MlCompareModelFilter>('ALL')
+  const [mlCandlesOpenTenXOnly, setMlCandlesOpenTenXOnly] = useState(false)
   const [mlCompareModelFilter, setMlCompareModelFilter] = useState<MlCompareModelFilter>('ALL')
+  const [mlCompareTenXOnly, setMlCompareTenXOnly] = useState(false)
   const [historyPage, setHistoryPage] = useState(1)
   const [historyPageSize, setHistoryPageSize] = useState(30)
   const [historyTotalItems, setHistoryTotalItems] = useState(0)
@@ -1738,9 +1763,12 @@ function App() {
     return Array.from(deduped.values())
   }, [paperOpenTrades, mlCandlesOpenTradesDb])
   const filteredMlCandlesOpenTrades = useMemo(() => {
-    if (mlCandlesOpenModelFilter === 'ALL') return mlCandlesOpenTrades
-    return mlCandlesOpenTrades.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCandlesOpenModelFilter)
-  }, [mlCandlesOpenTrades, mlCandlesOpenModelFilter])
+    const byModel = mlCandlesOpenModelFilter === 'ALL'
+      ? mlCandlesOpenTrades
+      : mlCandlesOpenTrades.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCandlesOpenModelFilter)
+    if (!mlCandlesOpenTenXOnly) return byModel
+    return byModel.filter((row) => row.ten_x_ready === true)
+  }, [mlCandlesOpenTrades, mlCandlesOpenModelFilter, mlCandlesOpenTenXOnly])
   const sortedMlCandlesOpenTrades = useMemo(() => {
     const rows = [...filteredMlCandlesOpenTrades]
     const { key, direction } = mlCandlesOpenSort
@@ -1849,6 +1877,7 @@ function App() {
     }
     return counts
   }, [mlCandlesOpenTrades])
+  const mlCandlesOpenTenXReadyCount = useMemo(() => mlCandlesOpenTrades.filter((row) => row.ten_x_ready === true).length, [mlCandlesOpenTrades])
   const mlCompareFilterCounts = useMemo(() => {
     const counts: Record<MlCompareModelFilter, number> = {
       ALL: recentMlCompareHistory.length,
@@ -1862,10 +1891,14 @@ function App() {
     }
     return counts
   }, [recentMlCompareHistory])
+  const mlCompareTenXReadyCount = useMemo(() => recentMlCompareHistory.filter((row) => row.ten_x_ready === true).length, [recentMlCompareHistory])
   const filteredMlCompareHistory = useMemo(() => {
-    if (mlCompareModelFilter === 'ALL') return recentMlCompareHistory
-    return recentMlCompareHistory.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCompareModelFilter)
-  }, [recentMlCompareHistory, mlCompareModelFilter])
+    const byModel = mlCompareModelFilter === 'ALL'
+      ? recentMlCompareHistory
+      : recentMlCompareHistory.filter((row) => tradeMlCandlesCompareLabel(row.entry_type) === mlCompareModelFilter)
+    if (!mlCompareTenXOnly) return byModel
+    return byModel.filter((row) => row.ten_x_ready === true)
+  }, [recentMlCompareHistory, mlCompareModelFilter, mlCompareTenXOnly])
   const mlCompareMaxPage = useMemo(
     () => Math.max(1, Math.ceil(filteredMlCompareHistory.length / mlComparePageSize)),
     [filteredMlCompareHistory.length, mlComparePageSize],
@@ -3701,6 +3734,7 @@ function App() {
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
+                        <td>{renderTenXAssessment(row)}</td>
                         <td>
                           {typeof row.btc_following === 'boolean' ? (
                             <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -3901,6 +3935,13 @@ function App() {
               </button>
             </div>
             <div className="scan-actions">
+              <button
+                type="button"
+                className={`tab-btn ${mlCandlesOpenTenXOnly ? 'tab-btn-active' : ''}`}
+                onClick={() => setMlCandlesOpenTenXOnly((value) => !value)}
+              >
+                10X READY ONLY ({mlCandlesOpenTenXReadyCount})
+              </button>
               <span className="badge neutral">Rows: {filteredMlCandlesOpenTrades.length}</span>
             </div>
           </div>
@@ -3914,6 +3955,7 @@ function App() {
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('symbol')}>Symbol</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('pattern')}>Pattern</button></th>
+                    <th>10X</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('btc_following')}>BTC Follow</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
@@ -3953,6 +3995,7 @@ function App() {
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
+                        <td>{renderTenXAssessment(row)}</td>
                         <td>
                           {typeof row.btc_following === 'boolean' ? (
                             <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -4080,6 +4123,16 @@ function App() {
               </button>
             </div>
             <div className="scan-actions">
+              <button
+                type="button"
+                className={`tab-btn ${mlCompareTenXOnly ? 'tab-btn-active' : ''}`}
+                onClick={() => {
+                  setMlCompareTenXOnly((value) => !value)
+                  setMlComparePage(1)
+                }}
+              >
+                10X READY ONLY ({mlCompareTenXReadyCount})
+              </button>
               <span className="badge neutral">Page {mlComparePage}/{mlCompareMaxPage}</span>
               <span className="badge neutral">Rows: {filteredMlCompareHistory.length}</span>
               <select
@@ -4126,6 +4179,7 @@ function App() {
                     <th>Model</th>
                     <th>Symbol</th>
                     <th>Pattern</th>
+                    <th>10X</th>
                     <th>Side</th>
                     <th>Ref Win</th>
                     <th>Entry</th>
@@ -4152,6 +4206,7 @@ function App() {
                         <td><span className={`badge ${tradeMlCandlesCompareBadge(modelLabel)}`}>{modelLabel}</span></td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
                         <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
+                        <td>{renderTenXAssessment(row)}</td>
                         <td><span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>{row.side}</span></td>
                         <td>
                           {row.reference_win_symbol ? (

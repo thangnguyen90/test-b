@@ -479,6 +479,14 @@ def _evaluate_paper_entry_gate(
                     market_price=float(market_price),
                     btc_guard=btc_guard,
                 )
+                entry, take_profit, stop_loss = engine._adjust_entry_for_btc_1h_candle_expansion(
+                    side=side,
+                    entry=entry,
+                    take_profit=take_profit,
+                    stop_loss=stop_loss,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
             except Exception:
                 pass
 
@@ -486,6 +494,14 @@ def _evaluate_paper_entry_gate(
             try:
                 entry, take_profit, stop_loss = engine._adjust_ml_candles_bg_entry_for_btc_regime(
                     symbol=symbol,
+                    side=side,
+                    entry=entry,
+                    take_profit=take_profit,
+                    stop_loss=stop_loss,
+                    market_price=float(market_price),
+                    btc_guard=btc_guard,
+                )
+                entry, take_profit, stop_loss = engine._adjust_entry_for_btc_1h_candle_expansion(
                     side=side,
                     entry=entry,
                     take_profit=take_profit,
