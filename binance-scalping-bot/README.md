@@ -60,6 +60,64 @@ cd /Users/thang/Desktop/TEST/binance-scalping-bot
 ./scripts/backend_service.sh restart-force
 ```
 
+### PM2 + log rotate (WSL/Linux)
+
+File config PM2 cua repo nay:
+
+```bash
+/home/thangnguyen/project/ml-candles/binance-scalping-bot/ecosystem.pm2.config.cjs
+```
+
+Ten process da kem port de tranh trung voi app khac:
+
+- `ml-candles-backend-8005`
+- `ml-candles-frontend-5199`
+
+Lenh setup PM2 + log rotate:
+
+```bash
+cd /home/thangnguyen/project/ml-candles/binance-scalping-bot
+chmod +x scripts/backend_pm2.sh scripts/frontend_pm2.sh
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 50M
+pm2 set pm2-logrotate:retain 10
+pm2 set pm2-logrotate:compress true
+pm2 set pm2-logrotate:dateFormat YYYY-MM-DD_HH-mm-ss
+pm2 set pm2-logrotate:workerInterval 30
+pm2 set pm2-logrotate:rotateInterval @daily
+```
+
+Start/restart app bang PM2:
+
+```bash
+cd /home/thangnguyen/project/ml-candles/binance-scalping-bot
+./scripts/backend_service.sh stop-force || true
+if lsof -tiTCP:5199 -sTCP:LISTEN -Pn >/dev/null 2>&1; then lsof -tiTCP:5199 -sTCP:LISTEN -Pn | xargs kill -9; fi
+pm2 start ecosystem.pm2.config.cjs
+pm2 restart ml-candles-backend-8005
+pm2 restart ml-candles-frontend-5199
+pm2 save
+```
+
+Lenh quan ly thuong dung:
+
+```bash
+pm2 ls
+pm2 logs ml-candles-backend-8005 --lines 200
+pm2 logs ml-candles-frontend-5199 --lines 200
+pm2 status ml-candles-backend-8005
+pm2 status ml-candles-frontend-5199
+pm2 stop ml-candles-backend-8005
+pm2 stop ml-candles-frontend-5199
+pm2 delete ml-candles-backend-8005
+pm2 delete ml-candles-frontend-5199
+```
+
+- Backend log PM2: `backend/.runtime/pm2/ml-candles-backend-8005.out.log` va `backend/.runtime/pm2/ml-candles-backend-8005.err.log`
+- Frontend log PM2: `frontend/.runtime/pm2/ml-candles-frontend-5199.out.log` va `frontend/.runtime/pm2/ml-candles-frontend-5199.err.log`
+- `frontend_pm2.sh` tu build frontend roi moi chay `vite preview` bang Node `20.19.0`, nen khong bi dung Node `18` mac dinh.
+- PM2 backend dang bind `0.0.0.0:8005`, nen khi mo frontend bang IP WSL nhu `http://172.27.x.x:5199` thi frontend van goi duoc API `:8005`.
+
 ## 4) Train model ML (RandomForest)
 
 ### CÃƒÆ’Ã‚Â¡ch 1: curl

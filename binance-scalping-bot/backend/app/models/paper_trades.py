@@ -22,6 +22,7 @@ class PaperTrade(BaseModel):
     quantity: float
     leverage: int
     status: str
+    created_at: datetime
     opened_at: datetime
     closed_at: Optional[datetime] = None
     close_price: Optional[float] = None

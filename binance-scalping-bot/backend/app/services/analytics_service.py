@@ -50,6 +50,11 @@ class AnalyticsService:
     def _signal_order_type(side: str, mark_price: float, entry_price: float) -> str:
         if mark_price <= 0 or entry_price <= 0:
             return "LIMIT"
+        side_key = str(side or "").upper()
+        if side_key == "LONG" and entry_price > mark_price:
+            return "STOP"
+        if side_key == "SHORT" and entry_price < mark_price:
+            return "STOP"
         dist_pct = abs(entry_price - mark_price) / mark_price
         # Near current mark -> market execution, otherwise treat as limit setup.
         if dist_pct <= 0.0012:

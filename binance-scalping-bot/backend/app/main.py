@@ -53,7 +53,16 @@ paper_trade_engine: PaperTradingEngine | None = None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    # Allow localhost plus private-network hosts so the UI remains reachable
+    # when the app is served from a WSL/LAN IP instead of loopback.
+    allow_origin_regex=(
+        r"^https?://("
+        r"localhost|127\.0\.0\.1|"
+        r"10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}"
+        r")(:\d+)?$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -201,10 +210,18 @@ async def on_startup() -> None:
                 btc_kill_short_guard_enabled=settings.paper_trade_btc_kill_short_guard_enabled,
                 btc_kill_short_pump_min_body_pct=settings.paper_trade_btc_kill_short_pump_min_body_pct,
                 btc_kill_short_ema_tolerance_pct=settings.paper_trade_btc_kill_short_ema_tolerance_pct,
+                btc_bullish_short_reprice_enabled=settings.paper_trade_btc_bullish_short_reprice_enabled,
+                btc_bullish_short_entry_buffer_pct=settings.paper_trade_btc_bullish_short_entry_buffer_pct,
+                btc_bullish_short_nonfollow_extra_buffer_pct=settings.paper_trade_btc_bullish_short_nonfollow_extra_buffer_pct,
+                btc_bearish_long_reprice_enabled=settings.paper_trade_btc_bearish_long_reprice_enabled,
+                btc_bearish_long_entry_buffer_pct=settings.paper_trade_btc_bearish_long_entry_buffer_pct,
+                btc_bearish_long_follow_extra_buffer_pct=settings.paper_trade_btc_bearish_long_follow_extra_buffer_pct,
                 btc_reversal_profit_exit_enabled=settings.paper_trade_btc_reversal_profit_exit_enabled,
                 btc_reversal_threshold_pct=settings.paper_trade_btc_reversal_threshold_pct,
                 btc_reversal_min_confidence=settings.paper_trade_btc_reversal_min_confidence,
                 btc_reversal_min_profit_pct=settings.paper_trade_btc_reversal_min_profit_pct,
+                basic_ml_btc_reversal_exit_enabled=settings.paper_trade_basic_ml_btc_reversal_exit_enabled,
+                basic_ml_btc_reversal_exit_min_pnl_pct=settings.paper_trade_basic_ml_btc_reversal_exit_min_pnl_pct,
                 btc_reversal_loss_exit_enabled=settings.paper_trade_btc_reversal_loss_exit_enabled,
                 btc_reversal_loss_exit_days_vn=settings.paper_trade_btc_reversal_loss_exit_days_vn,
                 btc_reversal_loss_exit_min_loss_pct=settings.paper_trade_btc_reversal_loss_exit_min_loss_pct,
@@ -212,13 +229,31 @@ async def on_startup() -> None:
                 btc_reversal_entry_cooldown_minutes=settings.paper_trade_btc_reversal_entry_cooldown_minutes,
                 btc_profit_lock_enabled=settings.paper_trade_btc_profit_lock_enabled,
                 btc_profit_lock_min_confidence=settings.paper_trade_btc_profit_lock_min_confidence,
+                btc_bad_trend_panic_exit_enabled=settings.paper_trade_btc_bad_trend_panic_exit_enabled,
+                btc_bad_trend_panic_exit_min_confidence=settings.paper_trade_btc_bad_trend_panic_exit_min_confidence,
+                btc_bad_trend_panic_exit_min_shock_pct=settings.paper_trade_btc_bad_trend_panic_exit_min_shock_pct,
+                btc_bad_trend_panic_exit_min_tp_progress_ratio=settings.paper_trade_btc_bad_trend_panic_exit_min_tp_progress_ratio,
+                btc_bad_trend_panic_exit_min_1h_body_pct=settings.paper_trade_btc_bad_trend_panic_exit_min_1h_body_pct,
                 btc_follow_min_corr=settings.paper_trade_btc_follow_min_corr,
                 btc_follow_min_beta=settings.paper_trade_btc_follow_min_beta,
                 btc_follow_lookback=settings.paper_trade_btc_follow_lookback,
                 btc_follow_cache_sec=settings.paper_trade_btc_follow_cache_sec,
                 base_ml_max_symbols=settings.paper_trade_base_ml_max_symbols,
+                basic_ml_max_orders_per_cycle=settings.paper_trade_basic_ml_max_orders_per_cycle,
                 basic_ml_pattern_gate_enabled=settings.paper_trade_basic_ml_pattern_gate_enabled,
                 basic_ml_pattern_min_win_rate_pct=settings.paper_trade_basic_ml_pattern_min_win_rate_pct,
+                basic_ml_pattern_expectancy_gate_enabled=settings.paper_trade_basic_ml_pattern_expectancy_gate_enabled,
+                basic_ml_pattern_expectancy_min_samples=settings.paper_trade_basic_ml_pattern_expectancy_min_samples,
+                basic_ml_pattern_expectancy_min_avg_pnl_pct=settings.paper_trade_basic_ml_pattern_expectancy_min_avg_pnl_pct,
+                basic_ml_pattern_expectancy_max_avg_mae_pct=settings.paper_trade_basic_ml_pattern_expectancy_max_avg_mae_pct,
+                basic_ml_pattern_expectancy_min_avg_mfe_pct=settings.paper_trade_basic_ml_pattern_expectancy_min_avg_mfe_pct,
+                basic_ml_pattern_expectancy_min_mfe_mae_ratio=settings.paper_trade_basic_ml_pattern_expectancy_min_mfe_mae_ratio,
+                basic_ml_pattern_c_expectancy_min_win_rate_pct=settings.paper_trade_basic_ml_pattern_c_expectancy_min_win_rate_pct,
+                basic_ml_pattern_c_expectancy_min_samples=settings.paper_trade_basic_ml_pattern_c_expectancy_min_samples,
+                basic_ml_pattern_c_expectancy_min_avg_pnl_pct=settings.paper_trade_basic_ml_pattern_c_expectancy_min_avg_pnl_pct,
+                basic_ml_pattern_c_expectancy_max_avg_mae_pct=settings.paper_trade_basic_ml_pattern_c_expectancy_max_avg_mae_pct,
+                basic_ml_pattern_c_expectancy_min_avg_mfe_pct=settings.paper_trade_basic_ml_pattern_c_expectancy_min_avg_mfe_pct,
+                basic_ml_pattern_c_expectancy_min_mfe_mae_ratio=settings.paper_trade_basic_ml_pattern_c_expectancy_min_mfe_mae_ratio,
                 test_ml_enabled=settings.paper_trade_test_ml_enabled,
                 test_ml_min_win_probability=settings.paper_trade_test_ml_min_win,
                 test_ml_max_symbols=settings.paper_trade_test_ml_max_symbols,
@@ -227,6 +262,8 @@ async def on_startup() -> None:
                 candles_bg_min_win_probability=settings.paper_trade_candles_bg_min_win,
                 candles_bg_max_symbols=settings.paper_trade_candles_bg_max_symbols,
                 candles_bg_max_orders_per_cycle=settings.paper_trade_candles_bg_max_orders_per_cycle,
+                candles_bg_require_entry_touch=settings.paper_trade_candles_bg_require_entry_touch,
+                candles_bg_debug_enabled=settings.paper_trade_candles_bg_debug_enabled,
                 candles_bg_entry_type="ML_CANDLES_BG",
                 candles_bg_block_hours_vn=settings.paper_trade_candles_bg_block_hours_vn,
                 candles_bg_long_block_hours_vn=settings.paper_trade_candles_bg_long_block_hours_vn,
@@ -234,6 +271,8 @@ async def on_startup() -> None:
                 candles_bg_long_strict_hours_vn=settings.paper_trade_candles_bg_long_strict_hours_vn,
                 candles_bg_short_strict_hours_vn=settings.paper_trade_candles_bg_short_strict_hours_vn,
                 candles_bg_strict_min_win_bonus=settings.paper_trade_candles_bg_strict_min_win_bonus,
+                candles_bg_bullish_long_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_long_entry_buffer_pct,
+                candles_bg_bullish_long_follow_extra_buffer_pct=settings.paper_trade_candles_bg_bullish_long_follow_extra_buffer_pct,
                 candles_bg_bullish_short_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_short_entry_buffer_pct,
                 candles_bg_bullish_short_nonfollow_extra_buffer_pct=settings.paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct,
                 candles_bg_bad_hour_aligned_entry_buffer_pct=settings.paper_trade_candles_bg_bad_hour_aligned_entry_buffer_pct,
@@ -242,6 +281,7 @@ async def on_startup() -> None:
                 candles_bg_discord_webhook_url=settings.paper_trade_ml_candles_bg_discord_webhook_url,
                 candles_bg_discord_webhook_username=settings.paper_trade_ml_candles_bg_discord_webhook_username,
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,
+                max_open_positions_per_side=settings.paper_trade_max_open_positions_per_side,
                 reentry_cooldown_minutes=settings.paper_trade_reentry_cooldown_minutes,
                 reentry_after_sl_cooldown_minutes=settings.paper_trade_reentry_after_sl_cooldown_minutes,
                 instant_sl_guard_enabled=settings.paper_trade_instant_sl_guard_enabled,
@@ -513,5 +553,3 @@ async def prices_socket(
         return
     except Exception:
         return
-
-

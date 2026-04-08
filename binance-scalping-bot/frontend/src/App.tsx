@@ -203,6 +203,7 @@ type PaperTrade = {
   quantity: number
   leverage: number
   status: string
+  created_at: string
   opened_at: string
   closed_at?: string | null
   close_price?: number | null
@@ -720,6 +721,12 @@ function renderCandlePatternSample(sample?: CandlePatternSample | null) {
   const avgPnlText = typeof sample.avg_pnl_pct === 'number'
     ? `${sample.avg_pnl_pct >= 0 ? '+' : ''}${sample.avg_pnl_pct.toFixed(2)}%`
     : null
+  const avgMaeText = typeof sample.avg_mae_pct === 'number'
+    ? `${sample.avg_mae_pct >= 0 ? '+' : ''}${sample.avg_mae_pct.toFixed(2)}%`
+    : null
+  const avgMfeText = typeof sample.avg_mfe_pct === 'number'
+    ? `${sample.avg_mfe_pct >= 0 ? '+' : ''}${sample.avg_mfe_pct.toFixed(2)}%`
+    : null
   return (
     <div className="signal-model-stack">
       <span className={`badge ${sample.good_pattern ? 'success' : 'neutral'}`}>
@@ -731,9 +738,50 @@ function renderCandlePatternSample(sample?: CandlePatternSample | null) {
         {sample.wins}/{sample.total_signals} | {sample.win_rate_pct.toFixed(1)}%
         {avgPnlText ? ` | ${avgPnlText}` : ''}
       </span>
+      {(avgMaeText || avgMfeText) ? (
+        <span className="signal-model-meta">
+          {avgMaeText ? `MAE ${avgMaeText}` : 'MAE -'}
+          {avgMfeText ? ` | MFE ${avgMfeText}` : ' | MFE -'}
+        </span>
+      ) : null}
       {sample.live_btc_phase ? (
         <span className="signal-model-meta">BTC: {sample.live_btc_phase}</span>
       ) : null}
+    </div>
+  )
+}
+
+function renderBlockedReasonDetail(
+  reason?: string | null,
+  sample?: CandlePatternSample | null,
+) {
+  const normalized = (reason ?? '').trim()
+  if (!normalized) return '-'
+  const match = normalized.match(/^(.*?expectancy)\s*\((.*)\)$/i)
+  if (!match) return normalized
+  const title = match[1]?.trim() || normalized
+  const details = (match[2] ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  const avgPnlText = typeof sample?.avg_pnl_pct === 'number'
+    ? `${sample.avg_pnl_pct >= 0 ? '+' : ''}${sample.avg_pnl_pct.toFixed(2)}%`
+    : '-'
+  const avgMaeText = typeof sample?.avg_mae_pct === 'number'
+    ? `${sample.avg_mae_pct >= 0 ? '+' : ''}${sample.avg_mae_pct.toFixed(2)}%`
+    : '-'
+  const avgMfeText = typeof sample?.avg_mfe_pct === 'number'
+    ? `${sample.avg_mfe_pct >= 0 ? '+' : ''}${sample.avg_mfe_pct.toFixed(2)}%`
+    : '-'
+  return (
+    <div className="signal-model-stack">
+      <span className="signal-model-meta">{title}</span>
+      <span className="signal-model-meta">
+        avg_pnl {avgPnlText} | avg_mae {avgMaeText} | avg_mfe {avgMfeText}
+      </span>
+      {details.map((item) => (
+        <span key={item} className="signal-model-meta">{item}</span>
+      ))}
     </div>
   )
 }
@@ -3528,6 +3576,7 @@ function App() {
                   <tr>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
+                    <th>Created At</th>
                     <th>BTC Follow</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
@@ -3569,6 +3618,7 @@ function App() {
                     <tr key={row.id}>
                       <td>{row.id}</td>
                       <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                      <td>{formatVnTimestamp(row.created_at)}</td>
                       <td>
                         {typeof row.btc_following === 'boolean' ? (
                           <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -4320,7 +4370,7 @@ function App() {
                             {canEnter ? 'READY' : 'WAIT'}
                           </span>
                         </td>
-                        <td>{item.blocked_reason ?? '-'}</td>
+                        <td>{renderBlockedReasonDetail(item.blocked_reason, item.candle_pattern_sample)}</td>
                         <td>
                           <button
                             type="button"
@@ -4858,7 +4908,7 @@ function App() {
                         {canEnter ? 'READY' : 'WAIT'}
                       </span>
                     </td>
-                    <td>{blockedReason}</td>
+                    <td>{renderBlockedReasonDetail(blockedReason, item.candle_pattern_sample)}</td>
                     <td>
                       {btcFollow == null ? '-' : (
                         <span className={`badge ${btcFollow ? 'success' : 'neutral'}`}>
@@ -5385,9 +5435,6 @@ function App() {
 }
 
 export default App
-
-
-
 
 
 

@@ -306,6 +306,7 @@ class PaperTradeAPI:
             quantity=quantity,
             leverage=leverage,
             status=str(row["status"]),
+            created_at=_parse_dt(row.get("created_at")) or datetime.utcnow(),
             opened_at=_parse_dt(row.get("opened_at")) or datetime.utcnow(),
             closed_at=_parse_dt(row.get("closed_at")),
             close_price=close_price,
@@ -963,6 +964,21 @@ class PaperTradeAPI:
                 btc_following = bool(self.btc_follow_resolver(req.symbol))
             except Exception:
                 btc_following = None
+        open_rows = repo.list_open_trades()
+        open_same_side = sum(
+            1
+            for row in open_rows
+            if str(row.get("status") or "OPEN").upper() == "OPEN"
+            and str(row.get("side") or "").upper() == str(req.side or "").upper()
+        )
+        if open_same_side >= int(settings.paper_trade_max_open_positions_per_side):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Open {str(req.side).upper()} trades reached limit "
+                    f"{int(settings.paper_trade_max_open_positions_per_side)}"
+                ),
+            )
         trade_id = repo.create_open_trade(
             {
                 "symbol": req.symbol,
@@ -1093,4 +1109,3 @@ class PaperTradeAPI:
 
 paper_trade_api = PaperTradeAPI()
 router = paper_trade_api.router
-

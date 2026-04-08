@@ -324,16 +324,19 @@ def _evaluate_paper_entry_gate(
 
         if normalized_entry_type == "LIMIT":
             try:
-                basic_pattern_reason, _, _ = engine._evaluate_basic_ml_pattern_gate(
+                effective_probability, basic_pattern_reason, _, _ = engine._evaluate_basic_ml_pattern_gate(
                     symbol=symbol,
                     side=side,
+                    effective_prob=effective_probability,
                     candle_pattern_sample=candle_pattern_sample,
                     feature_snapshot=feature_snapshot,
                 )
             except Exception:
                 return False, "Basic pattern gate unavailable", effective_probability, btc_following
-            if basic_pattern_reason:
-                return False, str(basic_pattern_reason), effective_probability, btc_following
+            if effective_probability < min_win:
+                if basic_pattern_reason:
+                    return False, str(basic_pattern_reason), effective_probability, btc_following
+                return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, btc_following
 
         if not skip_btc_guards:
             try:
@@ -522,6 +525,12 @@ def _evaluate_paper_entry_gate(
                 return False, str(entry_timing_reason), effective_probability, btc_following
         else:
             try:
+                if normalized_entry_type in {"LIMIT", "ML_TEST"} and not engine._is_limit_entry_orientation_valid(
+                    side=side,
+                    market_price=market_price,
+                    entry=entry,
+                ):
+                    return False, "Invalid limit direction", effective_probability, btc_following
                 touched = bool(engine._entry_touched(side=side, market_price=market_price, entry=entry))
             except Exception:
                 touched = False
@@ -1063,6 +1072,4 @@ def list_candle_pattern_samples(
         "items": items[:limit],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-
-
 

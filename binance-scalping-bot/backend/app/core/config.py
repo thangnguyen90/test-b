@@ -284,10 +284,37 @@ class Settings(BaseModel):
     paper_trade_btc_kill_short_guard_enabled: bool = os.getenv("PAPER_TRADE_BTC_KILL_SHORT_GUARD_ENABLED", "true").lower() == "true"
     paper_trade_btc_kill_short_pump_min_body_pct: float = float(os.getenv("PAPER_TRADE_BTC_KILL_SHORT_PUMP_MIN_BODY_PCT", "0.7"))
     paper_trade_btc_kill_short_ema_tolerance_pct: float = float(os.getenv("PAPER_TRADE_BTC_KILL_SHORT_EMA_TOLERANCE_PCT", "0.0025"))
+    paper_trade_btc_bullish_short_reprice_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_BULLISH_SHORT_REPRICE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_bullish_short_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BULLISH_SHORT_ENTRY_BUFFER_PCT", "0.003")
+    )
+    paper_trade_btc_bullish_short_nonfollow_extra_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BULLISH_SHORT_NONFOLLOW_EXTRA_BUFFER_PCT", "0.001")
+    )
+    paper_trade_btc_bearish_long_reprice_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_BEARISH_LONG_REPRICE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_bearish_long_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BEARISH_LONG_ENTRY_BUFFER_PCT", "0.003")
+    )
+    paper_trade_btc_bearish_long_follow_extra_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BEARISH_LONG_FOLLOW_EXTRA_BUFFER_PCT", "0.0015")
+    )
     paper_trade_btc_reversal_profit_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_PROFIT_EXIT_ENABLED", "false").lower() == "true"
     paper_trade_btc_reversal_threshold_pct: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_THRESHOLD_PCT", "0.8"))
     paper_trade_btc_reversal_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_MIN_CONFIDENCE", "0.55"))
     paper_trade_btc_reversal_min_profit_pct: float = float(os.getenv("PAPER_TRADE_BTC_REVERSAL_MIN_PROFIT_PCT", "0.1"))
+    paper_trade_basic_ml_btc_reversal_exit_enabled: bool = os.getenv(
+        "PAPER_TRADE_BASIC_ML_BTC_REVERSAL_EXIT_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_basic_ml_btc_reversal_exit_min_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_BTC_REVERSAL_EXIT_MIN_PNL_PCT", "-5")
+    )
     paper_trade_btc_reversal_loss_exit_enabled: bool = os.getenv("PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_ENABLED", "false").lower() == "true"
     paper_trade_btc_reversal_loss_exit_days_vn: str = os.getenv(
         "PAPER_TRADE_BTC_REVERSAL_LOSS_EXIT_DAYS_VN",
@@ -305,17 +332,73 @@ class Settings(BaseModel):
     )
     paper_trade_btc_profit_lock_enabled: bool = os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_ENABLED", "true").lower() == "true"
     paper_trade_btc_profit_lock_min_confidence: float = float(os.getenv("PAPER_TRADE_BTC_PROFIT_LOCK_MIN_CONFIDENCE", "0.6"))
+    paper_trade_btc_bad_trend_panic_exit_enabled: bool = os.getenv(
+        "PAPER_TRADE_BTC_BAD_TREND_PANIC_EXIT_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_btc_bad_trend_panic_exit_min_confidence: float = float(
+        os.getenv("PAPER_TRADE_BTC_BAD_TREND_PANIC_EXIT_MIN_CONFIDENCE", "0.62")
+    )
+    paper_trade_btc_bad_trend_panic_exit_min_shock_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BAD_TREND_PANIC_EXIT_MIN_SHOCK_PCT", "0.8")
+    )
+    paper_trade_btc_bad_trend_panic_exit_min_tp_progress_ratio: float = float(
+        os.getenv("PAPER_TRADE_BTC_BAD_TREND_PANIC_EXIT_MIN_TP_PROGRESS_RATIO", "0.35")
+    )
+    paper_trade_btc_bad_trend_panic_exit_min_1h_body_pct: float = float(
+        os.getenv("PAPER_TRADE_BTC_BAD_TREND_PANIC_EXIT_MIN_1H_BODY_PCT", "0.0035")
+    )
     paper_trade_btc_follow_min_corr: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_CORR", "0.45"))
     paper_trade_btc_follow_min_beta: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_MIN_BETA", "0.2"))
     paper_trade_btc_follow_lookback: int = int(os.getenv("PAPER_TRADE_BTC_FOLLOW_LOOKBACK", "120"))
     paper_trade_btc_follow_cache_sec: float = float(os.getenv("PAPER_TRADE_BTC_FOLLOW_CACHE_SEC", "300"))
     paper_trade_base_ml_max_symbols: int = int(os.getenv("PAPER_TRADE_BASE_ML_MAX_SYMBOLS", "200"))
+    paper_trade_basic_ml_max_orders_per_cycle: int = int(
+        os.getenv("PAPER_TRADE_BASIC_ML_MAX_ORDERS_PER_CYCLE", "6")
+    )
     paper_trade_basic_ml_pattern_gate_enabled: bool = os.getenv(
         "PAPER_TRADE_BASIC_ML_PATTERN_GATE_ENABLED",
         "true",
     ).lower() == "true"
     paper_trade_basic_ml_pattern_min_win_rate_pct: float = float(
         os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_MIN_WIN_RATE_PCT", "90")
+    )
+    paper_trade_basic_ml_pattern_expectancy_gate_enabled: bool = os.getenv(
+        "PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_GATE_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_basic_ml_pattern_expectancy_min_samples: int = int(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_MIN_SAMPLES", "120")
+    )
+    paper_trade_basic_ml_pattern_expectancy_min_avg_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_MIN_AVG_PNL_PCT", "0.45")
+    )
+    paper_trade_basic_ml_pattern_expectancy_max_avg_mae_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_MAX_AVG_MAE_PCT", "2.5")
+    )
+    paper_trade_basic_ml_pattern_expectancy_min_avg_mfe_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_MIN_AVG_MFE_PCT", "2.5")
+    )
+    paper_trade_basic_ml_pattern_expectancy_min_mfe_mae_ratio: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_EXPECTANCY_MIN_MFE_MAE_RATIO", "0.95")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_min_win_rate_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MIN_WIN_RATE_PCT", "80")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_min_samples: int = int(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MIN_SAMPLES", "200")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_min_avg_pnl_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MIN_AVG_PNL_PCT", "0.35")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_max_avg_mae_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MAX_AVG_MAE_PCT", "2.2")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_min_avg_mfe_pct: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MIN_AVG_MFE_PCT", "2.7")
+    )
+    paper_trade_basic_ml_pattern_c_expectancy_min_mfe_mae_ratio: float = float(
+        os.getenv("PAPER_TRADE_BASIC_ML_PATTERN_C_EXPECTANCY_MIN_MFE_MAE_RATIO", "1.05")
     )
     paper_trade_test_ml_enabled: bool = os.getenv("PAPER_TRADE_TEST_ML_ENABLED", "false").lower() == "true"
     paper_trade_test_ml_min_win: float = float(os.getenv("PAPER_TRADE_TEST_ML_MIN_WIN", "0.75"))
@@ -325,6 +408,14 @@ class Settings(BaseModel):
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
     paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "557"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
+    paper_trade_candles_bg_require_entry_touch: bool = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_REQUIRE_ENTRY_TOUCH",
+        "true",
+    ).lower() == "true"
+    paper_trade_candles_bg_debug_enabled: bool = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_DEBUG_ENABLED",
+        "false",
+    ).lower() == "true"
     paper_trade_candles_bg_block_hours_vn: str = os.getenv("PAPER_TRADE_CANDLES_BG_BLOCK_HOURS_VN", "").strip()
     paper_trade_candles_bg_long_block_hours_vn: str = os.getenv(
         "PAPER_TRADE_CANDLES_BG_LONG_BLOCK_HOURS_VN",
@@ -345,6 +436,12 @@ class Settings(BaseModel):
     paper_trade_candles_bg_strict_min_win_bonus: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_STRICT_MIN_WIN_BONUS", "0.04")
     )
+    paper_trade_candles_bg_bullish_long_entry_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_LONG_ENTRY_BUFFER_PCT", "0.002")
+    )
+    paper_trade_candles_bg_bullish_long_follow_extra_buffer_pct: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_LONG_FOLLOW_EXTRA_BUFFER_PCT", "0.001")
+    )
     paper_trade_candles_bg_bullish_short_entry_buffer_pct: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_SHORT_ENTRY_BUFFER_PCT", "0.003")
     )
@@ -359,6 +456,9 @@ class Settings(BaseModel):
         "true",
     ).lower() == "true"
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"
+    paper_trade_max_open_positions_per_side: int = int(
+        os.getenv("PAPER_TRADE_MAX_OPEN_POSITIONS_PER_SIDE", "40")
+    )
     paper_trade_reentry_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_COOLDOWN_MINUTES", "0"))
     paper_trade_reentry_after_sl_cooldown_minutes: int = int(os.getenv("PAPER_TRADE_REENTRY_AFTER_SL_COOLDOWN_MINUTES", "30"))
     paper_trade_instant_sl_guard_enabled: bool = os.getenv("PAPER_TRADE_INSTANT_SL_GUARD_ENABLED", "true").lower() == "true"
@@ -468,6 +568,3 @@ class Settings(BaseModel):
     binance_execution_set_leverage_before_order: bool = os.getenv("BINANCE_EXECUTION_SET_LEVERAGE_BEFORE_ORDER", "false").lower() == "true"
 
 settings = Settings()
-
-
-
