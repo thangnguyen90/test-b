@@ -199,19 +199,19 @@ class Settings(BaseModel):
     paper_trade_funding_guard_safe_pnl_pct: float = float(os.getenv("PAPER_TRADE_FUNDING_GUARD_SAFE_PNL_PCT", "0.3"))
     paper_trade_session_open_guard_enabled: bool = os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENABLED", "true").lower() == "true"
     paper_trade_session_open_guard_sessions: list[str] = _csv_list(
-        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_SESSIONS", "TOKYO,LONDON,US")
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_SESSIONS", "TOKYO,LONDON,NEWYORK")
     )
     paper_trade_session_open_guard_force_close_before_minutes: int = int(
-        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_BEFORE_MINUTES", "5")
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_BEFORE_MINUTES", "30")
     )
     paper_trade_session_open_guard_force_close_after_minutes: int = int(
-        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_AFTER_MINUTES", "10")
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_FORCE_CLOSE_AFTER_MINUTES", "30")
     )
     paper_trade_session_open_guard_entry_block_before_minutes: int = int(
-        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_BEFORE_MINUTES", "15")
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_BEFORE_MINUTES", "30")
     )
     paper_trade_session_open_guard_entry_block_after_minutes: int = int(
-        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_AFTER_MINUTES", "15")
+        os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_ENTRY_BLOCK_AFTER_MINUTES", "30")
     )
     paper_trade_session_open_guard_min_hold_minutes: int = int(
         os.getenv("PAPER_TRADE_SESSION_OPEN_GUARD_MIN_HOLD_MINUTES", "15")

@@ -74,3 +74,6 @@
 {"event": "START", "trigger": "auto", "started_at": "2026-04-07T21:28:02.209231+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-04-08T01:28:36.850492+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
 {"event": "START", "trigger": "auto", "started_at": "2026-04-08T02:27:13.355149+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-04-08T04:54:35.658886+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-04-08T08:55:25.258730+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}
+{"event": "START", "trigger": "auto", "started_at": "2026-04-08T12:55:36.854865+00:00", "limit": 800, "horizon": 4, "rr_ratio": 1.5, "symbols_count": 4}

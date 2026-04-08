@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -346,9 +346,9 @@ class PaperTradingEngine:
         self.funding_guard_safe_pnl_pct = float(funding_guard_safe_pnl_pct)
         self.session_open_guard_enabled = bool(session_open_guard_enabled)
         self.session_open_guard_sessions = {
-            str(item or "").strip().upper()
+            normalized
             for item in (session_open_guard_sessions or [])
-            if str(item or "").strip().upper() in {"TOKYO", "LONDON", "US"}
+            if (normalized := self._normalize_session_guard_name(item)) is not None
         }
         self.session_open_guard_force_close_before_minutes = max(0, min(60, int(session_open_guard_force_close_before_minutes)))
         self.session_open_guard_force_close_after_minutes = max(0, min(60, int(session_open_guard_force_close_after_minutes)))
@@ -662,12 +662,12 @@ class PaperTradingEngine:
         self._session_guard_timezones = {
             "TOKYO": ZoneInfo("Asia/Tokyo"),
             "LONDON": ZoneInfo("Europe/London"),
-            "US": ZoneInfo("America/New_York"),
+            "NEWYORK": ZoneInfo("America/New_York"),
         }
         self._session_guard_specs = {
             "TOKYO": {"hour": 9, "minute": 0},
             "LONDON": {"hour": 8, "minute": 0},
-            "US": {"hour": 9, "minute": 30},
+            "NEWYORK": {"hour": 9, "minute": 30},
         }
         self._macro_event_guard_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._atr_cache: dict[str, tuple[float, float]] = {}
@@ -3864,6 +3864,19 @@ class PaperTradingEngine:
             return start_minute <= now_minute <= end_minute
         return now_minute >= start_minute or now_minute <= end_minute
 
+    @staticmethod
+    def _normalize_session_guard_name(value: object) -> str | None:
+        normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "TOKYO": "TOKYO",
+            "LONDON": "LONDON",
+            "US": "NEWYORK",
+            "NY": "NEWYORK",
+            "NEW_YORK": "NEWYORK",
+            "NEWYORK": "NEWYORK",
+        }
+        return aliases.get(normalized)
+
     def _is_hourly_transition_entry_block_window(self, now_vn: datetime) -> bool:
         if not self.hourly_transition_guard_enabled:
             return False
@@ -4084,7 +4097,7 @@ class PaperTradingEngine:
             session_name = str(session_match.get("session") or "SESSION")
             event_dt = session_match.get("event_dt")
             event_label = event_dt.strftime('%H:%M') if isinstance(event_dt, datetime) else 'session-open'
-            return f"Session open guard {session_name} ({event_label} VN)"
+            return f"Session transition guard {session_name} ({event_label} VN)"
         macro_match = self._find_active_macro_event_guard(
             now_vn=now_vn,
             before_minutes=self.macro_event_guard_entry_block_before_minutes,
@@ -4106,9 +4119,16 @@ class PaperTradingEngine:
         entry_type = self._normalize_entry_type_name(trade.get("entry_type"))
         if not self._is_guard_target_entry_type(entry_type):
             return None
+        now_vn = datetime.now(self._vn_tz)
+        session_match = self._find_active_session_open_guard_window(
+            now_vn=now_vn,
+            before_minutes=self.session_open_guard_force_close_before_minutes,
+            after_minutes=self.session_open_guard_force_close_after_minutes,
+        )
+        if session_match is not None and pnl_pct > 0.0:
+            return str(session_match["close_reason"])
         if self._has_locked_profit_stop(side=side, entry=entry, stop_loss=stop_loss):
             return None
-        now_vn = datetime.now(self._vn_tz)
         trade_age_minutes = self._trade_age_minutes(trade.get("opened_at"))
         if self._is_hourly_transition_force_close_window(now_vn):
             if (
@@ -4128,18 +4148,7 @@ class PaperTradingEngine:
                 and pnl_pct < float(self.funding_guard_safe_pnl_pct)
             ):
                 return str(funding_match["close_reason"])
-        session_match = self._find_active_session_open_guard_window(
-            now_vn=now_vn,
-            before_minutes=self.session_open_guard_force_close_before_minutes,
-            after_minutes=self.session_open_guard_force_close_after_minutes,
-        )
-        if session_match is not None:
-            if (
-                trade_age_minutes >= float(self.session_open_guard_min_hold_minutes)
-                and pnl_pct > 0.0
-                and pnl_pct < float(self.session_open_guard_safe_pnl_pct)
-            ):
-                return str(session_match["close_reason"])
+
         macro_match = self._find_active_macro_event_guard(
             now_vn=now_vn,
             before_minutes=self.macro_event_guard_force_close_before_minutes,
