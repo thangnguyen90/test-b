@@ -496,7 +496,7 @@ type PaperManualCloseRequest = {
 }
 
 const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
-export const API_BASE = `http://${API_HOST}:8005`
+export const API_BASE = `http://${API_HOST}:9000`
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const ML_CANDLES_DISPLAY_MIN_WIN = 0.7

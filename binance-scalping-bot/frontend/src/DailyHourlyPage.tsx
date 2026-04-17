@@ -35,7 +35,7 @@ const ENTRY_TYPE_OPTIONS: { value: EntryTypeFilter; label: string }[] = [
 ]
 
 const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
-const API_BASE_CANDIDATES = [`http://${API_HOST}:8005`, `http://${API_HOST}:8000`]
+const API_BASE_CANDIDATES = [`http://${API_HOST}:9000`]
 const API_HEAVY_TIMEOUT_MS = 30000
 const REFRESH_MS = 30000
 const HISTORY_LIMIT = 2000

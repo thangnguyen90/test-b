@@ -219,6 +219,8 @@ class PaperTradingEngine:
         candles_bg_min_win_probability: float = 0.75,
         candles_bg_max_symbols: int = 80,
         candles_bg_max_orders_per_cycle: int = 2,
+        candles_bg_max_open_trades: int = 50,
+        candles_bg_disable_sl: bool = False,
         candles_bg_require_entry_touch: bool = True,
         candles_bg_debug_enabled: bool = False,
         candles_bg_entry_type: str = "ML_CANDLES_BG",
@@ -539,6 +541,8 @@ class PaperTradingEngine:
         self.candles_bg_min_win_probability = max(0.0, min(float(candles_bg_min_win_probability), 1.0))
         self.candles_bg_max_symbols = max(10, min(600, int(candles_bg_max_symbols)))
         self.candles_bg_max_orders_per_cycle = max(1, min(20, int(candles_bg_max_orders_per_cycle)))
+        self.candles_bg_max_open_trades = max(1, min(500, int(candles_bg_max_open_trades)))
+        self.candles_bg_disable_sl = bool(candles_bg_disable_sl)
         self.candles_bg_require_entry_touch = bool(candles_bg_require_entry_touch)
         self.candles_bg_debug_enabled = bool(candles_bg_debug_enabled)
         self.candles_bg_entry_type = str(candles_bg_entry_type or "ML_CANDLES_BG").strip().upper() or "ML_CANDLES_BG"
@@ -1132,24 +1136,34 @@ class PaperTradingEngine:
                     btc_following=current_btc_following,
                 )
 
+                fill_entry_price = float(market_price)
+                if fill_entry_price <= 0:
+                    continue
+                if entry <= 0:
+                    continue
+                # Re-anchor signal exits to the actual market fill so stored entry/TP/SL stay coherent.
+                fill_scale = fill_entry_price / float(entry)
+                fill_tp = float(tp) * fill_scale
+                fill_sl = float(sl) * fill_scale
+
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / float(fill_entry_price)) * 100 if fill_entry_price > 0 else 0.0
                 leverage = pattern_leverage_override or self._resolve_symbol_leverage(symbol, atr_pct)
-                tp, sl = self._expand_signal_exit_targets(
+                normalized_signal_tp, normalized_signal_sl = self._expand_signal_exit_targets(
                     side=side,
-                    entry=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
+                    entry=fill_entry_price,
+                    take_profit=fill_tp,
+                    stop_loss=fill_sl,
                     leverage=leverage,
                     effective_prob=effective_prob,
                     base_min_win=required_min_win,
                 )
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
+                    entry_price=fill_entry_price,
+                    take_profit=normalized_signal_tp,
+                    stop_loss=normalized_signal_sl,
                     min_sl_pct=max(
                         self.min_sl_pct,
                         calc_min_sl_pct_from_loss(min_sl_loss_pct=self.min_sl_loss_pct),
@@ -1162,13 +1176,14 @@ class PaperTradingEngine:
                         base_min_win=required_min_win,
                     ),
                     max_tp_pct=self._resolve_signal_max_tp_pct(
-                        entry=entry,
-                        take_profit=tp,
+                        entry=fill_entry_price,
+                        take_profit=normalized_signal_tp,
+                        leverage=leverage,
                     ),
                     leverage=leverage,
                     max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
-                        entry=entry,
-                        stop_loss=sl,
+                        entry=fill_entry_price,
+                        stop_loss=normalized_signal_sl,
                         leverage=leverage,
                         symbol=symbol,
                         side=side,
@@ -1222,8 +1237,16 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
+                    entry_type="LIMIT",
                     entry_price=entry,
                     quantity=quantity,
+                )
+                self._close_profitable_opposite_trades_on_recent_open_cluster(
+                    triggered_side=side,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    additional_open_trade_indexes=[candles_open_trades_by_symbol],
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
                 )
                 opened_basic_ml_orders += 1
 
@@ -1426,6 +1449,7 @@ class PaperTradingEngine:
                     max_tp_pct=self._resolve_signal_max_tp_pct(
                         entry=entry,
                         take_profit=tp,
+                        leverage=leverage,
                     ),
                     leverage=leverage,
                     max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
@@ -1484,8 +1508,16 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
+                    entry_type="ML_TEST",
                     entry_price=entry,
                     quantity=quantity,
+                )
+                self._close_profitable_opposite_trades_on_recent_open_cluster(
+                    triggered_side=side,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    additional_open_trade_indexes=[candles_open_trades_by_symbol],
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
                 )
                 opened_test_orders += 1
 
@@ -1626,6 +1658,17 @@ class PaperTradingEngine:
                         raw_prob=raw_prob,
                         effective_prob=effective_prob,
                         reason="min_win_after_adjust",
+                    )
+                    continue
+                if not self._pass_candles_bg_total_open_cap(
+                    open_trades_by_symbol=candles_open_trades_by_symbol,
+                ):
+                    self._log_candles_bg_block(
+                        symbol=symbol,
+                        side=side,
+                        raw_prob=raw_prob,
+                        effective_prob=effective_prob,
+                        reason="max_open_trades_cap",
                     )
                     continue
                 if not self._pass_open_side_cap(side=side, open_trades_by_symbol=candles_open_trades_by_symbol):
@@ -1834,22 +1877,32 @@ class PaperTradingEngine:
                     btc_following=current_btc_following,
                 )
 
+                fill_entry_price = float(market_price)
+                if fill_entry_price <= 0:
+                    continue
+                if entry <= 0:
+                    continue
+                # Re-anchor signal exits to the actual market fill so stored entry/TP/SL stay coherent.
+                fill_scale = fill_entry_price / float(entry)
+                fill_tp = float(tp) * fill_scale
+                fill_sl = float(sl) * fill_scale
+
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / float(fill_entry_price)) * 100 if fill_entry_price > 0 else 0.0
                 leverage = pattern_leverage_override or self._resolve_symbol_leverage(symbol, atr_pct)
                 tp, sl = self._expand_signal_exit_targets(
                     side=side,
-                    entry=entry,
-                    take_profit=tp,
-                    stop_loss=sl,
+                    entry=fill_entry_price,
+                    take_profit=fill_tp,
+                    stop_loss=fill_sl,
                     leverage=leverage,
                     effective_prob=effective_prob,
                     base_min_win=required_min_win,
                 )
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_entry_price,
                     take_profit=tp,
                     stop_loss=sl,
                     min_sl_pct=max(
@@ -1864,12 +1917,13 @@ class PaperTradingEngine:
                         base_min_win=required_min_win,
                     ),
                     max_tp_pct=self._resolve_signal_max_tp_pct(
-                        entry=entry,
+                        entry=fill_entry_price,
                         take_profit=tp,
+                        leverage=leverage,
                     ),
                     leverage=leverage,
                     max_margin_loss_pct=self._resolve_signal_max_margin_loss_pct(
-                        entry=entry,
+                        entry=fill_entry_price,
                         stop_loss=sl,
                         leverage=leverage,
                         symbol=symbol,
@@ -1894,13 +1948,13 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_entry_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=fill_entry_price, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -1912,7 +1966,7 @@ class PaperTradingEngine:
                         "entry_type": candles_entry_type,
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_entry_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "quantity": quantity,
@@ -1928,7 +1982,8 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_type=candles_entry_type,
+                    entry_price=fill_entry_price,
                     quantity=quantity,
                 )
                 self._cache_open_trade_row(
@@ -1936,14 +1991,22 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_type=candles_entry_type,
+                    entry_price=fill_entry_price,
                     quantity=quantity,
+                )
+                self._close_profitable_opposite_trades_on_recent_open_cluster(
+                    triggered_side=side,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    additional_open_trade_indexes=[candles_open_trades_by_symbol],
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
                 )
                 self._enqueue_ml_candles_bg_open_notification(
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry=entry,
+                    entry=fill_entry_price,
                     take_profit=normalized_tp,
                     stop_loss=normalized_sl,
                     leverage=leverage,
@@ -2134,8 +2197,16 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
+                    entry_type="LIQ_EMA99",
                     entry_price=entry,
                     quantity=quantity,
+                )
+                self._close_profitable_opposite_trades_on_recent_open_cluster(
+                    triggered_side=side,
+                    open_trades_by_symbol=open_trades_by_symbol,
+                    additional_open_trade_indexes=[candles_open_trades_by_symbol],
+                    closed_trade_ids=closed_trade_ids,
+                    market_prices=market_prices,
                 )
 
         # 2) Manage open trades: close on TP, otherwise apply timeout policy.
@@ -2170,6 +2241,7 @@ class PaperTradingEngine:
                 prev_mfe = float(trade.get("mfe_pct") or 0.0)
                 next_mae = min(prev_mae, pnl_pct)
                 next_mfe = max(prev_mfe, pnl_pct)
+                sl_disabled_for_trade = self._is_sl_disabled_for_entry_type(entry_type)
                 if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
                     self.repo.update_trade_excursions(
                         trade_id=int(trade["id"]),
@@ -2177,7 +2249,7 @@ class PaperTradingEngine:
                         mfe_pct=next_mfe,
                     )
                 move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
-                if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
+                if (not sl_disabled_for_trade) and pnl_pct >= move_sl_trigger_pct:
                     lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
                     locked_sl = self._calc_locked_profit_sl(
                         side=side,
@@ -2195,6 +2267,7 @@ class PaperTradingEngine:
                     if self._should_panic_exit_on_bad_btc_trend(
                         entry_type=entry_type,
                         side=side,
+                        pnl=pnl,
                         entry=entry,
                         mark_price=float(price),
                         take_profit=tp,
@@ -2303,7 +2376,7 @@ class PaperTradingEngine:
 
                 # SL has higher priority than TP per user requirement.
                 sl_hit = False
-                if not self.disable_sl:
+                if not sl_disabled_for_trade:
                     sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
                 if sl_hit:
                     close_reason = 1 if pnl >= 0 else 0
@@ -2339,6 +2412,18 @@ class PaperTradingEngine:
                         result=close_reason,
                         close_reason="TP",
                         commission_usdt=commission,
+                    )
+                    continue
+
+                if self._trade_age_minutes(trade.get("opened_at")) >= 60.0 and pnl > 0.0:
+                    self._close_trade_now(
+                        trade_id=trade_id,
+                        close_price=price,
+                        pnl=pnl,
+                        entry=entry,
+                        quantity=qty,
+                        entry_type=entry_type,
+                        close_reason="TIMEOUT_PROFIT_1H",
                     )
                     continue
 
@@ -2480,13 +2565,14 @@ class PaperTradingEngine:
         prev_mfe = float(trade.get("mfe_pct") or 0.0)
         next_mae = min(prev_mae, pnl_pct)
         next_mfe = max(prev_mfe, pnl_pct)
+        sl_disabled_for_trade = self._is_sl_disabled_for_entry_type(entry_type)
         if (abs(next_mae - prev_mae) > 1e-9) or (abs(next_mfe - prev_mfe) > 1e-9):
             self.repo.update_trade_excursions(trade_id=trade_id, mae_pct=next_mae, mfe_pct=next_mfe)
             trade["mae_pct"] = next_mae
             trade["mfe_pct"] = next_mfe
 
         move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=leverage)
-        if (not self.disable_sl) and pnl_pct >= move_sl_trigger_pct:
+        if (not sl_disabled_for_trade) and pnl_pct >= move_sl_trigger_pct:
             lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
             locked_sl = self._calc_locked_profit_sl(
                 side=side,
@@ -2502,7 +2588,7 @@ class PaperTradingEngine:
                     trade["stop_loss"] = locked_sl
 
         sl_hit = False
-        if not self.disable_sl:
+        if not sl_disabled_for_trade:
             sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
         if sl_hit:
             result = 1 if pnl >= 0 else 0
@@ -2570,8 +2656,10 @@ class PaperTradingEngine:
         trade_id: int,
         symbol: str,
         side: str,
+        entry_type: str,
         entry_price: float,
         quantity: float,
+        opened_at: object | None = None,
     ) -> None:
         key = self._normalize_symbol_key(symbol)
         open_trades_by_symbol.setdefault(key, []).append(
@@ -2580,10 +2668,111 @@ class PaperTradingEngine:
                 "symbol": symbol,
                 "side": side,
                 "status": "OPEN",
+                "entry_type": str(entry_type or "LIMIT"),
                 "entry_price": float(entry_price),
                 "quantity": float(quantity),
+                "opened_at": opened_at or datetime.now(self._vn_tz).isoformat(),
             }
         )
+
+    def _close_profitable_opposite_trades_on_recent_open_cluster(
+        self,
+        *,
+        triggered_side: str,
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+        additional_open_trade_indexes: list[dict[str, list[dict[str, Any]]]] | None,
+        closed_trade_ids: set[int],
+        market_prices: dict[str, float],
+        opened_at: object | None = None,
+    ) -> None:
+        side_key = str(triggered_side or "").upper()
+        if side_key not in {"LONG", "SHORT"}:
+            return
+
+        now_dt = self._coerce_vn_datetime(opened_at) or datetime.now(self._vn_tz)
+        window_seconds = 5 * 60
+        same_side_recent_count = 0
+        for bucket in open_trades_by_symbol.values():
+            for row in bucket:
+                trade_id = int(row.get("id") or 0)
+                if trade_id in closed_trade_ids:
+                    continue
+                if str(row.get("status") or "OPEN").upper() != "OPEN":
+                    continue
+                if str(row.get("side") or "").upper() != side_key:
+                    continue
+                row_opened_at = self._coerce_vn_datetime(row.get("opened_at"))
+                if row_opened_at is None:
+                    continue
+                elapsed_seconds = (now_dt - row_opened_at).total_seconds()
+                if 0.0 <= elapsed_seconds <= window_seconds:
+                    same_side_recent_count += 1
+
+        if same_side_recent_count <= 5:
+            return
+
+        opposite_side = "SHORT" if side_key == "LONG" else "LONG"
+        opposite_close_ids: set[int] = set()
+        for bucket in open_trades_by_symbol.values():
+            for row in bucket:
+                trade_id = int(row.get("id") or 0)
+                if trade_id <= 0 or trade_id in closed_trade_ids:
+                    continue
+                if str(row.get("status") or "OPEN").upper() != "OPEN":
+                    continue
+                if str(row.get("side") or "").upper() != opposite_side:
+                    continue
+                try:
+                    symbol = str(row.get("symbol") or "").strip()
+                    entry = float(row.get("entry_price") or 0.0)
+                    qty = float(row.get("quantity") or 0.0)
+                    entry_type = str(row.get("entry_type") or "LIMIT")
+                except Exception:
+                    continue
+                if not symbol or entry <= 0 or qty <= 0:
+                    continue
+                close_price = market_prices.get(symbol)
+                if close_price is None:
+                    close_price = self._resolve_market_price(symbol)
+                    if close_price is not None:
+                        market_prices[symbol] = float(close_price)
+                if close_price is None or float(close_price) <= 0:
+                    continue
+                pnl = self._calc_pnl(
+                    side=opposite_side,
+                    entry=entry,
+                    close_price=float(close_price),
+                    quantity=qty,
+                )
+                if float(pnl) <= 0.5:
+                    continue
+                try:
+                    self._close_trade_now(
+                        trade_id=trade_id,
+                        close_price=float(close_price),
+                        pnl=float(pnl),
+                        entry=entry,
+                        quantity=qty,
+                        entry_type=entry_type,
+                        close_reason="RECENT_OPEN_SIDE_CLUSTER_EXIT",
+                    )
+                    opposite_close_ids.add(trade_id)
+                    closed_trade_ids.add(trade_id)
+                except Exception:
+                    continue
+
+        if not opposite_close_ids:
+            return
+
+        indexes_to_prune = [open_trades_by_symbol]
+        if additional_open_trade_indexes:
+            indexes_to_prune.extend(additional_open_trade_indexes)
+        for trade_index in indexes_to_prune:
+            for key, bucket in list(trade_index.items()):
+                trade_index[key] = [
+                    row for row in bucket
+                    if int(row.get("id") or 0) not in opposite_close_ids
+                ]
 
     @staticmethod
     def _parse_dt(value: object) -> datetime | None:
@@ -2954,6 +3143,20 @@ class PaperTradingEngine:
         )
         return open_for_side < self.max_open_positions_per_side
 
+    def _pass_candles_bg_total_open_cap(
+        self,
+        *,
+        open_trades_by_symbol: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        total_open, _ = self._count_open_positions_by_side(open_trades_by_symbol)
+        return total_open < self.candles_bg_max_open_trades
+
+    def _is_sl_disabled_for_entry_type(self, entry_type: str | None) -> bool:
+        if self.disable_sl:
+            return True
+        normalized_entry_type = self._normalize_entry_type_name(entry_type)
+        return normalized_entry_type == self.candles_bg_entry_type and self.candles_bg_disable_sl
+
     def _pass_bullish_short_nonfollow_ratio_guard(
         self,
         *,
@@ -3144,11 +3347,12 @@ class PaperTradingEngine:
                 mae_pct = float(row.get("mae_pct") or 0.0)
             except Exception:
                 mae_pct = 0.0
+            severe_negative_pnl = pnl_pct < -5.0
 
-            if close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
+            if severe_negative_pnl and close_reason in {"SL", "MANUAL_FORCE_LOSS"}:
                 sl_count += 1
                 penalty += 0.08
-            if pnl_pct <= -4.5 or mae_pct <= -6.0:
+            if severe_negative_pnl and (pnl_pct <= -4.5 or mae_pct <= -6.0):
                 deep_loss_count += 1
                 penalty += 0.07
             if previous_side and row_side and row_side != previous_side:
@@ -3427,7 +3631,7 @@ class PaperTradingEngine:
         return self._normalize_entry_type_name(entry_type) == "LIMIT"
 
     def _pattern_sample_should_block_c(self, sample: dict[str, Any] | None) -> bool:
-        return self._pattern_sample_quality_tier(sample) == "C"
+        return False
 
     @staticmethod
     def _coerce_pattern_sample(raw: object) -> dict[str, Any] | None:
@@ -5307,6 +5511,7 @@ class PaperTradingEngine:
         *,
         entry_type: str,
         side: str,
+        pnl: float,
         entry: float,
         mark_price: float,
         take_profit: float,
@@ -5315,6 +5520,8 @@ class PaperTradingEngine:
         if not self.btc_bad_trend_panic_exit_enabled:
             return False
         if not self._is_guard_target_entry_type(entry_type):
+            return False
+        if float(pnl) <= 0.5:
             return False
         if not self._is_bad_btc_trend_against_trade(side=side, btc_guard=btc_guard):
             return False
@@ -6791,8 +6998,11 @@ class PaperTradingEngine:
         *,
         entry: float,
         take_profit: float,
+        leverage: int,
     ) -> float | None:
-        base_pct = max(0.0, float(settings.paper_trade_max_tp_pct))
+        base_margin_pct = max(0.0, float(settings.paper_trade_max_tp_pct))
+        lev = max(1, int(leverage))
+        base_pct = base_margin_pct / float(lev) if base_margin_pct > 0 else 0.0
         if entry <= 0 or take_profit <= 0:
             return (base_pct / 100.0) if base_pct > 0 else None
         signal_pct = (abs(float(take_profit) - float(entry)) / float(entry)) * 100.0

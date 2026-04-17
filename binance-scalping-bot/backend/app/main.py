@@ -262,6 +262,8 @@ async def on_startup() -> None:
                 candles_bg_min_win_probability=settings.paper_trade_candles_bg_min_win,
                 candles_bg_max_symbols=settings.paper_trade_candles_bg_max_symbols,
                 candles_bg_max_orders_per_cycle=settings.paper_trade_candles_bg_max_orders_per_cycle,
+                candles_bg_max_open_trades=settings.paper_trade_candles_bg_max_open_trades,
+                candles_bg_disable_sl=settings.paper_trade_candles_bg_disable_sl,
                 candles_bg_require_entry_touch=settings.paper_trade_candles_bg_require_entry_touch,
                 candles_bg_debug_enabled=settings.paper_trade_candles_bg_debug_enabled,
                 candles_bg_entry_type="ML_CANDLES_BG",

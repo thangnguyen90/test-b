@@ -923,7 +923,7 @@ class PaperTradeAPI:
             atr_value=atr_value,
             sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
             min_rr=settings.paper_trade_min_rr,
-            max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+            max_tp_pct=(max(0.0, settings.paper_trade_max_tp_pct) / max(1, leverage)) / 100.0,
             leverage=leverage,
             max_margin_loss_pct=settings.paper_trade_max_margin_loss_pct,
         )

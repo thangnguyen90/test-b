@@ -408,6 +408,8 @@ class Settings(BaseModel):
     paper_trade_candles_bg_min_win: float = float(os.getenv("PAPER_TRADE_CANDLES_BG_MIN_WIN", "0.75"))
     paper_trade_candles_bg_max_symbols: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_SYMBOLS", "557"))
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
+    paper_trade_candles_bg_max_open_trades: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_OPEN_TRADES", "50"))
+    paper_trade_candles_bg_disable_sl: bool = os.getenv("PAPER_TRADE_CANDLES_BG_DISABLE_SL", "false").lower() == "true"
     paper_trade_candles_bg_require_entry_touch: bool = os.getenv(
         "PAPER_TRADE_CANDLES_BG_REQUIRE_ENTRY_TOUCH",
         "true",

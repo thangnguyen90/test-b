@@ -492,7 +492,8 @@ class MLPredictor:
         feature_snapshot: dict[str, float] | None = None,
     ) -> SignalResult:
         rr = 1.5
-        max_tp_distance = entry * (max(0.0, settings.paper_trade_max_tp_pct) / 100.0)
+        leverage = max(1, int(settings.paper_trade_leverage))
+        max_tp_distance = entry * ((max(0.0, settings.paper_trade_max_tp_pct) / leverage) / 100.0)
         base_tp_distance = atr * rr
         tp_distance = min(base_tp_distance, max_tp_distance) if max_tp_distance > 0 else base_tp_distance
         
