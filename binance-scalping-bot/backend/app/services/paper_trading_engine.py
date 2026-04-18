@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
+    BASIC_ML_FIXED_SL_MARGIN_PCT = 50.0
+    ML_CANDLES_BG_FIXED_SL_MARGIN_PCT = 50.0
+
     def __init__(
         self,
         repo: MySQLTradeRepository,
@@ -239,6 +242,15 @@ class PaperTradingEngine:
         candles_bg_discord_webhook_enabled: bool = False,
         candles_bg_discord_webhook_url: str = "",
         candles_bg_discord_webhook_username: str = "ML Candles BG Bot",
+        candles_bg_vol_guard_enabled: bool = True,
+        candles_bg_vol_guard_block_level: str = "BLOCK",
+        candles_bg_vol_guard_atr_threshold_pct: float = 10.0,
+        candles_bg_vol_guard_pump_threshold_x: float = 3.0,
+        candles_bg_vol_guard_short_block_on_vol_up: bool = True,
+        candles_bg_vol_guard_volume_trend_ratio: float = 1.8,
+        candles_bg_vol_guard_volume_accel_ratio: float = 1.1,
+        candles_bg_vol_guard_cache_sec: int = 900,
+        candles_bg_vol_guard_discord_cooldown_minutes: int = 180,
         single_position_per_symbol_side: bool = True,
         max_open_positions_per_side: int = 40,
         reentry_cooldown_minutes: int = 0,
@@ -580,6 +592,15 @@ class PaperTradingEngine:
             webhook_url=candles_bg_discord_webhook_url,
             username=candles_bg_discord_webhook_username,
         )
+        self.candles_bg_vol_guard_enabled = bool(candles_bg_vol_guard_enabled)
+        self.candles_bg_vol_guard_block_level = str(candles_bg_vol_guard_block_level or "BLOCK").strip().upper() or "BLOCK"
+        self.candles_bg_vol_guard_atr_threshold_pct = max(0.0, float(candles_bg_vol_guard_atr_threshold_pct))
+        self.candles_bg_vol_guard_pump_threshold_x = max(0.0, float(candles_bg_vol_guard_pump_threshold_x))
+        self.candles_bg_vol_guard_short_block_on_vol_up = bool(candles_bg_vol_guard_short_block_on_vol_up)
+        self.candles_bg_vol_guard_volume_trend_ratio = max(0.0, float(candles_bg_vol_guard_volume_trend_ratio))
+        self.candles_bg_vol_guard_volume_accel_ratio = max(0.0, float(candles_bg_vol_guard_volume_accel_ratio))
+        self.candles_bg_vol_guard_cache_sec = max(60, int(candles_bg_vol_guard_cache_sec))
+        self.candles_bg_vol_guard_discord_cooldown_minutes = max(1, int(candles_bg_vol_guard_discord_cooldown_minutes))
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.max_open_positions_per_side = max(1, min(int(max_open_positions_per_side), 500))
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
@@ -698,6 +719,8 @@ class PaperTradingEngine:
         self._short_sl_last_processed_close_id: int = 0
         self._instant_sl_symbol_side_lock_until_ts: dict[str, float] = {}
         self._instant_sl_global_events_ts: list[float] = []
+        self._candles_bg_vol_guard_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._candles_bg_vol_guard_alert_ts: dict[str, float] = {}
         self.high_volatility_threshold_pct = 2.0
         self.high_volatility_leverage = 3
 
@@ -1190,6 +1213,12 @@ class PaperTradingEngine:
                         atr_pct=atr_pct,
                         btc_guard=btc_guard,
                     ),
+                )
+                normalized_sl = self._resolve_fixed_margin_stop_loss(
+                    side=side,
+                    entry_price=fill_entry_price,
+                    leverage=leverage,
+                    margin_loss_pct=self.BASIC_ML_FIXED_SL_MARGIN_PCT,
                 )
 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -1871,6 +1900,25 @@ class PaperTradingEngine:
                         reason=f"pattern_gate:{candles_pattern_reason}",
                     )
                     continue
+                volatility_assessment = await asyncio.to_thread(self._get_candles_bg_vol_guard_assessment, symbol)
+                vol_guard_reason = self._resolve_candles_bg_vol_guard_block_reason(volatility_assessment, side=side)
+                if volatility_assessment and vol_guard_reason:
+                    self._log_candles_bg_block(
+                        symbol=symbol,
+                        side=side,
+                        raw_prob=raw_prob,
+                        effective_prob=effective_prob,
+                        reason=vol_guard_reason,
+                    )
+                    self._enqueue_ml_candles_bg_vol_guard_block_notification(
+                        symbol=symbol,
+                        side=side,
+                        raw_probability=raw_prob,
+                        effective_probability=effective_prob,
+                        assessment=volatility_assessment,
+                        block_reason=vol_guard_reason,
+                    )
+                    continue
                 pattern_leverage_override = self._resolve_ml_candles_bg_leverage_override(
                     sample=pattern_sample,
                     effective_prob=effective_prob,
@@ -1931,6 +1979,12 @@ class PaperTradingEngine:
                         atr_pct=atr_pct,
                         btc_guard=btc_guard,
                     ),
+                )
+                normalized_sl = self._resolve_fixed_margin_stop_loss(
+                    side=side,
+                    entry_price=fill_entry_price,
+                    leverage=leverage,
+                    margin_loss_pct=self.ML_CANDLES_BG_FIXED_SL_MARGIN_PCT,
                 )
 
                 risk_pct = calc_estimated_margin_ratio_pct(
@@ -4005,6 +4059,330 @@ class PaperTradingEngine:
             task.result()
         except Exception as exc:
             logger.warning("ML_CANDLES_BG Discord notification failed for %s: %s", symbol, exc)
+
+    @staticmethod
+    def _calc_median(values: list[float]) -> float | None:
+        filtered = sorted(value for value in values if math.isfinite(value))
+        if not filtered:
+            return None
+        mid = len(filtered) // 2
+        if len(filtered) % 2 == 1:
+            return filtered[mid]
+        return (filtered[mid - 1] + filtered[mid]) / 2.0
+
+    @classmethod
+    def _calc_atr_pct_from_candles(cls, candles: list[dict[str, float]], period: int = 14) -> float | None:
+        if len(candles) < period + 1:
+            return None
+        true_ranges: list[float] = []
+        prev_close = float(candles[0].get("close") or 0.0)
+        for candle in candles[1:]:
+            high = float(candle.get("high") or 0.0)
+            low = float(candle.get("low") or 0.0)
+            close = float(candle.get("close") or 0.0)
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+            if math.isfinite(tr):
+                true_ranges.append(tr)
+            prev_close = close
+        if len(true_ranges) < period:
+            return None
+        atr = sum(true_ranges[-period:]) / float(period)
+        close = float(candles[-1].get("close") or 0.0)
+        if not math.isfinite(atr) or close <= 0:
+            return None
+        return atr / close
+
+    @classmethod
+    def _assess_daily_volatility_guard(
+        cls,
+        candles: list[list[float]] | list[dict[str, float]],
+    ) -> dict[str, Any]:
+        normalized: list[dict[str, float]] = []
+        for row in candles[-90:]:
+            if isinstance(row, dict):
+                item = {
+                    "open": float(row.get("open") or 0.0),
+                    "high": float(row.get("high") or 0.0),
+                    "low": float(row.get("low") or 0.0),
+                    "close": float(row.get("close") or 0.0),
+                    "volume": float(row.get("volume") or 0.0),
+                }
+            else:
+                if len(row) < 6:
+                    continue
+                item = {
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]),
+                }
+            if (
+                math.isfinite(item["open"])
+                and math.isfinite(item["high"])
+                and math.isfinite(item["low"])
+                and math.isfinite(item["close"])
+                and math.isfinite(item["volume"])
+                and item["close"] > 0
+                and item["high"] > 0
+                and item["low"] > 0
+            ):
+                normalized.append(item)
+
+        candle_count = len(normalized)
+        if candle_count < 30:
+            return {
+                "level": "STRICT",
+                "reason": f"Low data | candles {candle_count}",
+                "candle_count": candle_count,
+                "pump_ratio": None,
+                "close_to_high_ratio": None,
+                "atr_pct": None,
+                "hot_day_count": 0,
+                "volume_top3_share": None,
+                "volume_trend_ratio": None,
+                "volume_acceleration_ratio": None,
+                "volume_ramp": False,
+            }
+
+        closes = [item["close"] for item in normalized]
+        highs = [item["high"] for item in normalized]
+        quote_volumes = [max(0.0, item["close"] * item["volume"]) for item in normalized]
+        median_close = cls._calc_median(closes)
+        high_90 = max(highs) if highs else None
+        current_close = normalized[-1]["close"] if normalized else None
+        pump_ratio = (high_90 / median_close) if (median_close and median_close > 0 and high_90 and high_90 > 0) else None
+        close_to_high_ratio = (
+            current_close / high_90
+            if (current_close and current_close > 0 and high_90 and high_90 > 0)
+            else None
+        )
+        atr_pct = cls._calc_atr_pct_from_candles(normalized)
+        hot_day_count = sum(1 for item in normalized if ((item["high"] - item["low"]) / item["close"]) >= 0.12)
+        total_quote_volume = sum(quote_volumes)
+        volume_top3_share = None
+        if total_quote_volume > 0:
+            volume_top3_share = sum(sorted(quote_volumes, reverse=True)[:3]) / total_quote_volume
+        recent7_avg_volume = (sum(quote_volumes[-7:]) / float(len(quote_volumes[-7:]))) if quote_volumes[-7:] else None
+        prior21_slice = quote_volumes[-28:-7]
+        prior21_avg_volume = (sum(prior21_slice) / float(len(prior21_slice))) if prior21_slice else None
+        recent3_avg_volume = (sum(quote_volumes[-3:]) / float(len(quote_volumes[-3:]))) if quote_volumes[-3:] else None
+        volume_trend_ratio = (
+            recent7_avg_volume / prior21_avg_volume
+            if (
+                recent7_avg_volume is not None
+                and prior21_avg_volume is not None
+                and prior21_avg_volume > 0
+            )
+            else None
+        )
+        volume_acceleration_ratio = (
+            recent3_avg_volume / recent7_avg_volume
+            if (
+                recent3_avg_volume is not None
+                and recent7_avg_volume is not None
+                and recent7_avg_volume > 0
+            )
+            else None
+        )
+        volume_ramp = (
+            (volume_trend_ratio or 0.0) >= self.candles_bg_vol_guard_volume_trend_ratio
+            and (volume_acceleration_ratio or 0.0) >= self.candles_bg_vol_guard_volume_accel_ratio
+        )
+
+        blockers: list[str] = []
+        strict_flags: list[str] = []
+        if (pump_ratio or 0.0) >= 8.0 and (close_to_high_ratio or 1.0) <= 0.2:
+            blockers.append("dead pump 8x/20%")
+        elif (pump_ratio or 0.0) >= 5.0 and (close_to_high_ratio or 1.0) <= 0.15:
+            blockers.append("dead pump 5x/15%")
+        if (atr_pct or 0.0) >= 0.12:
+            blockers.append(f"ATR {((atr_pct or 0.0) * 100):.1f}%")
+        if hot_day_count >= 10:
+            blockers.append(f"{hot_day_count} hot days")
+        if (volume_top3_share or 0.0) >= 0.7 and (pump_ratio or 0.0) >= 4.0:
+            blockers.append("volume clustered")
+
+        if (pump_ratio or 0.0) >= 4.0 and (close_to_high_ratio or 1.0) <= 0.35:
+            strict_flags.append("pump-dump 4x/35%")
+        if (atr_pct or 0.0) >= 0.08:
+            strict_flags.append(f"ATR {((atr_pct or 0.0) * 100):.1f}%")
+        if hot_day_count >= 4:
+            strict_flags.append(f"{hot_day_count} hot days")
+        if (volume_top3_share or 0.0) >= 0.55:
+            strict_flags.append("volume clustered")
+        if volume_ramp:
+            strict_flags.append("volume ramp")
+        if candle_count < 60:
+            strict_flags.append("sample<60d")
+
+        pump_text = f"{pump_ratio:.2f}" if pump_ratio is not None and math.isfinite(pump_ratio) else "-"
+        close_to_high_text = (
+            f"{(close_to_high_ratio * 100):.1f}%"
+            if close_to_high_ratio is not None and math.isfinite(close_to_high_ratio)
+            else "-"
+        )
+        atr_text = f"{(atr_pct * 100):.1f}%" if atr_pct is not None and math.isfinite(atr_pct) else "-"
+        volume_text = (
+            f"{(volume_top3_share * 100):.0f}%"
+            if volume_top3_share is not None and math.isfinite(volume_top3_share)
+            else "-"
+        )
+        volume_trend_text = (
+            f"{volume_trend_ratio:.1f}x"
+            if volume_trend_ratio is not None and math.isfinite(volume_trend_ratio)
+            else "-"
+        )
+        volume_accel_text = (
+            f"{volume_acceleration_ratio:.1f}x"
+            if volume_acceleration_ratio is not None and math.isfinite(volume_acceleration_ratio)
+            else "-"
+        )
+        metrics = [
+            f"pump {pump_text}x",
+            f"now/high {close_to_high_text}",
+            f"ATR {atr_text}",
+            f"hot {hot_day_count}",
+            f"top3 {volume_text}",
+            f"vol7/21 {volume_trend_text}",
+            f"vol3/7 {volume_accel_text}",
+        ]
+        if blockers:
+            level = "BLOCK"
+            flags = blockers
+        elif strict_flags:
+            level = "STRICT"
+            flags = strict_flags
+        else:
+            level = "ALLOW"
+            flags = ["structurally normal"]
+        return {
+            "level": level,
+            "reason": f"{' | '.join(metrics)} | {', '.join(flags)}",
+            "candle_count": candle_count,
+            "pump_ratio": pump_ratio,
+            "close_to_high_ratio": close_to_high_ratio,
+            "atr_pct": atr_pct,
+            "hot_day_count": hot_day_count,
+            "volume_top3_share": volume_top3_share,
+            "volume_trend_ratio": volume_trend_ratio,
+            "volume_acceleration_ratio": volume_acceleration_ratio,
+            "volume_ramp": volume_ramp,
+        }
+
+    def _resolve_candles_bg_vol_guard_block_reason(self, assessment: dict[str, Any] | None, *, side: str) -> str | None:
+        if not self.candles_bg_vol_guard_enabled or not isinstance(assessment, dict):
+            return None
+        reasons: list[str] = []
+        atr_pct = assessment.get("atr_pct")
+        pump_ratio = assessment.get("pump_ratio")
+        side_key = str(side or "").upper()
+        if (
+            isinstance(atr_pct, (int, float))
+            and math.isfinite(float(atr_pct))
+            and float(atr_pct) * 100.0 >= self.candles_bg_vol_guard_atr_threshold_pct
+        ):
+            reasons.append(f"ATR > {self.candles_bg_vol_guard_atr_threshold_pct:.0f}%")
+        if (
+            isinstance(pump_ratio, (int, float))
+            and math.isfinite(float(pump_ratio))
+            and float(pump_ratio) >= self.candles_bg_vol_guard_pump_threshold_x
+        ):
+            reasons.append(f"pump > {self.candles_bg_vol_guard_pump_threshold_x:.0f}x")
+        if (
+            side_key == "SHORT"
+            and self.candles_bg_vol_guard_short_block_on_vol_up
+            and bool(assessment.get("volume_ramp"))
+        ):
+            reasons.append("VOL UP")
+        if not reasons:
+            return None
+        return f"blocked_by_vol_guard: {', '.join(reasons)}"
+
+    def _get_candles_bg_vol_guard_assessment(self, symbol: str) -> dict[str, Any] | None:
+        if not self.candles_bg_vol_guard_enabled:
+            return None
+        symbol_key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cached = self._candles_bg_vol_guard_cache.get(symbol_key)
+        if cached and now_ts < cached[0]:
+            return cached[1]
+        try:
+            rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="1d", limit=180)
+        except Exception as exc:
+            logger.warning("ML_CANDLES_BG vol guard fetch failed for %s: %s", symbol, exc)
+            return None
+        assessment = self._assess_daily_volatility_guard(rows)
+        self._candles_bg_vol_guard_cache[symbol_key] = (now_ts + float(self.candles_bg_vol_guard_cache_sec), assessment)
+        return assessment
+
+    async def _send_ml_candles_bg_vol_guard_block_notification(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        raw_probability: float,
+        effective_probability: float,
+        assessment: dict[str, Any],
+        block_reason: str,
+    ) -> None:
+        notifier = self.candles_bg_discord_notifier
+        if not notifier.is_enabled:
+            return
+        now_vn = datetime.now(self._vn_tz).strftime("%Y-%m-%d %H:%M:%S ICT")
+        embed = {
+            "title": f"ML_CANDLES_BG blocked by vol guard: {symbol}",
+            "color": 15158332,
+            "fields": [
+                {"name": "Side", "value": str(side or "-").upper(), "inline": True},
+                {"name": "Guard", "value": str(assessment.get("level") or "-"), "inline": True},
+                {"name": "Win Prob", "value": f"raw {float(raw_probability):.4f} | eff {float(effective_probability):.4f}", "inline": True},
+                {"name": "Reason", "value": str(block_reason or "-")[:1024], "inline": False},
+                {"name": "Metrics", "value": str(assessment.get("reason") or "-")[:1024], "inline": False},
+                {"name": "Observed At", "value": now_vn, "inline": False},
+            ],
+        }
+        await asyncio.to_thread(notifier.send, embeds=[embed])
+
+    def _enqueue_ml_candles_bg_vol_guard_block_notification(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        raw_probability: float,
+        effective_probability: float,
+        assessment: dict[str, Any],
+        block_reason: str,
+    ) -> None:
+        notifier = self.candles_bg_discord_notifier
+        if not notifier.is_enabled:
+            return
+        symbol_key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cooldown_sec = float(self.candles_bg_vol_guard_discord_cooldown_minutes) * 60.0
+        next_allowed_ts = self._candles_bg_vol_guard_alert_ts.get(symbol_key, 0.0)
+        if now_ts < next_allowed_ts:
+            return
+        self._candles_bg_vol_guard_alert_ts[symbol_key] = now_ts + cooldown_sec
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._send_ml_candles_bg_vol_guard_block_notification(
+                symbol=symbol,
+                side=side,
+                raw_probability=raw_probability,
+                effective_probability=effective_probability,
+                assessment=assessment,
+                block_reason=block_reason,
+            )
+        )
+        task.add_done_callback(lambda task: self._log_notification_task_error(task, symbol=symbol))
 
     def _evaluate_ml_candles_bg_pattern_gate(
         self,
@@ -7036,6 +7414,24 @@ class PaperTradingEngine:
             * 100.0
         )
         return max(0.5, min(base_cap_pct, signal_margin_loss_pct * 1.05))
+
+    @staticmethod
+    def _resolve_fixed_margin_stop_loss(
+        *,
+        side: str,
+        entry_price: float,
+        leverage: int,
+        margin_loss_pct: float,
+    ) -> float:
+        entry = float(entry_price)
+        lev = max(1, int(leverage))
+        margin_pct = max(0.0, float(margin_loss_pct))
+        if entry <= 0 or margin_pct <= 0:
+            return entry
+        move_pct = (margin_pct / 100.0) / float(lev)
+        if str(side or "").upper() == "LONG":
+            return float(entry * (1.0 - move_pct))
+        return float(entry * (1.0 + move_pct))
 
     def _resolve_symbol_max_risk_pct(self, symbol: str) -> float:
         if self._is_major_symbol(symbol):

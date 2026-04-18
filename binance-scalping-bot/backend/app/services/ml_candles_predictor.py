@@ -174,6 +174,11 @@ class MLCandlesPredictor(MLPredictor):
                     long_prob=long_prob,
                     short_prob=short_prob,
                 )
+                long_prob, short_prob = self._apply_bullish_volume_short_penalty(
+                    row=row,
+                    long_prob=long_prob,
+                    short_prob=short_prob,
+                )
                 if long_prob >= short_prob:
                     side = "LONG"
                     win_prob = long_prob
@@ -305,6 +310,60 @@ class MLCandlesPredictor(MLPredictor):
                 short_prob += 0.02
 
         return float(np.clip(long_prob, 0.0, 0.99)), float(np.clip(short_prob, 0.0, 0.99))
+
+    def _apply_bullish_volume_short_penalty(
+        self,
+        *,
+        row: pd.Series,
+        long_prob: float,
+        short_prob: float,
+    ) -> tuple[float, float]:
+        long_prob = float(np.clip(long_prob, 0.0, 0.99))
+        short_prob = float(np.clip(short_prob, 0.0, 0.99))
+        if not settings.paper_trade_candles_bg_bullish_volume_short_penalty_enabled:
+            return long_prob, short_prob
+        if not self._has_bullish_volume_short_penalty_context(row):
+            return long_prob, short_prob
+
+        penalty = max(0.0, float(settings.paper_trade_candles_bg_bullish_volume_short_penalty))
+        if penalty <= 0.0:
+            return long_prob, short_prob
+        return long_prob, float(np.clip(short_prob - penalty, 0.0, 0.99))
+
+    def _has_bullish_volume_short_penalty_context(self, row: pd.Series | None) -> bool:
+        close_h1 = self._safe_row_float(row, "close_h1")
+        ema8_h1 = self._safe_row_float(row, "ema8_h1")
+        ema13_h1 = self._safe_row_float(row, "ema13_h1")
+        ema21_h1 = self._safe_row_float(row, "ema21_h1")
+        close_m5 = self._safe_row_float(row, "close_m5")
+        ema8_m5 = self._safe_row_float(row, "ema8_m5")
+        ema13_m5 = self._safe_row_float(row, "ema13_m5")
+        ema21_m5 = self._safe_row_float(row, "ema21_m5")
+        macd_m5 = self._safe_row_float(row, "macd_m5")
+        macd_signal_m5 = self._safe_row_float(row, "macd_signal_m5")
+        rsi_h1 = self._safe_row_float(row, "rsi14_h1")
+        vol_spike = self._safe_row_float(row, "vol_spike_z_m5")
+        liq_imbalance = self._safe_row_float(row, "liq_imbalance_proxy_m5")
+
+        bullish_h1 = close_h1 >= ema8_h1 >= ema13_h1 >= ema21_h1
+        bullish_m5 = close_m5 >= ema8_m5 >= ema13_m5 and close_m5 >= ema21_m5
+        bullish_momentum = macd_m5 >= macd_signal_m5 and (
+            rsi_h1 >= float(settings.paper_trade_candles_bg_bullish_volume_short_min_rsi_h1)
+        )
+        expanding_volume = (
+            vol_spike >= float(settings.paper_trade_candles_bg_bullish_volume_short_min_vol_spike)
+        )
+        no_clear_short_imbalance = (
+            liq_imbalance <= float(settings.paper_trade_candles_bg_bullish_volume_short_max_liq_imbalance)
+        )
+
+        return bool(
+            bullish_h1
+            and bullish_m5
+            and bullish_momentum
+            and expanding_volume
+            and no_clear_short_imbalance
+        )
 
     @staticmethod
     def _safe_row_float(row: pd.Series | None, key: str) -> float:

@@ -103,6 +103,22 @@ type KlinesResponse = {
   candles: KlineItem[]
 }
 
+type VolatilityGuardLevel = 'ALLOW' | 'STRICT' | 'BLOCK'
+
+type VolatilityGuardAssessment = {
+  level: VolatilityGuardLevel
+  reason: string
+  candle_count: number
+  pump_ratio: number | null
+  close_to_high_ratio: number | null
+  atr_pct: number | null
+  hot_day_count: number
+  volume_top3_share: number | null
+  volume_trend_ratio: number | null
+  volume_acceleration_ratio: number | null
+  volume_ramp: boolean
+}
+
 type EmaLine = {
   period: number
   color: string
@@ -180,6 +196,13 @@ type ScanSignalsResponse = {
   scanned: number
   count: number
   signals: ScanSignalItem[]
+  source?: string
+  timestamp?: string
+}
+
+type SymbolUniverseResponse = {
+  count: number
+  symbols: string[]
   source?: string
   timestamp?: string
 }
@@ -995,6 +1018,225 @@ function calcTargetPnlPct(
   return calcPnlPct(side, entryPrice, targetPrice, leverage)
 }
 
+function calcMedian(values: number[]): number | null {
+  const filtered = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b)
+  if (filtered.length === 0) return null
+  const mid = Math.floor(filtered.length / 2)
+  if (filtered.length % 2 === 1) return filtered[mid]
+  return (filtered[mid - 1] + filtered[mid]) / 2
+}
+
+function calcAtrPct(candles: KlineItem[], period = 14): number | null {
+  if (candles.length < period + 1) return null
+  const trueRanges: number[] = []
+  let prevClose = candles[0].close
+  for (let i = 1; i < candles.length; i += 1) {
+    const candle = candles[i]
+    const tr = Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - prevClose),
+      Math.abs(candle.low - prevClose),
+    )
+    if (Number.isFinite(tr)) trueRanges.push(tr)
+    prevClose = candle.close
+  }
+  if (trueRanges.length < period) return null
+  const atr = trueRanges.slice(-period).reduce((sum, value) => sum + value, 0) / period
+  const close = candles[candles.length - 1]?.close ?? 0
+  if (!Number.isFinite(atr) || close <= 0) return null
+  return atr / close
+}
+
+function calcAverage(values: number[]): number | null {
+  const filtered = values.filter((value) => Number.isFinite(value))
+  if (filtered.length === 0) return null
+  return filtered.reduce((sum, value) => sum + value, 0) / filtered.length
+}
+
+function formatRatio(value: number | null, digits = 2): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return value.toFixed(digits)
+}
+
+function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment {
+  const normalized = candles
+    .filter((candle) => (
+      Number.isFinite(candle.open)
+      && Number.isFinite(candle.high)
+      && Number.isFinite(candle.low)
+      && Number.isFinite(candle.close)
+      && Number.isFinite(candle.volume)
+      && candle.close > 0
+      && candle.high > 0
+      && candle.low > 0
+    ))
+    .slice(-90)
+
+  const candleCount = normalized.length
+  if (candleCount < 30) {
+    return {
+      level: 'STRICT',
+      reason: `Low data | candles ${candleCount}`,
+      candle_count: candleCount,
+      pump_ratio: null,
+      close_to_high_ratio: null,
+      atr_pct: null,
+      hot_day_count: 0,
+      volume_top3_share: null,
+      volume_trend_ratio: null,
+      volume_acceleration_ratio: null,
+      volume_ramp: false,
+    }
+  }
+
+  const closes = normalized.map((candle) => candle.close)
+  const highs = normalized.map((candle) => candle.high)
+  const quoteVolumes = normalized.map((candle) => Math.max(0, candle.close * candle.volume))
+  const medianClose = calcMedian(closes)
+  const high90 = highs.length > 0 ? Math.max(...highs) : null
+  const currentClose = normalized[normalized.length - 1]?.close ?? null
+  const pumpRatio = (medianClose != null && medianClose > 0 && high90 != null && high90 > 0)
+    ? high90 / medianClose
+    : null
+  const closeToHighRatio = (currentClose != null && currentClose > 0 && high90 != null && high90 > 0)
+    ? currentClose / high90
+    : null
+  const atrPct = calcAtrPct(normalized)
+  const hotDayCount = normalized.filter((candle) => ((candle.high - candle.low) / candle.close) >= 0.12).length
+  const totalQuoteVolume = quoteVolumes.reduce((sum, value) => sum + value, 0)
+  const volumeTop3Share = totalQuoteVolume > 0
+    ? quoteVolumes.slice().sort((a, b) => b - a).slice(0, 3).reduce((sum, value) => sum + value, 0) / totalQuoteVolume
+    : null
+  const recent7AvgVolume = calcAverage(quoteVolumes.slice(-7))
+  const prior21AvgVolume = calcAverage(quoteVolumes.slice(-28, -7))
+  const recent3AvgVolume = calcAverage(quoteVolumes.slice(-3))
+  const volumeTrendRatio = (
+    typeof recent7AvgVolume === 'number'
+    && typeof prior21AvgVolume === 'number'
+    && prior21AvgVolume > 0
+  )
+    ? recent7AvgVolume / prior21AvgVolume
+    : null
+  const volumeAccelerationRatio = (
+    typeof recent3AvgVolume === 'number'
+    && typeof recent7AvgVolume === 'number'
+    && recent7AvgVolume > 0
+  )
+    ? recent3AvgVolume / recent7AvgVolume
+    : null
+  const volumeRamp = (volumeTrendRatio ?? 0) >= 1.8 && (volumeAccelerationRatio ?? 0) >= 1.1
+
+  const blockers: string[] = []
+  const strictFlags: string[] = []
+
+  if ((pumpRatio ?? 0) >= 8 && (closeToHighRatio ?? 1) <= 0.2) blockers.push('dead pump 8x/20%')
+  else if ((pumpRatio ?? 0) >= 5 && (closeToHighRatio ?? 1) <= 0.15) blockers.push('dead pump 5x/15%')
+
+  if ((atrPct ?? 0) >= 0.12) blockers.push(`ATR ${((atrPct ?? 0) * 100).toFixed(1)}%`)
+  if (hotDayCount >= 10) blockers.push(`${hotDayCount} hot days`)
+  if ((volumeTop3Share ?? 0) >= 0.7 && (pumpRatio ?? 0) >= 4) blockers.push('volume clustered')
+
+  if ((pumpRatio ?? 0) >= 4 && (closeToHighRatio ?? 1) <= 0.35) strictFlags.push('pump-dump 4x/35%')
+  if ((atrPct ?? 0) >= 0.08) strictFlags.push(`ATR ${((atrPct ?? 0) * 100).toFixed(1)}%`)
+  if (hotDayCount >= 4) strictFlags.push(`${hotDayCount} hot days`)
+  if ((volumeTop3Share ?? 0) >= 0.55) strictFlags.push('volume clustered')
+  if (volumeRamp) strictFlags.push('volume ramp')
+  if (candleCount < 60) strictFlags.push('sample<60d')
+
+  const metrics = [
+    `pump ${formatRatio(pumpRatio)}x`,
+    `now/high ${typeof closeToHighRatio === 'number' ? `${(closeToHighRatio * 100).toFixed(1)}%` : '-'}`,
+    `ATR ${typeof atrPct === 'number' ? `${(atrPct * 100).toFixed(1)}%` : '-'}`,
+    `hot ${hotDayCount}`,
+    `top3 ${typeof volumeTop3Share === 'number' ? `${(volumeTop3Share * 100).toFixed(0)}%` : '-'}`,
+    `vol7/21 ${typeof volumeTrendRatio === 'number' ? `${volumeTrendRatio.toFixed(1)}x` : '-'}`,
+    `vol3/7 ${typeof volumeAccelerationRatio === 'number' ? `${volumeAccelerationRatio.toFixed(1)}x` : '-'}`,
+  ]
+
+  if (blockers.length > 0) {
+    return {
+      level: 'BLOCK',
+      reason: `${metrics.join(' | ')} | ${blockers.join(', ')}`,
+      candle_count: candleCount,
+      pump_ratio: pumpRatio,
+      close_to_high_ratio: closeToHighRatio,
+      atr_pct: atrPct,
+      hot_day_count: hotDayCount,
+      volume_top3_share: volumeTop3Share,
+      volume_trend_ratio: volumeTrendRatio,
+      volume_acceleration_ratio: volumeAccelerationRatio,
+      volume_ramp: volumeRamp,
+    }
+  }
+  if (strictFlags.length > 0) {
+    return {
+      level: 'STRICT',
+      reason: `${metrics.join(' | ')} | ${strictFlags.join(', ')}`,
+      candle_count: candleCount,
+      pump_ratio: pumpRatio,
+      close_to_high_ratio: closeToHighRatio,
+      atr_pct: atrPct,
+      hot_day_count: hotDayCount,
+      volume_top3_share: volumeTop3Share,
+      volume_trend_ratio: volumeTrendRatio,
+      volume_acceleration_ratio: volumeAccelerationRatio,
+      volume_ramp: volumeRamp,
+    }
+  }
+  return {
+    level: 'ALLOW',
+    reason: `${metrics.join(' | ')} | structurally normal`,
+    candle_count: candleCount,
+    pump_ratio: pumpRatio,
+    close_to_high_ratio: closeToHighRatio,
+    atr_pct: atrPct,
+    hot_day_count: hotDayCount,
+    volume_top3_share: volumeTop3Share,
+    volume_trend_ratio: volumeTrendRatio,
+    volume_acceleration_ratio: volumeAccelerationRatio,
+    volume_ramp: volumeRamp,
+  }
+}
+
+function renderVolatilityGuardBadge(assessment?: VolatilityGuardAssessment | null) {
+  if (assessment === undefined) {
+    return <span className="badge neutral">Loading</span>
+  }
+  if (assessment === null) {
+    return <span className="badge neutral">N/A</span>
+  }
+  const badgeClass = assessment.level === 'ALLOW'
+    ? 'success'
+    : assessment.level === 'STRICT'
+      ? 'warn'
+      : 'danger'
+  return (
+    <div className="signal-model-stack">
+      <div className="vol-guard-badges">
+        <span className={`badge ${badgeClass}`} title={assessment.reason}>
+          {assessment.level}
+        </span>
+        {assessment.volume_ramp ? (
+          <span className="badge warn" title={assessment.reason}>
+            VOL UP
+          </span>
+        ) : null}
+      </div>
+      <span className="signal-model-meta" title={assessment.reason}>
+        {typeof assessment.pump_ratio === 'number' ? `${assessment.pump_ratio.toFixed(1)}x` : '-'}
+        {' | '}
+        {typeof assessment.atr_pct === 'number' ? `ATR ${(assessment.atr_pct * 100).toFixed(1)}%` : 'ATR -'}
+        {assessment.volume_ramp && typeof assessment.volume_trend_ratio === 'number' ? (
+          <>
+            {' | '}
+            {`VOL ${assessment.volume_trend_ratio.toFixed(1)}x`}
+          </>
+        ) : null}
+      </span>
+    </div>
+  )
+}
+
 function resolveClosedPnlPct(trade: PaperTrade): number | null {
   if (typeof trade.pnl_pct === 'number') return trade.pnl_pct
   if (typeof trade.close_price === 'number') {
@@ -1319,6 +1561,8 @@ function App() {
   const [mlCandlesOpenTradesDb, setMlCandlesOpenTradesDb] = useState<PaperTrade[]>([])
   const [mlCandlesSignals, setMlCandlesSignals] = useState<ScanSignalItem[]>([])
   const [mlCandlesScannedCount, setMlCandlesScannedCount] = useState(0)
+  const [mlCandlesBgUniverseSymbols, setMlCandlesBgUniverseSymbols] = useState<string[]>([])
+  const [mlCandlesBgUniverseScannedCount, setMlCandlesBgUniverseScannedCount] = useState(0)
   const [mlCompareHistory, setMlCompareHistory] = useState<PaperTrade[]>([])
   const [mlCompareDate, setMlCompareDate] = useState<string>(currentVnDateString)
   const [mlComparePage, setMlComparePage] = useState(1)
@@ -1327,6 +1571,7 @@ function App() {
   const [mlCandlesOpenTenXOnly, setMlCandlesOpenTenXOnly] = useState(false)
   const [mlCompareModelFilter, setMlCompareModelFilter] = useState<MlCompareModelFilter>('ALL')
   const [mlCompareTenXOnly, setMlCompareTenXOnly] = useState(false)
+  const [volatilityGuards, setVolatilityGuards] = useState<Record<string, VolatilityGuardAssessment | null>>({})
   const [historyPage, setHistoryPage] = useState(1)
   const [historyPageSize, setHistoryPageSize] = useState(30)
   const [historyTotalItems, setHistoryTotalItems] = useState(0)
@@ -1817,6 +2062,51 @@ function App() {
     if (!mlCandlesOpenTenXOnly) return byModel
     return byModel.filter((row) => row.ten_x_ready === true)
   }, [mlCandlesOpenTrades, mlCandlesOpenModelFilter, mlCandlesOpenTenXOnly])
+  const mlCandlesOpenGuardSymbols = useMemo(
+    () => Array.from(new Set(filteredMlCandlesOpenTrades.map((row) => canonicalSymbol(row.symbol)))),
+    [filteredMlCandlesOpenTrades],
+  )
+  const mlCandlesBgUniverseGuardSymbols = useMemo(
+    () => Array.from(new Set(mlCandlesBgUniverseSymbols.map((symbol) => canonicalSymbol(symbol)))),
+    [mlCandlesBgUniverseSymbols],
+  )
+  const mlCandlesCompareGuardSymbols = useMemo(
+    () => Array.from(new Set([...mlCandlesOpenGuardSymbols, ...mlCandlesBgUniverseGuardSymbols])),
+    [mlCandlesOpenGuardSymbols, mlCandlesBgUniverseGuardSymbols],
+  )
+  const mlCandlesOpenGuardCounts = useMemo(() => {
+    const counts: Record<VolatilityGuardLevel, number> = {
+      ALLOW: 0,
+      STRICT: 0,
+      BLOCK: 0,
+    }
+    let loading = 0
+    for (const symbolKey of mlCandlesOpenGuardSymbols) {
+      const assessment = volatilityGuards[symbolKey]
+      if (assessment === undefined) {
+        loading += 1
+        continue
+      }
+      if (assessment === null) continue
+      counts[assessment.level] += 1
+    }
+    return { ...counts, loading }
+  }, [mlCandlesOpenGuardSymbols, volatilityGuards])
+  const mlCandlesBgVolUpRows = useMemo(
+    () => mlCandlesBgUniverseSymbols
+      .map((symbol) => ({
+        symbol,
+        assessment: volatilityGuards[canonicalSymbol(symbol)],
+      }))
+      .filter((item) => item.assessment && item.assessment.volume_ramp)
+      .sort((a, b) => {
+        const aRatio = a.assessment?.volume_trend_ratio ?? 0
+        const bRatio = b.assessment?.volume_trend_ratio ?? 0
+        if (bRatio !== aRatio) return bRatio - aRatio
+        return (b.assessment?.volume_acceleration_ratio ?? 0) - (a.assessment?.volume_acceleration_ratio ?? 0)
+      }),
+    [mlCandlesBgUniverseSymbols, volatilityGuards],
+  )
   const sortedMlCandlesOpenTrades = useMemo(() => {
     const rows = [...filteredMlCandlesOpenTrades]
     const { key, direction } = mlCandlesOpenSort
@@ -1897,6 +2187,40 @@ function App() {
 
     return rows
   }, [filteredMlCandlesOpenTrades, mlCandlesOpenSort, paperLivePrices, paperLivePriceTime])
+
+  useEffect(() => {
+    if (!showMlCandlesScreen || mlCandlesScreenView !== 'compare') return
+
+    const missingSymbols = mlCandlesCompareGuardSymbols.filter((symbolKey) => volatilityGuards[symbolKey] === undefined)
+    if (missingSymbols.length === 0) return
+
+    let cancelled = false
+
+    ;(async () => {
+      const results = await Promise.all(
+        missingSymbols.map(async (symbolKey) => {
+          try {
+            const assessment = await fetchVolatilityGuard(symbolKey)
+            return [symbolKey, assessment] as const
+          } catch {
+            return [symbolKey, null] as const
+          }
+        }),
+      )
+      if (cancelled) return
+      setVolatilityGuards((current) => {
+        const next = { ...current }
+        for (const [symbolKey, assessment] of results) {
+          next[symbolKey] = assessment
+        }
+        return next
+      })
+    })().catch(() => undefined)
+
+    return () => {
+      cancelled = true
+    }
+  }, [showMlCandlesScreen, mlCandlesScreenView, mlCandlesCompareGuardSymbols, volatilityGuards])
   const recentMlCompareHistory = useMemo(
     () => mlCompareHistory
       .filter((row) => {
@@ -2265,6 +2589,16 @@ function App() {
     }
   }
 
+  async function fetchVolatilityGuard(symbol: string): Promise<VolatilityGuardAssessment> {
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=1d&limit=180`,
+      API_HEAVY_TIMEOUT_MS,
+    )
+    if (!response.ok) throw new Error(`Cannot fetch daily volatility for ${symbol}`)
+    const data = (await response.json()) as KlinesResponse
+    return assessVolatilityGuard(data.candles ?? [])
+  }
+
   async function fetchHighWinSignals() {
     const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/signals/scan?min_win=0.7&max_symbols=${HIGH_WIN_SCAN_MAX_SYMBOLS}`,
@@ -2285,6 +2619,17 @@ function App() {
     const data = (await response.json()) as ScanSignalsResponse
     setMlCandlesSignals(data.signals ?? [])
     setMlCandlesScannedCount(data.scanned ?? 0)
+  }
+
+  async function fetchMlCandlesBgUniverseSignals() {
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/signals/candles/bg/universe?max_symbols=250`,
+      API_HEAVY_TIMEOUT_MS,
+    )
+    if (!response.ok) throw new Error('Cannot scan ML_CANDLES_BG universe')
+    const data = (await response.json()) as SymbolUniverseResponse
+    setMlCandlesBgUniverseSymbols(data.symbols ?? [])
+    setMlCandlesBgUniverseScannedCount(data.count ?? 0)
   }
 
   async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
@@ -2880,7 +3225,10 @@ function App() {
 
       const runCompareRefresh = async (surfaceError: boolean) => {
         try {
-          await refreshMlCompareData()
+          await Promise.all([
+            refreshMlCompareData(),
+            fetchMlCandlesBgUniverseSignals(),
+          ])
         } catch (err) {
           if (!mounted) return
           if (surfaceError) {
@@ -3952,6 +4300,44 @@ function App() {
             ))}
           </div>
 
+          <div className="history-header">
+            <h3 className="section-title">VOL UP In BG Universe</h3>
+            <div className="scan-actions">
+              <span className="badge neutral">Universe {mlCandlesBgUniverseScannedCount}</span>
+              <span className="badge warn">VOL UP {mlCandlesBgVolUpRows.length}</span>
+            </div>
+          </div>
+          <div className="content table-wrap">
+            {mlCandlesBgVolUpRows.length === 0 ? (
+              <p>No BG universe coin is currently flagged as VOL UP.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Vol Guard</th>
+                    <th>Vol7/21</th>
+                    <th>Vol3/7</th>
+                    <th>ATR</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mlCandlesBgVolUpRows.map(({ symbol, assessment }) => (
+                    <tr key={`bg-vol-up-${symbol}`}>
+                      <td>{renderSymbolJump(symbol)}</td>
+                      <td>{renderVolatilityGuardBadge(assessment)}</td>
+                      <td>{assessment?.volume_trend_ratio ? `${assessment.volume_trend_ratio.toFixed(1)}x` : '-'}</td>
+                      <td>{assessment?.volume_acceleration_ratio ? `${assessment.volume_acceleration_ratio.toFixed(1)}x` : '-'}</td>
+                      <td>{assessment?.atr_pct ? `${assessment.atr_pct.toFixed(1)}%` : '-'}</td>
+                      <td>{assessment?.reason ?? '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
           <h3 className="section-title">Open ML Candles Test Trades</h3>
           <div className="history-header">
             <div className="scan-actions">
@@ -3993,6 +4379,12 @@ function App() {
                 10X READY ONLY ({mlCandlesOpenTenXReadyCount})
               </button>
               <span className="badge neutral">Rows: {filteredMlCandlesOpenTrades.length}</span>
+              <span className="badge success">ALLOW {mlCandlesOpenGuardCounts.ALLOW}</span>
+              <span className="badge warn">STRICT {mlCandlesOpenGuardCounts.STRICT}</span>
+              <span className="badge danger">BLOCK {mlCandlesOpenGuardCounts.BLOCK}</span>
+              {mlCandlesOpenGuardCounts.loading > 0 ? (
+                <span className="badge neutral">Vol Loading {mlCandlesOpenGuardCounts.loading}</span>
+              ) : null}
             </div>
           </div>
           <div className="content table-wrap">
@@ -4004,6 +4396,7 @@ function App() {
                   <tr>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('symbol')}>Symbol</button></th>
+                    <th>Vol Guard</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('pattern')}>Pattern</button></th>
                     <th>10X</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleMlCandlesOpenSort('btc_following')}>BTC Follow</button></th>
@@ -4027,6 +4420,7 @@ function App() {
                 <tbody>
                   {sortedMlCandlesOpenTrades.map((row) => {
                     const modelLabel = tradeMlCandlesCompareLabel(row.entry_type)
+                    const volatilityGuard = volatilityGuards[canonicalSymbol(row.symbol)]
                     const mark = resolveLivePrice(row.symbol)
                     const upnlPct = calcUnrealizedPnlPct(row, mark)
                     const marginUsdt = typeof row.margin_usdt === 'number'
@@ -4044,6 +4438,7 @@ function App() {
                       <tr key={`ml-candles-open-${row.id}`} className={rowClassName}>
                         <td>{row.id}</td>
                         <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                        <td>{renderVolatilityGuardBadge(volatilityGuard)}</td>
                         <td>{renderCandlePatternSample(row.candle_pattern_sample)}</td>
                         <td>{renderTenXAssessment(row)}</td>
                         <td>

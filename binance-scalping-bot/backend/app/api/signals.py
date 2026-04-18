@@ -943,6 +943,18 @@ def get_candles_bg_scan_snapshot(
     )
 
 
+def get_candles_bg_universe_snapshot(
+    max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
+) -> dict:
+    symbols = get_cached_symbols_snapshot(max_symbols=max_symbols)
+    return {
+        "count": len(symbols),
+        "symbols": symbols,
+        "source": "signals_cache",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def get_test_scan_snapshot(
     min_win: float = settings.paper_trade_test_ml_min_win,
     max_symbols: int = settings.paper_trade_test_ml_max_symbols,
@@ -1046,6 +1058,13 @@ def scan_candles_bg_signals(
     symbols: str | None = Query(default=None),
 ) -> dict:
     return get_candles_bg_scan_snapshot(min_win=min_win, max_symbols=max_symbols, symbols=symbols)
+
+
+@router.get("/candles/bg/universe")
+def get_candles_bg_universe(
+    max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
+) -> dict:
+    return get_candles_bg_universe_snapshot(max_symbols=max_symbols)
 
 
 @router.get("/test/scan")

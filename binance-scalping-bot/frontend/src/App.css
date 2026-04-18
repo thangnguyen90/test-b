@@ -447,6 +447,12 @@ h2 {
   background: #ecf5fb;
 }
 
+.danger {
+  color: #8b1f1f;
+  border-color: #e3aaaa;
+  background: #fff0f0;
+}
+
 .content p {
   margin: 0.35rem 0;
   color: var(--muted);
@@ -515,6 +521,13 @@ button:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
+}
+
+.vol-guard-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
 }
 
 .signal-model-meta {

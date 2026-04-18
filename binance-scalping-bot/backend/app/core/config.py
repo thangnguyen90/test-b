@@ -87,6 +87,28 @@ class Settings(BaseModel):
     paper_trade_ml_candles_bg_discord_webhook_enabled: bool = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_ENABLED", "false").lower() == "true"
     paper_trade_ml_candles_bg_discord_webhook_url: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_URL", "").strip()
     paper_trade_ml_candles_bg_discord_webhook_username: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_USERNAME", "ML Candles BG Bot").strip() or "ML Candles BG Bot"
+    paper_trade_ml_candles_bg_vol_guard_enabled: bool = os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_ENABLED", "true").lower() == "true"
+    paper_trade_ml_candles_bg_vol_guard_block_level: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_BLOCK_LEVEL", "BLOCK").strip().upper() or "BLOCK"
+    paper_trade_ml_candles_bg_vol_guard_atr_threshold_pct: float = float(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_ATR_THRESHOLD_PCT", "10")
+    )
+    paper_trade_ml_candles_bg_vol_guard_pump_threshold_x: float = float(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_PUMP_THRESHOLD_X", "3")
+    )
+    paper_trade_ml_candles_bg_vol_guard_short_block_on_vol_up: bool = os.getenv(
+        "PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_SHORT_BLOCK_ON_VOL_UP",
+        "true",
+    ).lower() == "true"
+    paper_trade_ml_candles_bg_vol_guard_volume_trend_ratio: float = float(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_VOLUME_TREND_RATIO", "1.8")
+    )
+    paper_trade_ml_candles_bg_vol_guard_volume_accel_ratio: float = float(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_VOLUME_ACCEL_RATIO", "1.1")
+    )
+    paper_trade_ml_candles_bg_vol_guard_cache_sec: int = int(os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_CACHE_SEC", "900"))
+    paper_trade_ml_candles_bg_vol_guard_discord_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_DISCORD_COOLDOWN_MINUTES", "180")
+    )
     ml_test_use_liquidation_features: bool = os.getenv("ML_TEST_USE_LIQUIDATION_FEATURES", "true").lower() == "true"
     liquid_ml_enabled: bool = os.getenv("LIQUID_ML_ENABLED", "true").lower() == "true"
     liquid_ml_min_win: float = float(os.getenv("LIQUID_ML_MIN_WIN", "0.68"))
@@ -449,6 +471,22 @@ class Settings(BaseModel):
     )
     paper_trade_candles_bg_bullish_short_nonfollow_extra_buffer_pct: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_SHORT_NONFOLLOW_EXTRA_BUFFER_PCT", "0.001")
+    )
+    paper_trade_candles_bg_bullish_volume_short_penalty_enabled: bool = os.getenv(
+        "PAPER_TRADE_CANDLES_BG_BULLISH_VOLUME_SHORT_PENALTY_ENABLED",
+        "true",
+    ).lower() == "true"
+    paper_trade_candles_bg_bullish_volume_short_penalty: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_VOLUME_SHORT_PENALTY", "0.06")
+    )
+    paper_trade_candles_bg_bullish_volume_short_min_vol_spike: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_VOLUME_SHORT_MIN_VOL_SPIKE", "0.8")
+    )
+    paper_trade_candles_bg_bullish_volume_short_min_rsi_h1: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_VOLUME_SHORT_MIN_RSI_H1", "54")
+    )
+    paper_trade_candles_bg_bullish_volume_short_max_liq_imbalance: float = float(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_VOLUME_SHORT_MAX_LIQ_IMBALANCE", "0.012")
     )
     paper_trade_candles_bg_bad_hour_aligned_entry_buffer_pct: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_BAD_HOUR_ALIGNED_ENTRY_BUFFER_PCT", "0.0025")
