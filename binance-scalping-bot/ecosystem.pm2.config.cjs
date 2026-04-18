@@ -7,14 +7,14 @@ const frontendRuntimeDir = path.join(rootDir, 'frontend', '.runtime', 'pm2');
 module.exports = {
   apps: [
     {
-      name: 'ml-candles-backend-8005',
+      name: 'ml-candles-backend-9000',
       cwd: rootDir,
       script: './scripts/backend_pm2.sh',
       interpreter: '/usr/bin/env',
       interpreter_args: 'bash',
       env: {
         HOST: '0.0.0.0',
-        PORT: '8005',
+        PORT: '9000',
       },
       autorestart: true,
       restart_delay: 2000,
