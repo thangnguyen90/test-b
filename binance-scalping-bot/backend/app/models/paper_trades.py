@@ -26,6 +26,8 @@ class PaperTrade(BaseModel):
     opened_at: datetime
     closed_at: Optional[datetime] = None
     close_price: Optional[float] = None
+    mark_price: Optional[float] = None
+    mark_price_timestamp: Optional[str] = None
     close_reason: Optional[str] = None
     reference_win_symbol: Optional[str] = None
     reference_win_at: Optional[datetime] = None

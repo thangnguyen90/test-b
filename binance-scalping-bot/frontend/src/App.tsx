@@ -180,6 +180,8 @@ type PaperTrade = {
   opened_at: string
   closed_at?: string | null
   close_price?: number | null
+  mark_price?: number | null
+  mark_price_timestamp?: string | null
   close_reason?: string | null
   reference_win_symbol?: string | null
   reference_win_at?: string | null
@@ -2108,6 +2110,26 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     return undefined
   }
 
+  function seedPaperLivePrices(rows: PaperTrade[]) {
+    if (!rows.length) return
+    const nextPrices: Record<string, number> = {}
+    const nextTimestamps: Record<string, string> = {}
+    for (const row of rows) {
+      if (row.mark_price != null && Number.isFinite(row.mark_price)) {
+        nextPrices[row.symbol] = row.mark_price
+      }
+      if (row.mark_price_timestamp) {
+        nextTimestamps[row.symbol] = row.mark_price_timestamp
+      }
+    }
+    if (Object.keys(nextPrices).length > 0) {
+      setPaperLivePrices((prev) => ({ ...prev, ...nextPrices }))
+    }
+    if (Object.keys(nextTimestamps).length > 0) {
+      setPaperLivePriceTime((prev) => ({ ...prev, ...nextTimestamps }))
+    }
+  }
+
   function resolveLiveTime(symbol: string): string | undefined {
     if (paperLivePriceTime[symbol] != null) return paperLivePriceTime[symbol]
     const key = canonicalSymbol(symbol)
@@ -2302,7 +2324,9 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
 
     if (openRes.ok) {
       const openPayload = await openRes.json() as { items: PaperTrade[] }
-      setPaperOpenTrades(openPayload.items ?? [])
+      const rows = openPayload.items ?? []
+      setPaperOpenTrades(rows)
+      seedPaperLivePrices(rows)
     } else {
       errors.push(`open:${openRes.status}`)
     }
@@ -2333,7 +2357,9 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     const response = await fetch(`${API_BASE}/api/v1/paper-trades/open?repo_scope=${PAPER_REPO_MAIN}`)
     if (!response.ok) throw new Error('Paper open trades API unavailable')
     const payload = await response.json() as { items: PaperTrade[] }
-    setPaperOpenTrades(payload.items ?? [])
+    const rows = payload.items ?? []
+    setPaperOpenTrades(rows)
+    seedPaperLivePrices(rows)
     markBackendAlive()
   }
 
@@ -2399,7 +2425,9 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
 
     if (openRes.ok) {
       const openPayload = await openRes.json() as { items: PaperTrade[] }
-      setMlCandlesOpenTradesDb(openPayload.items ?? [])
+      const rows = openPayload.items ?? []
+      setMlCandlesOpenTradesDb(rows)
+      seedPaperLivePrices(rows)
     } else {
       errors.push(`open:${openRes.status}`)
     }

@@ -341,6 +341,7 @@ class PaperTradeAPI:
         quantity = float(row["quantity"])
         leverage = int(row["leverage"])
         close_price = float(row["close_price"]) if row.get("close_price") is not None else None
+        mark_price = float(row["mark_price"]) if row.get("mark_price") is not None else None
         pnl = float(row["pnl"]) if row.get("pnl") is not None else None
         margin_usdt = (
             float(row["margin_usdt"])
@@ -348,6 +349,10 @@ class PaperTradeAPI:
             else calc_margin_usdt(entry_price=entry_price, quantity=quantity, leverage=leverage)
         )
         pnl_pct = None
+        status = str(row["status"])
+        side = str(row["side"])
+        if pnl is None and status.upper() == "OPEN" and mark_price is not None:
+            pnl = (mark_price - entry_price) * quantity if side == "LONG" else (entry_price - mark_price) * quantity
         if pnl is not None and margin_usdt > 0:
             pnl_pct = (pnl / margin_usdt) * 100
 
@@ -357,7 +362,7 @@ class PaperTradeAPI:
         return PaperTrade(
             id=int(row["id"]),
             symbol=str(row["symbol"]),
-            side=str(row["side"]),
+            side=side,
             btc_following=resolved_btc_follow,
             entry_type=str(row.get("entry_type") or "LIMIT"),
             signal_win_probability=float(row["signal_win_probability"]),
@@ -372,10 +377,12 @@ class PaperTradeAPI:
             entry_point_score=float(row["entry_point_score"]) if row.get("entry_point_score") is not None else None,
             quantity=quantity,
             leverage=leverage,
-            status=str(row["status"]),
+            status=status,
             opened_at=_parse_dt(row.get("opened_at")) or datetime.utcnow(),
             closed_at=_parse_dt(row.get("closed_at")),
             close_price=close_price,
+            mark_price=mark_price,
+            mark_price_timestamp=str(row["mark_price_timestamp"]) if row.get("mark_price_timestamp") is not None else None,
             close_reason=str(row["close_reason"]) if row.get("close_reason") is not None else None,
             reference_win_symbol=str(row["reference_win_symbol"]) if row.get("reference_win_symbol") is not None else None,
             reference_win_at=_parse_dt(row.get("reference_win_at")),
@@ -408,6 +415,88 @@ class PaperTradeAPI:
             except Exception:
                 out["current_btc_trend"] = None
         return out
+
+    async def _enrich_open_prices(self, rows: list[dict]) -> list[dict]:
+        if not rows:
+            return rows
+
+        symbols = [str(row.get("symbol") or "").strip() for row in rows if str(row.get("symbol") or "").strip()]
+        if not symbols:
+            return rows
+
+        unique_symbols = list(dict.fromkeys(symbols))
+        prices: dict[str, float] = {}
+        timestamps: dict[str, str] = {}
+
+        if self.price_stream is not None:
+            try:
+                stream_prices, _stamp, stream_timestamps = await self.price_stream.get_prices(unique_symbols)
+                prices.update({str(symbol): float(price) for symbol, price in stream_prices.items() if price is not None})
+                timestamps.update({str(symbol): str(ts) for symbol, ts in stream_timestamps.items() if ts})
+            except Exception:
+                pass
+
+        missing = [symbol for symbol in unique_symbols if symbol not in prices]
+        if missing:
+            try:
+                tickers = await asyncio.to_thread(self.market_client.fetch_tickers, missing)
+                if isinstance(tickers, dict):
+                    for symbol in missing:
+                        ticker = tickers.get(symbol)
+                        if not isinstance(ticker, dict):
+                            continue
+                        px = ticker.get("last") or ticker.get("close")
+                        if px is None:
+                            bid = ticker.get("bid")
+                            ask = ticker.get("ask")
+                            if bid is not None and ask is not None:
+                                px = (bid + ask) / 2
+                        if px is None:
+                            continue
+                        prices[symbol] = float(px)
+                        stamp = ticker.get("datetime")
+                        if stamp:
+                            timestamps[symbol] = str(stamp)
+            except Exception:
+                pass
+
+        still_missing = [symbol for symbol in unique_symbols if symbol not in prices]
+        for symbol in still_missing:
+            try:
+                ticker = await asyncio.to_thread(self.market_client.fetch_ticker, symbol)
+                if isinstance(ticker, dict):
+                    px = ticker.get("last") or ticker.get("close")
+                    if px is None:
+                        bid = ticker.get("bid")
+                        ask = ticker.get("ask")
+                        if bid is not None and ask is not None:
+                            px = (bid + ask) / 2
+                    if px is not None:
+                        prices[symbol] = float(px)
+                        stamp = ticker.get("datetime")
+                        if stamp:
+                            timestamps[symbol] = str(stamp)
+                        continue
+            except Exception:
+                pass
+
+            try:
+                rows = await asyncio.to_thread(self.market_client.fetch_ohlcv, symbol, "1m", 2)
+                if rows:
+                    prices[symbol] = float(rows[-1][4])
+            except Exception:
+                pass
+
+        enriched: list[dict] = []
+        for row in rows:
+            out = dict(row)
+            symbol = str(out.get("symbol") or "").strip()
+            if symbol and prices.get(symbol) is not None:
+                out["mark_price"] = prices[symbol]
+                if timestamps.get(symbol):
+                    out["mark_price_timestamp"] = timestamps[symbol]
+            enriched.append(out)
+        return enriched
 
     def _enrich_close_context(self, row: dict) -> dict:
         out = dict(row)
@@ -559,12 +648,13 @@ class PaperTradeAPI:
             cells=cells,
         )
 
-    def get_open(
+    async def get_open(
         self,
         repo_scope: str = Query(default="main", pattern="^(main|candles)$"),
     ) -> PaperTradeListResponse:
         repo = self._resolve_repo(repo_scope=repo_scope)
         rows = [self._enrich_live_context(row) for row in repo.list_open_trades()]
+        rows = await self._enrich_open_prices(rows)
         btc_follow_map = self._resolve_btc_follow_map(rows)
         return PaperTradeListResponse(
             items=[self._map_trade(row, btc_following=btc_follow_map.get(str(row.get("symbol") or ""))) for row in rows]
