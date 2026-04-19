@@ -32,6 +32,7 @@ from app.models.paper_trades import (
     PaperTradeStats,
     PaperTradeStatsResponse,
 )
+from app.api.signals import _evaluate_paper_entry_gate
 from app.deps import get_paper_trade_runtime
 from app.services.binance_client import BinanceFuturesClient
 from app.services.data_pipeline import DataPipeline
@@ -908,6 +909,24 @@ class PaperTradeAPI:
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
+        if entry_type == "LIMIT" or entry_type.startswith("ML_CANDLES"):
+            can_enter, blocked_reason, effective_win_probability, btc_following = _evaluate_paper_entry_gate(
+                symbol=req.symbol,
+                side=req.side,
+                raw_win_probability=float(req.signal_win_probability),
+                entry=float(req.entry_price or market_price),
+                take_profit=float(req.take_profit),
+                stop_loss=float(req.stop_loss),
+                market_price=float(market_price),
+                entry_type=entry_type,
+                force_entry_type_scope=force_entry_type_scope,
+            )
+            if not can_enter:
+                raise HTTPException(status_code=422, detail=f"Market open blocked: {blocked_reason}")
+        else:
+            effective_win_probability = req.effective_win_probability or req.signal_win_probability
+            btc_following = None
+
         leverage = req.leverage or self._resolve_default_leverage(req.symbol)
         atr_value = self._resolve_symbol_atr(req.symbol)
         normalized_tp, normalized_sl = normalize_tp_sl(
@@ -958,8 +977,7 @@ class PaperTradeAPI:
                 leverage=leverage,
             )
         feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, req.symbol, req.side)
-        btc_following: bool | None = None
-        if callable(self.btc_follow_resolver):
+        if callable(self.btc_follow_resolver) and btc_following is None:
             try:
                 btc_following = bool(self.btc_follow_resolver(req.symbol))
             except Exception:
@@ -986,7 +1004,7 @@ class PaperTradeAPI:
                 "btc_following": btc_following,
                 "entry_type": entry_type,
                 "signal_win_probability": req.signal_win_probability,
-                "effective_win_probability": req.effective_win_probability or req.signal_win_probability,
+                "effective_win_probability": effective_win_probability,
                 "entry_price": float(market_price),
                 "take_profit": normalized_tp,
                 "stop_loss": normalized_sl,

@@ -1153,6 +1153,10 @@ class PaperTradingEngine:
                 )
                 if effective_prob < required_min_win:
                     continue
+                volatility_assessment = await asyncio.to_thread(self._get_candles_bg_vol_guard_assessment, symbol)
+                vol_guard_reason = self._resolve_candles_bg_vol_guard_block_reason(volatility_assessment, side=side)
+                if volatility_assessment and vol_guard_reason:
+                    continue
                 pattern_leverage_override = self._resolve_basic_ml_leverage_override(
                     sample=pattern_sample,
                     effective_prob=effective_prob,
@@ -1229,13 +1233,17 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_entry_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(
+                        entry_price=fill_entry_price,
+                        quantity=quantity,
+                        leverage=leverage,
+                    )
                 if feature_snapshot is None:
                     feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
@@ -1248,7 +1256,7 @@ class PaperTradingEngine:
                         "entry_type": "LIMIT",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_entry_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "liq_zone_price": float(item["liq_zone_price"]) if item.get("liq_zone_price") is not None else None,
@@ -1267,7 +1275,7 @@ class PaperTradingEngine:
                     symbol=symbol,
                     side=side,
                     entry_type="LIMIT",
-                    entry_price=entry,
+                    entry_price=fill_entry_price,
                     quantity=quantity,
                 )
                 self._close_profitable_opposite_trades_on_recent_open_cluster(
@@ -3681,6 +3689,10 @@ class PaperTradingEngine:
     def _normalize_entry_type_name(entry_type: str | None) -> str:
         return str(entry_type or "").strip().upper()
 
+    def _should_apply_candles_bg_vol_guard(self, entry_type: str | None) -> bool:
+        normalized_entry_type = self._normalize_entry_type_name(entry_type)
+        return normalized_entry_type in {"LIMIT", self.candles_bg_entry_type}
+
     def _is_basic_ml_entry_type(self, entry_type: str | None) -> bool:
         return self._normalize_entry_type_name(entry_type) == "LIMIT"
 
@@ -4096,9 +4108,8 @@ class PaperTradingEngine:
             return None
         return atr / close
 
-    @classmethod
     def _assess_daily_volatility_guard(
-        cls,
+        self,
         candles: list[list[float]] | list[dict[str, float]],
     ) -> dict[str, Any]:
         normalized: list[dict[str, float]] = []
@@ -4152,7 +4163,7 @@ class PaperTradingEngine:
         closes = [item["close"] for item in normalized]
         highs = [item["high"] for item in normalized]
         quote_volumes = [max(0.0, item["close"] * item["volume"]) for item in normalized]
-        median_close = cls._calc_median(closes)
+        median_close = self._calc_median(closes)
         high_90 = max(highs) if highs else None
         current_close = normalized[-1]["close"] if normalized else None
         pump_ratio = (high_90 / median_close) if (median_close and median_close > 0 and high_90 and high_90 > 0) else None
@@ -4161,7 +4172,7 @@ class PaperTradingEngine:
             if (current_close and current_close > 0 and high_90 and high_90 > 0)
             else None
         )
-        atr_pct = cls._calc_atr_pct_from_candles(normalized)
+        atr_pct = self._calc_atr_pct_from_candles(normalized)
         hot_day_count = sum(1 for item in normalized if ((item["high"] - item["low"]) / item["close"]) >= 0.12)
         total_quote_volume = sum(quote_volumes)
         volume_top3_share = None
@@ -4193,6 +4204,27 @@ class PaperTradingEngine:
             (volume_trend_ratio or 0.0) >= self.candles_bg_vol_guard_volume_trend_ratio
             and (volume_acceleration_ratio or 0.0) >= self.candles_bg_vol_guard_volume_accel_ratio
         )
+        price_acceptance = (close_to_high_ratio or 0.0) >= 0.6
+        manageable_pump = (pump_ratio or 0.0) <= 3.5 or (close_to_high_ratio or 0.0) >= 0.72
+        activity_expansion = (volume_trend_ratio or 0.0) >= 1.35 or (volume_acceleration_ratio or 0.0) >= 1.08
+        heat_present = (atr_pct or 0.0) >= 0.045 or hot_day_count >= 1
+        surge_watch = not volume_ramp and activity_expansion and price_acceptance and manageable_pump and heat_present
+        surge_watch_score = (
+            ((volume_trend_ratio or 0.0) * 0.55)
+            + ((volume_acceleration_ratio or 0.0) * 0.35)
+            + ((close_to_high_ratio or 0.0) * 0.6)
+            if surge_watch
+            else None
+        )
+        surge_watch_flags: list[str] = []
+        if activity_expansion:
+            surge_watch_flags.append("volume expanding")
+        if price_acceptance:
+            surge_watch_flags.append("price accepted near highs")
+        if manageable_pump:
+            surge_watch_flags.append("pump not overextended")
+        if heat_present:
+            surge_watch_flags.append("range waking up")
 
         blockers: list[str] = []
         strict_flags: list[str] = []
@@ -4251,6 +4283,11 @@ class PaperTradingEngine:
             f"vol7/21 {volume_trend_text}",
             f"vol3/7 {volume_accel_text}",
         ]
+        surge_watch_reason = (
+            f"{' | '.join(metrics)} | {', '.join(surge_watch_flags)}"
+            if surge_watch
+            else None
+        )
         if blockers:
             level = "BLOCK"
             flags = blockers
@@ -4272,12 +4309,49 @@ class PaperTradingEngine:
             "volume_trend_ratio": volume_trend_ratio,
             "volume_acceleration_ratio": volume_acceleration_ratio,
             "volume_ramp": volume_ramp,
+            "surge_watch": surge_watch,
+            "surge_watch_score": surge_watch_score,
+            "surge_watch_reason": surge_watch_reason,
         }
 
-    def _resolve_candles_bg_vol_guard_block_reason(self, assessment: dict[str, Any] | None, *, side: str) -> str | None:
+    def _is_candles_bg_vol_guard_level_blocked(self, assessment: dict[str, Any] | None) -> bool:
         if not self.candles_bg_vol_guard_enabled or not isinstance(assessment, dict):
+            return False
+        level = str(assessment.get("level") or "").strip().upper()
+        if level not in {"STRICT", "BLOCK"}:
+            return False
+        threshold = str(self.candles_bg_vol_guard_block_level or "BLOCK").strip().upper() or "BLOCK"
+        if threshold == "STRICT":
+            return level in {"STRICT", "BLOCK"}
+        return level == "BLOCK"
+
+    @staticmethod
+    def _summarize_candles_bg_vol_guard_reason(reason: Any) -> str | None:
+        text = str(reason or "").strip()
+        if not text:
             return None
+        parts = [part.strip() for part in text.split("|") if part.strip()]
+        if not parts:
+            return text[:160]
+        if len(parts) == 1:
+            return parts[0][:160]
+        return parts[-1][:160]
+
+    def _resolve_candles_bg_vol_guard_block_reason(self, assessment: dict[str, Any] | None, *, side: str) -> str | None:
+        if not self.candles_bg_vol_guard_enabled:
+            return None
+        if not isinstance(assessment, dict):
+            return "blocked_by_vol_guard: unavailable"
         reasons: list[str] = []
+        if bool(assessment.get("unavailable")):
+            reasons.append("unavailable")
+        if self._is_candles_bg_vol_guard_level_blocked(assessment):
+            level = str(assessment.get("level") or "").strip().upper()
+            if level:
+                reasons.append(level)
+            summarized_reason = self._summarize_candles_bg_vol_guard_reason(assessment.get("reason"))
+            if summarized_reason:
+                reasons.append(summarized_reason)
         atr_pct = assessment.get("atr_pct")
         pump_ratio = assessment.get("pump_ratio")
         side_key = str(side or "").upper()
@@ -4301,7 +4375,18 @@ class PaperTradingEngine:
             reasons.append("VOL UP")
         if not reasons:
             return None
-        return f"blocked_by_vol_guard: {', '.join(reasons)}"
+        deduped_reasons: list[str] = []
+        seen_reasons: set[str] = set()
+        for reason in reasons:
+            normalized_reason = str(reason or "").strip()
+            if not normalized_reason:
+                continue
+            key = normalized_reason.lower()
+            if key in seen_reasons:
+                continue
+            seen_reasons.add(key)
+            deduped_reasons.append(normalized_reason)
+        return f"blocked_by_vol_guard: {', '.join(deduped_reasons)}"
 
     def _get_candles_bg_vol_guard_assessment(self, symbol: str) -> dict[str, Any] | None:
         if not self.candles_bg_vol_guard_enabled:
@@ -4315,7 +4400,28 @@ class PaperTradingEngine:
             rows = self.market_client.fetch_ohlcv(symbol=symbol, timeframe="1d", limit=180)
         except Exception as exc:
             logger.warning("ML_CANDLES_BG vol guard fetch failed for %s: %s", symbol, exc)
-            return None
+            if cached and isinstance(cached[1], dict):
+                stale_assessment = dict(cached[1])
+                stale_assessment["stale"] = True
+                stale_assessment["stale_fetch_error"] = str(exc)
+                return stale_assessment
+            return {
+                "level": "BLOCK",
+                "reason": "vol guard unavailable",
+                "candle_count": 0,
+                "pump_ratio": None,
+                "close_to_high_ratio": None,
+                "atr_pct": None,
+                "hot_day_count": 0,
+                "volume_top3_share": None,
+                "volume_trend_ratio": None,
+                "volume_acceleration_ratio": None,
+                "volume_ramp": False,
+                "surge_watch": False,
+                "surge_watch_score": None,
+                "surge_watch_reason": None,
+                "unavailable": True,
+            }
         assessment = self._assess_daily_volatility_guard(rows)
         self._candles_bg_vol_guard_cache[symbol_key] = (now_ts + float(self.candles_bg_vol_guard_cache_sec), assessment)
         return assessment

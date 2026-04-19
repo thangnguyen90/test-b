@@ -338,6 +338,30 @@ def _evaluate_paper_entry_gate(
                     return False, str(basic_pattern_reason), effective_probability, btc_following
                 return False, f"EffectiveWin<{min_win * 100:.1f}%", effective_probability, btc_following
 
+        if normalized_entry_type == "ML_CANDLES_BG":
+            try:
+                bg_pattern_reason, _, feature_snapshot = engine._evaluate_ml_candles_bg_pattern_gate(
+                    symbol=symbol,
+                    side=side,
+                    feature_snapshot=feature_snapshot,
+                )
+                if bg_pattern_reason:
+                    return False, str(bg_pattern_reason), effective_probability, btc_following
+            except Exception:
+                pass
+
+        if engine._should_apply_candles_bg_vol_guard(normalized_entry_type):
+            try:
+                volatility_assessment = engine._get_candles_bg_vol_guard_assessment(symbol)
+                vol_guard_reason = engine._resolve_candles_bg_vol_guard_block_reason(
+                    volatility_assessment,
+                    side=side,
+                )
+                if vol_guard_reason:
+                    return False, str(vol_guard_reason), effective_probability, btc_following
+            except Exception:
+                pass
+
         if not skip_btc_guards:
             try:
                 trend_hour_lock_reason = engine._btc_trend_hour_lock_reason(
@@ -662,6 +686,28 @@ def _build_scan_match(
     return payload
 
 
+def _apply_bg_entry_timing_fallback(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    blocked_reason = str(payload.get("blocked_reason") or "").strip()
+    if blocked_reason != "Paper engine offline":
+        return payload
+    side = str(payload.get("side") or "").upper()
+    entry = _safe_float(payload.get("predicted_entry_price")) or 0.0
+    mark_price = _safe_float(payload.get("mark_price")) or 0.0
+    if side not in {"LONG", "SHORT"} or entry <= 0 or mark_price <= 0:
+        return payload
+    buffer_pct = 0.0015
+    can_enter = (
+        mark_price <= (entry * (1.0 + buffer_pct))
+        if side == "LONG"
+        else mark_price >= (entry * (1.0 - buffer_pct))
+    )
+    payload["can_enter"] = can_enter
+    payload["blocked_reason"] = "-" if can_enter else "Entry not touched"
+    return payload
+
+
 def _scan_signals_impl(min_win: float, max_symbols: int, symbols: list[str] | None = None) -> dict:
     global _LAST_SCAN_CACHE, _BLOCK_UNTIL_TS
 
@@ -955,6 +1001,119 @@ def get_candles_bg_universe_snapshot(
     }
 
 
+def get_candles_bg_vol_guards_snapshot(
+    symbols: str | None = None,
+    max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
+) -> dict:
+    parsed_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
+    target_symbols: list[str] = []
+    seen_symbols: set[str] = set()
+    for symbol in parsed_symbols:
+        normalized = str(symbol or "").strip()
+        if not normalized or normalized in seen_symbols:
+            continue
+        seen_symbols.add(normalized)
+        target_symbols.append(normalized)
+    target_symbols = target_symbols[:max_symbols]
+
+    _, engine = get_paper_trade_runtime()
+    guards: dict[str, dict | None] = {}
+    error: str | None = None
+    if engine is None:
+        error = "paper_trade_engine_unavailable"
+    else:
+        for symbol in target_symbols:
+            try:
+                guards[symbol] = engine._get_candles_bg_vol_guard_assessment(symbol)
+            except Exception:
+                guards[symbol] = None
+
+    return {
+        "count": len(guards),
+        "guards": guards,
+        "source": "engine_cache",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "error": error,
+    }
+
+
+def get_candles_bg_latest_batch_snapshot(
+    symbols: str | None = None,
+    max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
+) -> dict:
+    parsed_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
+    target_symbols: list[str] = []
+    seen_symbols: set[str] = set()
+    for symbol in parsed_symbols:
+        normalized = str(symbol or "").strip()
+        if not normalized or normalized in seen_symbols:
+            continue
+        seen_symbols.add(normalized)
+        target_symbols.append(normalized)
+    target_symbols = target_symbols[:max_symbols]
+
+    matches: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    live_btc_phase = _resolve_live_btc_phase()
+    try:
+        tickers_map = market_client.fetch_tickers(target_symbols) if target_symbols else {}
+    except Exception:
+        tickers_map = {}
+
+    for symbol in target_symbols:
+        try:
+            ticker = tickers_map.get(symbol, {}) if isinstance(tickers_map, dict) else {}
+            last_price = _safe_float(ticker.get("last"))
+            if last_price is None:
+                last_price = _safe_float(ticker.get("close"))
+            if last_price is None:
+                bid = _safe_float(ticker.get("bid"))
+                ask = _safe_float(ticker.get("ask"))
+                if bid is not None and ask is not None:
+                    last_price = (bid + ask) / 2
+            if last_price is None:
+                continue
+
+            signal = ml_candles_predictor.predict(symbol=symbol, mark_price=last_price)
+        except Exception:
+            continue
+
+        baseline_ml_payload = _build_compare_signal_payload(
+            symbol=symbol,
+            mark_price=float(last_price),
+            predictor=ml_predictor,
+            target_side=signal.side,
+        )
+        candle_pattern_sample = signal_candle_pattern_service.match_signal(
+            signal_source="ML_CANDLES",
+            side=signal.side,
+            feature_snapshot=getattr(signal, "feature_snapshot", None),
+            live_btc_phase=live_btc_phase,
+        )
+        matches.append(
+            _apply_bg_entry_timing_fallback(
+                _build_scan_match(
+                    signal=signal,
+                    signal_source="ML_CANDLES_BG",
+                    last_price=float(last_price),
+                    ticker=ticker if isinstance(ticker, dict) else {},
+                    compare_field="baseline_ml",
+                    compare_payload=baseline_ml_payload,
+                    gate_entry_type="ML_CANDLES_BG",
+                    force_entry_type_scope=True,
+                    candle_pattern_sample=candle_pattern_sample,
+                )
+            )
+        )
+
+    return {
+        "count": len(matches),
+        "signals": matches,
+        "source": "live",
+        "timestamp": now_iso,
+    }
+
+
 def get_test_scan_snapshot(
     min_win: float = settings.paper_trade_test_ml_min_win,
     max_symbols: int = settings.paper_trade_test_ml_max_symbols,
@@ -1065,6 +1224,22 @@ def get_candles_bg_universe(
     max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
 ) -> dict:
     return get_candles_bg_universe_snapshot(max_symbols=max_symbols)
+
+
+@router.get("/candles/bg/vol-guards")
+def get_candles_bg_vol_guards(
+    symbols: str | None = Query(default=None),
+    max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
+) -> dict:
+    return get_candles_bg_vol_guards_snapshot(symbols=symbols, max_symbols=max_symbols)
+
+
+@router.get("/candles/bg/latest-batch")
+def get_candles_bg_latest_batch(
+    symbols: str | None = Query(default=None),
+    max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
+) -> dict:
+    return get_candles_bg_latest_batch_snapshot(symbols=symbols, max_symbols=max_symbols)
 
 
 @router.get("/test/scan")

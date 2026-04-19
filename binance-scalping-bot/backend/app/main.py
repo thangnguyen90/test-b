@@ -20,6 +20,7 @@ from app.deps import (
     auto_trainer,
     candle_pattern_refresher,
     bind_paper_trade_runtime,
+    get_paper_trade_runtime,
     liquid_ml_predictor,
     ml_candles_predictor,
     ml_predictor,
@@ -480,6 +481,65 @@ async def ml_candles_compare_socket(
                 except Exception:
                     pass
             await asyncio.sleep(poll_interval)
+    except Exception:
+        return
+
+
+@app.websocket("/ws/ml-candles/vol-guards")
+async def ml_candles_vol_guards_socket(
+    websocket: WebSocket,
+    symbols: str = "",
+    interval_sec: float = 15.0,
+) -> None:
+    await websocket.accept()
+    poll_interval = min(max(interval_sec, 10.0), 60.0)
+    max_symbols = 320
+
+    requested_symbols = [s.strip() for s in symbols.split(",") if s.strip()]
+    deduped_symbols: list[str] = []
+    seen_symbols: set[str] = set()
+    for symbol in requested_symbols:
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        deduped_symbols.append(symbol)
+    target_symbols = deduped_symbols[:max_symbols]
+
+    def build_snapshot() -> tuple[dict[str, dict | None], str | None]:
+        _, engine = get_paper_trade_runtime()
+        if engine is None:
+            return {}, "paper_trade_engine_unavailable"
+        guards: dict[str, dict | None] = {}
+        for symbol in target_symbols:
+            try:
+                assessment = engine._get_candles_bg_vol_guard_assessment(symbol)
+            except Exception as exc:
+                logger.warning("Vol guard stream failed for %s: %s", symbol, exc)
+                assessment = None
+            guards[symbol] = assessment
+        return guards, None
+
+    try:
+        while websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                guards, error = await asyncio.to_thread(build_snapshot)
+                await websocket.send_json(
+                    {
+                        "type": "vol_guards",
+                        "guards": guards,
+                        "symbols": target_symbols,
+                        "source": "engine_cache",
+                        "error": error,
+                    }
+                )
+            except Exception as exc:
+                try:
+                    await websocket.send_json({"type": "vol_guards_error", "error": str(exc), "symbols": target_symbols})
+                except Exception:
+                    pass
+            await asyncio.sleep(poll_interval)
+    except WebSocketDisconnect:
+        return
     except Exception:
         return
 

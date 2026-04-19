@@ -35,7 +35,7 @@ const ENTRY_TYPE_OPTIONS: { value: EntryTypeFilter; label: string }[] = [
 ]
 
 const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
-const API_BASE_CANDIDATES = [`http://${API_HOST}:9000`]
+const API_BASE_CANDIDATES = [`http://${API_HOST}:8005`, `http://${API_HOST}:9000`]
 const API_HEAVY_TIMEOUT_MS = 30000
 const REFRESH_MS = 30000
 const HISTORY_LIMIT = 2000
@@ -53,18 +53,35 @@ const hourFormatter = new Intl.DateTimeFormat('en-GB', {
   hour12: false,
 })
 
-async function fetchResponseWithTimeout(url: string, timeoutMs: number) {
-  const controller = new AbortController()
-  const id = window.setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    const res = await fetch(url, { signal: controller.signal })
-    window.clearTimeout(id)
-    return res
-  } catch (err) {
-    window.clearTimeout(id)
-    throw err
+function buildApiCandidateUrls(url: string): string[] {
+  for (const baseUrl of API_BASE_CANDIDATES) {
+    if (url.startsWith(baseUrl)) {
+      const suffix = url.slice(baseUrl.length)
+      return API_BASE_CANDIDATES.map((candidate) => `${candidate}${suffix}`)
+    }
   }
+  return [url]
+}
+
+async function fetchResponseWithTimeout(url: string, timeoutMs: number, init?: RequestInit) {
+  const candidateUrls = buildApiCandidateUrls(url)
+  let lastError: unknown = null
+
+  for (const candidateUrl of candidateUrls) {
+    const controller = new AbortController()
+    const id = window.setTimeout(() => controller.abort(), timeoutMs)
+
+    try {
+      const res = await fetch(candidateUrl, { ...init, signal: controller.signal })
+      window.clearTimeout(id)
+      return res
+    } catch (err) {
+      window.clearTimeout(id)
+      lastError = err
+    }
+  }
+
+  throw lastError ?? new Error('Cannot load history.')
 }
 
 function formatPnl(value: number): string {

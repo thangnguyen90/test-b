@@ -45,6 +45,22 @@ type PriceStreamMessage = {
   error?: string
 }
 
+type VolGuardStreamMessage = {
+  type: string
+  symbols?: string[]
+  guards?: Record<string, VolatilityGuardAssessment | null>
+  source?: string
+  error?: string | null
+}
+
+type VolGuardBatchResponse = {
+  count: number
+  guards?: Record<string, VolatilityGuardAssessment | null>
+  source?: string
+  timestamp?: string
+  error?: string | null
+}
+
 type Palette = {
   id: string
   name: string
@@ -117,6 +133,9 @@ type VolatilityGuardAssessment = {
   volume_trend_ratio: number | null
   volume_acceleration_ratio: number | null
   volume_ramp: boolean
+  surge_watch: boolean
+  surge_watch_score: number | null
+  surge_watch_reason: string | null
 }
 
 type EmaLine = {
@@ -194,6 +213,13 @@ type ScanSignalItem = {
 type ScanSignalsResponse = {
   min_win: number
   scanned: number
+  count: number
+  signals: ScanSignalItem[]
+  source?: string
+  timestamp?: string
+}
+
+type BgLatestBatchResponse = {
   count: number
   signals: ScanSignalItem[]
   source?: string
@@ -519,7 +545,8 @@ type PaperManualCloseRequest = {
 }
 
 const API_HOST = window.location.hostname === 'localhost' ? '127.0.0.1' : (window.location.hostname || '127.0.0.1')
-export const API_BASE = `http://${API_HOST}:9000`
+const API_BASE_CANDIDATES = [`http://${API_HOST}:8005`, `http://${API_HOST}:9000`]
+export const API_BASE = API_BASE_CANDIDATES[0]
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
 const ML_CANDLES_DISPLAY_MIN_WIN = 0.7
@@ -729,6 +756,11 @@ function calcEMA(series: number[], period: number): Array<number | null> {
 
 function canonicalSymbol(symbol: string): string {
   return symbol.replace(':USDT', '').trim().toUpperCase()
+}
+
+function formatSignalPrice(price?: number | null): string {
+  if (typeof price !== 'number' || !Number.isFinite(price)) return '-'
+  return price.toFixed(price >= 100 ? 2 : 6)
 }
 
 function formatSignalSource(source?: string | null): string {
@@ -968,20 +1000,42 @@ function currentVnDateString(): string {
   return VN_DATE_FORMATTER.format(new Date())
 }
 
-async function fetchResponseWithTimeout(url: string, timeoutMs = ML_COMPARE_HTTP_TIMEOUT_MS): Promise<Response> {
-  const controller = new AbortController()
-  let timeoutId: number | null = null
-  try {
-    timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
-    return await fetch(url, { signal: controller.signal })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new Error(`Compare request timed out after ${Math.round(timeoutMs / 1000)}s`)
+function buildApiCandidateUrls(url: string): string[] {
+  for (const baseUrl of API_BASE_CANDIDATES) {
+    if (url.startsWith(baseUrl)) {
+      const suffix = url.slice(baseUrl.length)
+      return API_BASE_CANDIDATES.map((candidate) => `${candidate}${suffix}`)
     }
-    throw error
-  } finally {
-    if (timeoutId != null) window.clearTimeout(timeoutId)
   }
+  return [url]
+}
+
+async function fetchResponseWithTimeout(
+  url: string,
+  timeoutMs = ML_COMPARE_HTTP_TIMEOUT_MS,
+  init?: RequestInit,
+): Promise<Response> {
+  const candidateUrls = buildApiCandidateUrls(url)
+  let lastError: Error | null = null
+
+  for (const candidateUrl of candidateUrls) {
+    const controller = new AbortController()
+    let timeoutId: number | null = null
+    try {
+      timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
+      return await fetch(candidateUrl, { ...init, signal: controller.signal })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        lastError = new Error(`Compare request timed out after ${Math.round(timeoutMs / 1000)}s`)
+      } else {
+        lastError = error instanceof Error ? error : new Error('Network request failed')
+      }
+    } finally {
+      if (timeoutId != null) window.clearTimeout(timeoutId)
+    }
+  }
+
+  throw lastError ?? new Error('Network request failed')
 }
 
 function formatWeekdayFilterLabel(value?: number | null): string {
@@ -1086,6 +1140,9 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
       volume_trend_ratio: null,
       volume_acceleration_ratio: null,
       volume_ramp: false,
+      surge_watch: false,
+      surge_watch_score: null,
+      surge_watch_reason: null,
     }
   }
 
@@ -1125,6 +1182,19 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
     ? recent3AvgVolume / recent7AvgVolume
     : null
   const volumeRamp = (volumeTrendRatio ?? 0) >= 1.8 && (volumeAccelerationRatio ?? 0) >= 1.1
+  const priceAcceptance = (closeToHighRatio ?? 0) >= 0.6
+  const manageablePump = (pumpRatio ?? 0) <= 3.5 || (closeToHighRatio ?? 0) >= 0.72
+  const activityExpansion = (volumeTrendRatio ?? 0) >= 1.35 || (volumeAccelerationRatio ?? 0) >= 1.08
+  const heatPresent = (atrPct ?? 0) >= 0.045 || hotDayCount >= 1
+  const surgeWatch = !volumeRamp && activityExpansion && priceAcceptance && manageablePump && heatPresent
+  const surgeWatchScore = surgeWatch
+    ? ((volumeTrendRatio ?? 0) * 0.55) + ((volumeAccelerationRatio ?? 0) * 0.35) + ((closeToHighRatio ?? 0) * 0.6)
+    : null
+  const surgeWatchFlags: string[] = []
+  if (activityExpansion) surgeWatchFlags.push('volume expanding')
+  if (priceAcceptance) surgeWatchFlags.push('price accepted near highs')
+  if (manageablePump) surgeWatchFlags.push('pump not overextended')
+  if (heatPresent) surgeWatchFlags.push('range waking up')
 
   const blockers: string[] = []
   const strictFlags: string[] = []
@@ -1152,6 +1222,9 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
     `vol7/21 ${typeof volumeTrendRatio === 'number' ? `${volumeTrendRatio.toFixed(1)}x` : '-'}`,
     `vol3/7 ${typeof volumeAccelerationRatio === 'number' ? `${volumeAccelerationRatio.toFixed(1)}x` : '-'}`,
   ]
+  const surgeWatchReason = surgeWatch
+    ? `${metrics.join(' | ')} | ${surgeWatchFlags.join(', ')}`
+    : null
 
   if (blockers.length > 0) {
     return {
@@ -1166,6 +1239,9 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
       volume_trend_ratio: volumeTrendRatio,
       volume_acceleration_ratio: volumeAccelerationRatio,
       volume_ramp: volumeRamp,
+      surge_watch: surgeWatch,
+      surge_watch_score: surgeWatchScore,
+      surge_watch_reason: surgeWatchReason,
     }
   }
   if (strictFlags.length > 0) {
@@ -1181,6 +1257,9 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
       volume_trend_ratio: volumeTrendRatio,
       volume_acceleration_ratio: volumeAccelerationRatio,
       volume_ramp: volumeRamp,
+      surge_watch: surgeWatch,
+      surge_watch_score: surgeWatchScore,
+      surge_watch_reason: surgeWatchReason,
     }
   }
   return {
@@ -1195,7 +1274,51 @@ function assessVolatilityGuard(candles: KlineItem[]): VolatilityGuardAssessment 
     volume_trend_ratio: volumeTrendRatio,
     volume_acceleration_ratio: volumeAccelerationRatio,
     volume_ramp: volumeRamp,
+    surge_watch: surgeWatch,
+    surge_watch_score: surgeWatchScore,
+    surge_watch_reason: surgeWatchReason,
   }
+}
+
+void assessVolatilityGuard
+
+function isSurgeWatchAssessment(assessment?: VolatilityGuardAssessment | null): boolean {
+  if (!assessment) return false
+  if (assessment.surge_watch === true) return true
+  const priceAcceptance = (assessment.close_to_high_ratio ?? 0) >= 0.6
+  const manageablePump = (assessment.pump_ratio ?? 0) <= 3.5 || (assessment.close_to_high_ratio ?? 0) >= 0.72
+  const activityExpansion = (assessment.volume_trend_ratio ?? 0) >= 1.35 || (assessment.volume_acceleration_ratio ?? 0) >= 1.08
+  const heatPresent = (assessment.atr_pct ?? 0) >= 0.045 || (assessment.hot_day_count ?? 0) >= 1
+  return !assessment.volume_ramp && activityExpansion && priceAcceptance && manageablePump && heatPresent
+}
+
+function getSurgeWatchScore(assessment?: VolatilityGuardAssessment | null): number {
+  if (!assessment) return 0
+  if (typeof assessment.surge_watch_score === 'number') return assessment.surge_watch_score
+  if (!isSurgeWatchAssessment(assessment)) return 0
+  return ((assessment.volume_trend_ratio ?? 0) * 0.55)
+    + ((assessment.volume_acceleration_ratio ?? 0) * 0.35)
+    + ((assessment.close_to_high_ratio ?? 0) * 0.6)
+}
+
+function getSurgeWatchReason(assessment?: VolatilityGuardAssessment | null): string | null {
+  if (!assessment) return null
+  if (assessment.surge_watch_reason) return assessment.surge_watch_reason
+  if (!isSurgeWatchAssessment(assessment)) return null
+  const flags: string[] = []
+  if ((assessment.volume_trend_ratio ?? 0) >= 1.35 || (assessment.volume_acceleration_ratio ?? 0) >= 1.08) {
+    flags.push('volume expanding')
+  }
+  if ((assessment.close_to_high_ratio ?? 0) >= 0.6) {
+    flags.push('price accepted near highs')
+  }
+  if ((assessment.pump_ratio ?? 0) <= 3.5 || (assessment.close_to_high_ratio ?? 0) >= 0.72) {
+    flags.push('pump not overextended')
+  }
+  if ((assessment.atr_pct ?? 0) >= 0.045 || (assessment.hot_day_count ?? 0) >= 1) {
+    flags.push('range waking up')
+  }
+  return `${assessment.reason} | ${flags.join(', ')}`
 }
 
 function renderVolatilityGuardBadge(assessment?: VolatilityGuardAssessment | null) {
@@ -1219,6 +1342,11 @@ function renderVolatilityGuardBadge(assessment?: VolatilityGuardAssessment | nul
         {assessment.volume_ramp ? (
           <span className="badge warn" title={assessment.reason}>
             VOL UP
+          </span>
+        ) : null}
+        {isSurgeWatchAssessment(assessment) ? (
+          <span className="badge neutral" title={getSurgeWatchReason(assessment) ?? assessment.reason}>
+            SURGE
           </span>
         ) : null}
       </div>
@@ -1563,6 +1691,7 @@ function App() {
   const [mlCandlesScannedCount, setMlCandlesScannedCount] = useState(0)
   const [mlCandlesBgUniverseSymbols, setMlCandlesBgUniverseSymbols] = useState<string[]>([])
   const [mlCandlesBgUniverseScannedCount, setMlCandlesBgUniverseScannedCount] = useState(0)
+  const [mlCandlesBgLatestSignals, setMlCandlesBgLatestSignals] = useState<Record<string, ScanSignalItem>>({})
   const [mlCompareHistory, setMlCompareHistory] = useState<PaperTrade[]>([])
   const [mlCompareDate, setMlCompareDate] = useState<string>(currentVnDateString)
   const [mlComparePage, setMlComparePage] = useState(1)
@@ -2074,6 +2203,10 @@ function App() {
     () => Array.from(new Set([...mlCandlesOpenGuardSymbols, ...mlCandlesBgUniverseGuardSymbols])),
     [mlCandlesOpenGuardSymbols, mlCandlesBgUniverseGuardSymbols],
   )
+  const mlCandlesCompareGuardSymbolsKey = useMemo(
+    () => mlCandlesCompareGuardSymbols.join('|'),
+    [mlCandlesCompareGuardSymbols],
+  )
   const mlCandlesOpenGuardCounts = useMemo(() => {
     const counts: Record<VolatilityGuardLevel, number> = {
       ALLOW: 0,
@@ -2106,6 +2239,31 @@ function App() {
         return (b.assessment?.volume_acceleration_ratio ?? 0) - (a.assessment?.volume_acceleration_ratio ?? 0)
       }),
     [mlCandlesBgUniverseSymbols, volatilityGuards],
+  )
+  const mlCandlesBgSurgeWatchRows = useMemo(
+    () => mlCandlesBgUniverseSymbols
+      .map((symbol) => ({
+        symbol,
+        assessment: volatilityGuards[canonicalSymbol(symbol)],
+      }))
+      .filter((item) => item.assessment && isSurgeWatchAssessment(item.assessment))
+      .sort((a, b) => {
+        const aScore = getSurgeWatchScore(a.assessment)
+        const bScore = getSurgeWatchScore(b.assessment)
+        if (bScore !== aScore) return bScore - aScore
+        const aRatio = a.assessment?.volume_trend_ratio ?? 0
+        const bRatio = b.assessment?.volume_trend_ratio ?? 0
+        return bRatio - aRatio
+      }),
+    [mlCandlesBgUniverseSymbols, volatilityGuards],
+  )
+  const mlCandlesBgSurgeWatchSymbols = useMemo(
+    () => mlCandlesBgSurgeWatchRows.map((item) => item.symbol),
+    [mlCandlesBgSurgeWatchRows],
+  )
+  const mlCandlesBgSurgeWatchSymbolsKey = useMemo(
+    () => mlCandlesBgSurgeWatchSymbols.join('|'),
+    [mlCandlesBgSurgeWatchSymbols],
   )
   const sortedMlCandlesOpenTrades = useMemo(() => {
     const rows = [...filteredMlCandlesOpenTrades]
@@ -2189,38 +2347,88 @@ function App() {
   }, [filteredMlCandlesOpenTrades, mlCandlesOpenSort, paperLivePrices, paperLivePriceTime])
 
   useEffect(() => {
-    if (!showMlCandlesScreen || mlCandlesScreenView !== 'compare') return
+    if (!showMlCandlesScreen || mlCandlesScreenView !== 'compare') return () => undefined
+    if (mlCandlesCompareGuardSymbols.length === 0) return () => undefined
 
-    const missingSymbols = mlCandlesCompareGuardSymbols.filter((symbolKey) => volatilityGuards[symbolKey] === undefined)
-    if (missingSymbols.length === 0) return
+    let socket: WebSocket | null = null
+    let reconnectTimer: number | null = null
+    let fallbackTimer: number | null = null
+    let mounted = true
 
-    let cancelled = false
+    fetchMlCandlesVolGuards(mlCandlesCompareGuardSymbols).catch(() => {
+      // Ignore initial REST fallback failure if websocket catches up first.
+    })
 
-    ;(async () => {
-      const results = await Promise.all(
-        missingSymbols.map(async (symbolKey) => {
-          try {
-            const assessment = await fetchVolatilityGuard(symbolKey)
-            return [symbolKey, assessment] as const
-          } catch {
-            return [symbolKey, null] as const
-          }
-        }),
-      )
-      if (cancelled) return
-      setVolatilityGuards((current) => {
-        const next = { ...current }
-        for (const [symbolKey, assessment] of results) {
-          next[symbolKey] = assessment
+    const connect = () => {
+      if (!mounted) return
+      const wsUrl = `${WS_BASE}/ws/ml-candles/vol-guards?symbols=${encodeURIComponent(mlCandlesCompareGuardSymbols.join(','))}&interval_sec=15`
+      socket = new WebSocket(wsUrl)
+
+      socket.onmessage = (event) => {
+        if (!mounted) return
+        try {
+          const payload = JSON.parse(event.data) as VolGuardStreamMessage
+          if (payload.type !== 'vol_guards' || !payload.guards) return
+          setVolatilityGuards((current) => {
+            const next = { ...current }
+            for (const [symbol, assessment] of Object.entries(payload.guards ?? {})) {
+              next[canonicalSymbol(symbol)] = assessment ?? null
+            }
+            return next
+          })
+        } catch {
+          // Ignore malformed payloads.
         }
-        return next
+      }
+
+      socket.onclose = () => {
+        if (!mounted) return
+        reconnectTimer = window.setTimeout(connect, 2000)
+      }
+
+      socket.onerror = () => {
+        socket?.close()
+      }
+    }
+
+    connect()
+    fallbackTimer = window.setInterval(() => {
+      fetchMlCandlesVolGuards(mlCandlesCompareGuardSymbols).catch(() => {
+        // Keep the last guard snapshot on transient poll failures.
       })
-    })().catch(() => undefined)
+    }, 15000)
 
     return () => {
-      cancelled = true
+      mounted = false
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer)
+      if (fallbackTimer != null) window.clearInterval(fallbackTimer)
+      socket?.close()
     }
-  }, [showMlCandlesScreen, mlCandlesScreenView, mlCandlesCompareGuardSymbols, volatilityGuards])
+  }, [showMlCandlesScreen, mlCandlesScreenView, mlCandlesCompareGuardSymbolsKey])
+
+  useEffect(() => {
+    if (!showMlCandlesScreen || mlCandlesScreenView !== 'compare') return () => undefined
+    if (mlCandlesBgSurgeWatchSymbols.length === 0) {
+      setMlCandlesBgLatestSignals({})
+      return () => undefined
+    }
+
+    let mounted = true
+    const run = async () => {
+      try {
+        await fetchMlCandlesBgLatestSignals(mlCandlesBgSurgeWatchSymbols)
+      } catch (err) {
+        if (!mounted) return
+        setError(err instanceof Error ? err.message : 'Cannot fetch ML_CANDLES_BG latest signals')
+      }
+    }
+
+    void run()
+
+    return () => {
+      mounted = false
+    }
+  }, [showMlCandlesScreen, mlCandlesScreenView, mlCandlesBgSurgeWatchSymbolsKey])
   const recentMlCompareHistory = useMemo(
     () => mlCompareHistory
       .filter((row) => {
@@ -2589,16 +2797,6 @@ function App() {
     }
   }
 
-  async function fetchVolatilityGuard(symbol: string): Promise<VolatilityGuardAssessment> {
-    const response = await fetchResponseWithTimeout(
-      `${API_BASE}/api/v1/market/klines?symbol=${encodeURIComponent(symbol)}&timeframe=1d&limit=180`,
-      API_HEAVY_TIMEOUT_MS,
-    )
-    if (!response.ok) throw new Error(`Cannot fetch daily volatility for ${symbol}`)
-    const data = (await response.json()) as KlinesResponse
-    return assessVolatilityGuard(data.candles ?? [])
-  }
-
   async function fetchHighWinSignals() {
     const response = await fetchResponseWithTimeout(
       `${API_BASE}/api/v1/signals/scan?min_win=0.7&max_symbols=${HIGH_WIN_SCAN_MAX_SYMBOLS}`,
@@ -2630,6 +2828,41 @@ function App() {
     const data = (await response.json()) as SymbolUniverseResponse
     setMlCandlesBgUniverseSymbols(data.symbols ?? [])
     setMlCandlesBgUniverseScannedCount(data.count ?? 0)
+  }
+
+  async function fetchMlCandlesVolGuards(symbols: string[]) {
+    if (symbols.length === 0) return
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/signals/candles/bg/vol-guards?symbols=${encodeURIComponent(symbols.join(','))}&max_symbols=${symbols.length}`,
+      API_HEAVY_TIMEOUT_MS,
+    )
+    if (!response.ok) throw new Error('Cannot fetch ML_CANDLES_BG vol guards')
+    const data = (await response.json()) as VolGuardBatchResponse
+    setVolatilityGuards((current) => {
+      const next = { ...current }
+      for (const [symbol, assessment] of Object.entries(data.guards ?? {})) {
+        next[canonicalSymbol(symbol)] = assessment ?? null
+      }
+      return next
+    })
+  }
+
+  async function fetchMlCandlesBgLatestSignals(symbols: string[]) {
+    if (symbols.length === 0) {
+      setMlCandlesBgLatestSignals({})
+      return
+    }
+    const response = await fetchResponseWithTimeout(
+      `${API_BASE}/api/v1/signals/candles/bg/latest-batch?symbols=${encodeURIComponent(symbols.join(','))}&max_symbols=${symbols.length}`,
+      API_HEAVY_TIMEOUT_MS,
+    )
+    if (!response.ok) throw new Error('Cannot fetch ML_CANDLES_BG latest signals')
+    const data = (await response.json()) as BgLatestBatchResponse
+    const next: Record<string, ScanSignalItem> = {}
+    for (const item of data.signals ?? []) {
+      next[canonicalSymbol(item.symbol)] = item
+    }
+    setMlCandlesBgLatestSignals(next)
   }
 
   async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
@@ -2900,16 +3133,16 @@ function App() {
 
   async function openPaperMarketOrder(input: PaperMarketOpenRequest) {
     setIsOpeningMarketOrder(true)
-    let timeoutId: number | null = null
     try {
-      const controller = new AbortController()
-      timeoutId = window.setTimeout(() => controller.abort(), 12000)
-      const response = await fetch(`${API_BASE}/api/v1/paper-trades/market-open`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-        signal: controller.signal,
-      })
+      const response = await fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/market-open`,
+        12000,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        },
+      )
       if (response.status === 409) {
         const payloadText = await response.text()
         let detail = payloadText
@@ -2966,12 +3199,8 @@ function App() {
         })
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        throw new Error('Market open request timeout (12s)')
-      }
       throw err
     } finally {
-      if (timeoutId != null) window.clearTimeout(timeoutId)
       setIsOpeningMarketOrder(false)
     }
   }
@@ -2979,11 +3208,15 @@ function App() {
   async function closePaperTrade(tradeId: number, payload: PaperManualCloseRequest = {}) {
     setClosingTradeId(tradeId)
     try {
-      const response = await fetch(`${API_BASE}/api/v1/paper-trades/close/${tradeId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
+      const response = await fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/paper-trades/close/${tradeId}`,
+        API_TIMEOUT_MS,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
       if (!response.ok) {
         const text = await response.text()
         throw new Error(`Close trade failed: ${text}`)
@@ -3018,20 +3251,24 @@ function App() {
 
     setIsLoadingOrder(true)
     try {
-      const response = await fetch(`${API_BASE}/api/v1/orders/pending`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: signal.symbol,
-          side: signal.side,
-          quantity: 0.01,
-          leverage: 5,
-          predicted_entry_price: signal.predicted_entry_price,
-          stop_loss: signal.stop_loss,
-          take_profit: signal.take_profit,
-          win_probability: signal.win_probability,
-        }),
-      })
+      const response = await fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/orders/pending`,
+        API_TIMEOUT_MS,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: signal.symbol,
+            side: signal.side,
+            quantity: 0.01,
+            leverage: 5,
+            predicted_entry_price: signal.predicted_entry_price,
+            stop_loss: signal.stop_loss,
+            take_profit: signal.take_profit,
+            win_probability: signal.win_probability,
+          }),
+        },
+      )
 
       if (!response.ok) throw new Error('Create pending order failed')
       await fetchPendingOrders()
@@ -3057,20 +3294,24 @@ function App() {
 
     setIsLoadingOrder(true)
     try {
-      const response = await fetch(`${API_BASE}/api/v1/orders/pending`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: item.symbol,
-          side: item.side,
-          quantity: 0.01,
-          leverage: 5,
-          predicted_entry_price: entryPrice,
-          stop_loss: stopLoss,
-          take_profit: takeProfit,
-          win_probability: item.win_probability,
-        }),
-      })
+      const response = await fetchResponseWithTimeout(
+        `${API_BASE}/api/v1/orders/pending`,
+        API_TIMEOUT_MS,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: item.symbol,
+            side: item.side,
+            quantity: 0.01,
+            leverage: 5,
+            predicted_entry_price: entryPrice,
+            stop_loss: stopLoss,
+            take_profit: takeProfit,
+            win_probability: item.win_probability,
+          }),
+        },
+      )
 
       if (!response.ok) {
         const text = await response.text()
@@ -4301,6 +4542,78 @@ function App() {
           </div>
 
           <div className="history-header">
+            <h3 className="section-title">SURGE WATCH In BG Universe</h3>
+            <div className="scan-actions">
+              <span className="badge neutral">Universe {mlCandlesBgUniverseScannedCount}</span>
+              <span className="badge neutral">SURGE {mlCandlesBgSurgeWatchRows.length}</span>
+            </div>
+          </div>
+          <div className="content table-wrap">
+            {mlCandlesBgSurgeWatchRows.length === 0 ? (
+              <p>No BG universe coin is currently flagged as SURGE WATCH.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Vol Guard</th>
+                    <th>Vol7/21</th>
+                    <th>Vol3/7</th>
+                    <th>Now/High</th>
+                    <th>BG Signal</th>
+                    <th>Entry</th>
+                    <th>TP</th>
+                    <th>SL</th>
+                    <th>Ready</th>
+                    <th>Gate</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {mlCandlesBgSurgeWatchRows.map(({ symbol, assessment }) => {
+                    const bgSignal = mlCandlesBgLatestSignals[canonicalSymbol(symbol)]
+                    return (
+                      <tr key={`bg-surge-watch-${symbol}`}>
+                        <td>{renderSymbolJump(symbol)}</td>
+                        <td>{renderVolatilityGuardBadge(assessment)}</td>
+                        <td>{assessment?.volume_trend_ratio ? `${assessment.volume_trend_ratio.toFixed(1)}x` : '-'}</td>
+                        <td>{assessment?.volume_acceleration_ratio ? `${assessment.volume_acceleration_ratio.toFixed(1)}x` : '-'}</td>
+                        <td>{assessment?.close_to_high_ratio ? `${(assessment.close_to_high_ratio * 100).toFixed(1)}%` : '-'}</td>
+                        <td>
+                          {bgSignal ? (
+                            <div className="signal-model-stack">
+                              <span className={`badge ${bgSignal.side === 'LONG' ? 'success' : 'danger'}`}>
+                                {bgSignal.side} {(bgSignal.win_probability * 100).toFixed(1)}%
+                              </span>
+                              <span className="signal-model-meta">
+                                Eff {typeof bgSignal.effective_win_probability === 'number' ? `${(bgSignal.effective_win_probability * 100).toFixed(1)}%` : '-'}
+                              </span>
+                            </div>
+                          ) : '-'}
+                        </td>
+                        <td>{formatSignalPrice(bgSignal?.predicted_entry_price)}</td>
+                        <td>{formatSignalPrice(bgSignal?.take_profit)}</td>
+                        <td>{formatSignalPrice(bgSignal?.stop_loss)}</td>
+                        <td>
+                          {bgSignal ? (
+                            <span className={`badge ${bgSignal.can_enter ? 'success' : 'warn'}`}>
+                              {bgSignal.can_enter ? 'READY' : 'WAIT'}
+                            </span>
+                          ) : (
+                            <span className="badge neutral">-</span>
+                          )}
+                        </td>
+                        <td>{bgSignal?.blocked_reason ?? '-'}</td>
+                        <td>{getSurgeWatchReason(assessment) ?? assessment?.reason ?? '-'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="history-header">
             <h3 className="section-title">VOL UP In BG Universe</h3>
             <div className="scan-actions">
               <span className="badge neutral">Universe {mlCandlesBgUniverseScannedCount}</span>
@@ -4329,7 +4642,7 @@ function App() {
                       <td>{renderVolatilityGuardBadge(assessment)}</td>
                       <td>{assessment?.volume_trend_ratio ? `${assessment.volume_trend_ratio.toFixed(1)}x` : '-'}</td>
                       <td>{assessment?.volume_acceleration_ratio ? `${assessment.volume_acceleration_ratio.toFixed(1)}x` : '-'}</td>
-                      <td>{assessment?.atr_pct ? `${assessment.atr_pct.toFixed(1)}%` : '-'}</td>
+                      <td>{typeof assessment?.atr_pct === 'number' ? `${(assessment.atr_pct * 100).toFixed(1)}%` : '-'}</td>
                       <td>{assessment?.reason ?? '-'}</td>
                     </tr>
                   ))}
@@ -4771,7 +5084,9 @@ function App() {
                             type="button"
                             className="btn-inline"
                             disabled={
-                              isOpeningMarketOrder
+                              !canEnter
+                              || item.blocked_reason !== '-'
+                              || isOpeningMarketOrder
                               || mlCandlesOpenTradeKeySet.has(
                                 entryScopedTradeKey(item.symbol, item.side, 'ML_CANDLES_TEST'),
                               )
