@@ -242,6 +242,11 @@ class PaperTradingEngine:
         candles_bg_discord_webhook_enabled: bool = False,
         candles_bg_discord_webhook_url: str = "",
         candles_bg_discord_webhook_username: str = "ML Candles BG Bot",
+        candles_bg_surge_discord_webhook_enabled: bool = False,
+        candles_bg_surge_discord_webhook_url: str = "",
+        candles_bg_surge_discord_webhook_username: str = "ML Candles BG Surge Bot",
+        candles_bg_surge_min_long_probability: float = 0.73,
+        candles_bg_surge_discord_cooldown_minutes: int = 180,
         candles_bg_vol_guard_enabled: bool = True,
         candles_bg_vol_guard_block_level: str = "BLOCK",
         candles_bg_vol_guard_atr_threshold_pct: float = 10.0,
@@ -592,6 +597,19 @@ class PaperTradingEngine:
             webhook_url=candles_bg_discord_webhook_url,
             username=candles_bg_discord_webhook_username,
         )
+        self.candles_bg_surge_discord_notifier = DiscordWebhookNotifier(
+            enabled=bool(candles_bg_surge_discord_webhook_enabled),
+            webhook_url=candles_bg_surge_discord_webhook_url,
+            username=candles_bg_surge_discord_webhook_username,
+        )
+        self.candles_bg_surge_min_long_probability = max(
+            0.0,
+            min(float(candles_bg_surge_min_long_probability), 0.99),
+        )
+        self.candles_bg_surge_discord_cooldown_minutes = max(
+            1,
+            int(candles_bg_surge_discord_cooldown_minutes),
+        )
         self.candles_bg_vol_guard_enabled = bool(candles_bg_vol_guard_enabled)
         self.candles_bg_vol_guard_block_level = str(candles_bg_vol_guard_block_level or "BLOCK").strip().upper() or "BLOCK"
         self.candles_bg_vol_guard_atr_threshold_pct = max(0.0, float(candles_bg_vol_guard_atr_threshold_pct))
@@ -720,6 +738,7 @@ class PaperTradingEngine:
         self._instant_sl_symbol_side_lock_until_ts: dict[str, float] = {}
         self._instant_sl_global_events_ts: list[float] = []
         self._candles_bg_vol_guard_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._candles_bg_surge_alert_ts: dict[str, float] = {}
         self._candles_bg_vol_guard_alert_ts: dict[str, float] = {}
         self.high_volatility_threshold_pct = 2.0
         self.high_volatility_leverage = 3
@@ -1833,12 +1852,26 @@ class PaperTradingEngine:
                     btc_guard=btc_guard,
                 )
 
+                volatility_assessment = await asyncio.to_thread(self._get_candles_bg_vol_guard_assessment, symbol)
                 entry_timing_reason = self._ml_candles_bg_entry_timing_reason(
                     symbol=symbol,
                     side=side,
                     market_price=float(market_price),
                     entry=entry,
                     btc_guard=btc_guard,
+                )
+                self._enqueue_ml_candles_bg_surge_watch_long_notification(
+                    symbol=symbol,
+                    market_price=float(market_price),
+                    side=side,
+                    raw_probability=raw_prob,
+                    effective_probability=effective_prob,
+                    entry=entry,
+                    take_profit=tp,
+                    stop_loss=sl,
+                    entry_status="WAIT" if entry_timing_reason else "READY",
+                    gate_reason=entry_timing_reason,
+                    assessment=volatility_assessment,
                 )
                 if entry_timing_reason:
                     self._log_candles_bg_block(
@@ -1908,7 +1941,6 @@ class PaperTradingEngine:
                         reason=f"pattern_gate:{candles_pattern_reason}",
                     )
                     continue
-                volatility_assessment = await asyncio.to_thread(self._get_candles_bg_vol_guard_assessment, symbol)
                 vol_guard_reason = self._resolve_candles_bg_vol_guard_block_reason(volatility_assessment, side=side)
                 if volatility_assessment and vol_guard_reason:
                     self._log_candles_bg_block(
@@ -4061,6 +4093,118 @@ class PaperTradingEngine:
                 raw_probability=raw_probability,
                 effective_probability=effective_probability,
                 pattern_sample=pattern_sample,
+            )
+        )
+        task.add_done_callback(lambda task: self._log_notification_task_error(task, symbol=symbol))
+
+    async def _send_ml_candles_bg_surge_watch_long_notification(
+        self,
+        *,
+        symbol: str,
+        market_price: float,
+        side: str,
+        raw_probability: float,
+        effective_probability: float,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        entry_status: str,
+        gate_reason: str | None,
+        assessment: dict[str, Any],
+    ) -> None:
+        notifier = self.candles_bg_surge_discord_notifier
+        if not notifier.is_enabled:
+            return
+        guard_level = str(assessment.get("level") or "-").upper()
+        surge_score = assessment.get("surge_watch_score")
+        now_vn = datetime.now(self._vn_tz).strftime("%Y-%m-%d %H:%M:%S ICT")
+        embed = {
+            "title": f"SURGE WATCH LONG >= {self.candles_bg_surge_min_long_probability * 100:.1f}%: {symbol}",
+            "color": 5763719,
+            "fields": [
+                {"name": "Side", "value": str(side or "-").upper(), "inline": True},
+                {
+                    "name": "BG Signal",
+                    "value": f"raw {float(raw_probability) * 100:.1f}% | eff {float(effective_probability) * 100:.1f}%",
+                    "inline": True,
+                },
+                {"name": "State", "value": str(entry_status or "-"), "inline": True},
+                {"name": "Mark", "value": self._format_notification_price(market_price), "inline": True},
+                {"name": "Entry", "value": self._format_notification_price(entry), "inline": True},
+                {
+                    "name": "TP / SL",
+                    "value": f"{self._format_notification_price(take_profit)} / {self._format_notification_price(stop_loss)}",
+                    "inline": True,
+                },
+                {"name": "Vol Guard", "value": guard_level, "inline": True},
+                {
+                    "name": "Surge Score",
+                    "value": (
+                        f"{float(surge_score):.1f}%"
+                        if isinstance(surge_score, (int, float)) and math.isfinite(float(surge_score))
+                        else "-"
+                    ),
+                    "inline": True,
+                },
+                {"name": "Gate", "value": str(gate_reason or "-")[:1024], "inline": False},
+                {
+                    "name": "Surge Reason",
+                    "value": str(assessment.get("surge_watch_reason") or assessment.get("reason") or "-")[:1024],
+                    "inline": False,
+                },
+                {"name": "Observed At", "value": now_vn, "inline": False},
+            ],
+        }
+        await asyncio.to_thread(notifier.send, embeds=[embed])
+
+    def _enqueue_ml_candles_bg_surge_watch_long_notification(
+        self,
+        *,
+        symbol: str,
+        market_price: float,
+        side: str,
+        raw_probability: float,
+        effective_probability: float,
+        entry: float,
+        take_profit: float,
+        stop_loss: float,
+        entry_status: str,
+        gate_reason: str | None,
+        assessment: dict[str, Any] | None,
+    ) -> None:
+        notifier = self.candles_bg_surge_discord_notifier
+        if not notifier.is_enabled:
+            return
+        if str(side or "").upper() != "LONG":
+            return
+        if float(effective_probability) < float(self.candles_bg_surge_min_long_probability):
+            return
+        if not assessment or not bool(assessment.get("surge_watch")):
+            return
+        symbol_key = self._normalize_symbol_key(symbol)
+        now_ts = time.time()
+        cooldown_sec = float(self.candles_bg_surge_discord_cooldown_minutes) * 60.0
+        next_allowed_ts = self._candles_bg_surge_alert_ts.get(symbol_key, 0.0)
+        if now_ts < next_allowed_ts:
+            return
+        self._candles_bg_surge_alert_ts[symbol_key] = now_ts + cooldown_sec
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._send_ml_candles_bg_surge_watch_long_notification(
+                symbol=symbol,
+                market_price=market_price,
+                side=side,
+                raw_probability=raw_probability,
+                effective_probability=effective_probability,
+                entry=entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                entry_status=entry_status,
+                gate_reason=gate_reason,
+                assessment=assessment,
             )
         )
         task.add_done_callback(lambda task: self._log_notification_task_error(task, symbol=symbol))

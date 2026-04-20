@@ -1,1 +1,0 @@
-2026-04-19 06:23:54 +07:00: [paper-engine] hourly profile refresh failed: OperationalError: (1213, 'Deadlock found when trying to get lock; try restarting transaction')

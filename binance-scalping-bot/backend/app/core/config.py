@@ -87,6 +87,24 @@ class Settings(BaseModel):
     paper_trade_ml_candles_bg_discord_webhook_enabled: bool = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_ENABLED", "false").lower() == "true"
     paper_trade_ml_candles_bg_discord_webhook_url: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_URL", "").strip()
     paper_trade_ml_candles_bg_discord_webhook_username: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_DISCORD_WEBHOOK_USERNAME", "ML Candles BG Bot").strip() or "ML Candles BG Bot"
+    paper_trade_ml_candles_bg_surge_discord_webhook_enabled: bool = os.getenv(
+        "PAPER_TRADE_ML_CANDLES_BG_SURGE_DISCORD_WEBHOOK_ENABLED",
+        "false",
+    ).lower() == "true"
+    paper_trade_ml_candles_bg_surge_discord_webhook_url: str = os.getenv(
+        "PAPER_TRADE_ML_CANDLES_BG_SURGE_DISCORD_WEBHOOK_URL",
+        "",
+    ).strip()
+    paper_trade_ml_candles_bg_surge_discord_webhook_username: str = os.getenv(
+        "PAPER_TRADE_ML_CANDLES_BG_SURGE_DISCORD_WEBHOOK_USERNAME",
+        "ML Candles BG Surge Bot",
+    ).strip() or "ML Candles BG Surge Bot"
+    paper_trade_ml_candles_bg_surge_min_long_probability: float = float(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_SURGE_MIN_LONG_PROBABILITY", "0.73")
+    )
+    paper_trade_ml_candles_bg_surge_discord_cooldown_minutes: int = int(
+        os.getenv("PAPER_TRADE_ML_CANDLES_BG_SURGE_DISCORD_COOLDOWN_MINUTES", "180")
+    )
     paper_trade_ml_candles_bg_vol_guard_enabled: bool = os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_ENABLED", "true").lower() == "true"
     paper_trade_ml_candles_bg_vol_guard_block_level: str = os.getenv("PAPER_TRADE_ML_CANDLES_BG_VOL_GUARD_BLOCK_LEVEL", "BLOCK").strip().upper() or "BLOCK"
     paper_trade_ml_candles_bg_vol_guard_atr_threshold_pct: float = float(
