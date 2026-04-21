@@ -233,6 +233,7 @@ class PaperTradingEngine:
         candles_bg_long_strict_hours_vn: str = "01,07,13,14,16,23",
         candles_bg_short_strict_hours_vn: str = "",
         candles_bg_strict_min_win_bonus: float = 0.04,
+        candles_bg_blocked_pattern_rules: list[str] | None = None,
         candles_bg_bullish_long_entry_buffer_pct: float = 0.002,
         candles_bg_bullish_long_follow_extra_buffer_pct: float = 0.001,
         candles_bg_bullish_short_entry_buffer_pct: float = 0.003,
@@ -574,6 +575,9 @@ class PaperTradingEngine:
         self.candles_bg_short_strict_hours_vn = str(candles_bg_short_strict_hours_vn or "").strip()
         self._candles_bg_short_strict_hours_set = self._parse_entry_hard_block_hours(self.candles_bg_short_strict_hours_vn)
         self.candles_bg_strict_min_win_bonus = max(0.0, min(float(candles_bg_strict_min_win_bonus), 0.25))
+        self._candles_bg_blocked_pattern_rules = self._parse_candles_bg_blocked_pattern_rules(
+            candles_bg_blocked_pattern_rules
+        )
         self.candles_bg_bullish_long_entry_buffer_pct = max(
             0.0,
             min(float(candles_bg_bullish_long_entry_buffer_pct), 0.02),
@@ -1939,6 +1943,20 @@ class PaperTradingEngine:
                         raw_prob=raw_prob,
                         effective_prob=effective_prob,
                         reason=f"pattern_gate:{candles_pattern_reason}",
+                    )
+                    continue
+                blocked_pattern_cluster_reason = self._blocked_candles_bg_pattern_cluster_reason(
+                    side=side,
+                    pattern_sample=pattern_sample,
+                    btc_following=current_btc_following,
+                )
+                if blocked_pattern_cluster_reason:
+                    self._log_candles_bg_block(
+                        symbol=symbol,
+                        side=side,
+                        raw_prob=raw_prob,
+                        effective_prob=effective_prob,
+                        reason=blocked_pattern_cluster_reason,
                     )
                     continue
                 vol_guard_reason = self._resolve_candles_bg_vol_guard_block_reason(volatility_assessment, side=side)
@@ -3732,6 +3750,53 @@ class PaperTradingEngine:
         return False
 
     @staticmethod
+    def _normalize_candles_bg_pattern_rule_part(value: object) -> str:
+        return str(value or "").strip().upper().replace(" ", "_")
+
+    @classmethod
+    def _normalize_candles_bg_btc_follow_bucket(cls, value: object) -> str:
+        normalized = str(value or "").strip().upper().replace(" ", "_")
+        if normalized in {"*", "ANY"}:
+            return "*"
+        if value is True or normalized in {"FOLLOW", "TRUE", "YES", "Y", "1"}:
+            return "FOLLOW"
+        if value is False or normalized in {"NO_FOLLOW", "NONFOLLOW", "FALSE", "NO", "N", "0"}:
+            return "NO_FOLLOW"
+        return "UNKNOWN"
+
+    @classmethod
+    def _normalize_candles_bg_blocked_pattern_rule(cls, raw: object) -> tuple[str, str, str, str, str] | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        parts = [part.strip() for part in text.split("|")]
+        if len(parts) != 5:
+            return None
+        side_key = cls._normalize_candles_bg_pattern_rule_part(parts[0])
+        if side_key not in {"LONG", "SHORT", "*"}:
+            return None
+        market_phase = cls._normalize_candles_bg_pattern_rule_part(parts[1]) or "*"
+        setup_kind = cls._normalize_candles_bg_pattern_rule_part(parts[2]) or "*"
+        volatility_kind = cls._normalize_candles_bg_pattern_rule_part(parts[3]) or "*"
+        btc_follow_bucket = cls._normalize_candles_bg_btc_follow_bucket(parts[4])
+        return (side_key, market_phase, setup_kind, volatility_kind, btc_follow_bucket)
+
+    @classmethod
+    def _parse_candles_bg_blocked_pattern_rules(
+        cls,
+        raw_rules: list[str] | tuple[str, ...] | set[str] | None,
+    ) -> tuple[tuple[str, str, str, str, str], ...]:
+        normalized_rules: list[tuple[str, str, str, str, str]] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for item in raw_rules or ():
+            normalized = cls._normalize_candles_bg_blocked_pattern_rule(item)
+            if normalized is None or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_rules.append(normalized)
+        return tuple(normalized_rules)
+
+    @staticmethod
     def _coerce_pattern_sample(raw: object) -> dict[str, Any] | None:
         if isinstance(raw, dict):
             return dict(raw)
@@ -3821,6 +3886,49 @@ class PaperTradingEngine:
     def _resolve_ml_pattern_leverage_override(cls, sample: dict[str, Any] | None) -> int | None:
         if cls._pattern_sample_is_ab_100(sample):
             return 10
+        return None
+
+    @classmethod
+    def _build_candles_bg_pattern_cluster(
+        cls,
+        *,
+        side: str,
+        pattern_sample: dict[str, Any] | None,
+        btc_following: bool | None,
+    ) -> tuple[str, str, str, str, str] | None:
+        side_key = cls._normalize_candles_bg_pattern_rule_part(side)
+        if side_key not in {"LONG", "SHORT"}:
+            return None
+        sample = cls._coerce_pattern_sample(pattern_sample)
+        if sample is None:
+            return None
+        market_phase = cls._normalize_candles_bg_pattern_rule_part(sample.get("market_phase"))
+        setup_kind = cls._normalize_candles_bg_pattern_rule_part(sample.get("setup_kind"))
+        volatility_kind = cls._normalize_candles_bg_pattern_rule_part(sample.get("volatility_kind"))
+        if not market_phase or not setup_kind or not volatility_kind:
+            return None
+        btc_follow_bucket = cls._normalize_candles_bg_btc_follow_bucket(btc_following)
+        return (side_key, market_phase, setup_kind, volatility_kind, btc_follow_bucket)
+
+    def _blocked_candles_bg_pattern_cluster_reason(
+        self,
+        *,
+        side: str,
+        pattern_sample: dict[str, Any] | None,
+        btc_following: bool | None,
+    ) -> str | None:
+        if not self._candles_bg_blocked_pattern_rules:
+            return None
+        cluster = self._build_candles_bg_pattern_cluster(
+            side=side,
+            pattern_sample=pattern_sample,
+            btc_following=btc_following,
+        )
+        if cluster is None:
+            return None
+        for rule in self._candles_bg_blocked_pattern_rules:
+            if all(rule_part == "*" or rule_part == cluster_part for rule_part, cluster_part in zip(rule, cluster)):
+                return "blocked_pattern_cluster:" + "|".join(cluster)
         return None
 
     @staticmethod

@@ -568,9 +568,11 @@ const BACKEND_HEALTH_POLL_MS = 15 * 1000
 const ML_STATUS_POLL_MS = 15 * 1000
 const HIGH_WIN_SIGNAL_POLL_MS = 20 * 1000
 const ML_CANDLES_SIGNAL_POLL_MS = 20 * 1000
+const ML_CANDLES_BG_LATEST_SIGNAL_POLL_MS = 20 * 1000
 const HIGH_WIN_WS_MAX_HIGH_WIN_SYMBOLS = 80
 const HIGH_WIN_SCAN_MAX_SYMBOLS = 80
 const HIGH_WIN_WS_MAX_ML_CANDLES_SYMBOLS = 40
+const ML_CANDLES_BG_LATEST_BATCH_CHUNK_SIZE = 6
 const ENTRY_TOUCH_SLIPPAGE = 0.0015
 const SIGNAL_RISK_LEVERAGE = 5
 const DEFAULT_MAINT_MARGIN_RATE = 0.02
@@ -2414,6 +2416,7 @@ function App() {
     }
 
     let mounted = true
+    let refreshTimer: number | null = null
     const run = async () => {
       try {
         await fetchMlCandlesBgLatestSignals(mlCandlesBgSurgeWatchSymbols)
@@ -2424,9 +2427,13 @@ function App() {
     }
 
     void run()
+    refreshTimer = window.setInterval(() => {
+      void run()
+    }, ML_CANDLES_BG_LATEST_SIGNAL_POLL_MS)
 
     return () => {
       mounted = false
+      if (refreshTimer != null) window.clearInterval(refreshTimer)
     }
   }, [showMlCandlesScreen, mlCandlesScreenView, mlCandlesBgSurgeWatchSymbolsKey])
   const recentMlCompareHistory = useMemo(
@@ -2852,15 +2859,30 @@ function App() {
       setMlCandlesBgLatestSignals({})
       return
     }
-    const response = await fetchResponseWithTimeout(
-      `${API_BASE}/api/v1/signals/candles/bg/latest-batch?symbols=${encodeURIComponent(symbols.join(','))}&max_symbols=${symbols.length}`,
-      API_HEAVY_TIMEOUT_MS,
-    )
-    if (!response.ok) throw new Error('Cannot fetch ML_CANDLES_BG latest signals')
-    const data = (await response.json()) as BgLatestBatchResponse
     const next: Record<string, ScanSignalItem> = {}
-    for (const item of data.signals ?? []) {
-      next[canonicalSymbol(item.symbol)] = item
+    let successCount = 0
+    let lastError: Error | null = null
+
+    for (let start = 0; start < symbols.length; start += ML_CANDLES_BG_LATEST_BATCH_CHUNK_SIZE) {
+      const chunk = symbols.slice(start, start + ML_CANDLES_BG_LATEST_BATCH_CHUNK_SIZE)
+      try {
+        const response = await fetchResponseWithTimeout(
+          `${API_BASE}/api/v1/signals/candles/bg/latest-batch?symbols=${encodeURIComponent(chunk.join(','))}&max_symbols=${chunk.length}`,
+          API_HEAVY_TIMEOUT_MS,
+        )
+        if (!response.ok) throw new Error('Cannot fetch ML_CANDLES_BG latest signals')
+        const data = (await response.json()) as BgLatestBatchResponse
+        for (const item of data.signals ?? []) {
+          next[canonicalSymbol(item.symbol)] = item
+        }
+        successCount += 1
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error('Cannot fetch ML_CANDLES_BG latest signals')
+      }
+    }
+
+    if (successCount === 0) {
+      throw (lastError ?? new Error('Cannot fetch ML_CANDLES_BG latest signals'))
     }
     setMlCandlesBgLatestSignals(next)
   }

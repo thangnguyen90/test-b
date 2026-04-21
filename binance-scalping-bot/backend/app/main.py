@@ -274,6 +274,7 @@ async def on_startup() -> None:
                 candles_bg_long_strict_hours_vn=settings.paper_trade_candles_bg_long_strict_hours_vn,
                 candles_bg_short_strict_hours_vn=settings.paper_trade_candles_bg_short_strict_hours_vn,
                 candles_bg_strict_min_win_bonus=settings.paper_trade_candles_bg_strict_min_win_bonus,
+                candles_bg_blocked_pattern_rules=settings.paper_trade_candles_bg_blocked_pattern_rules,
                 candles_bg_bullish_long_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_long_entry_buffer_pct,
                 candles_bg_bullish_long_follow_extra_buffer_pct=settings.paper_trade_candles_bg_bullish_long_follow_extra_buffer_pct,
                 candles_bg_bullish_short_entry_buffer_pct=settings.paper_trade_candles_bg_bullish_short_entry_buffer_pct,

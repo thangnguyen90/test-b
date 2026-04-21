@@ -96,6 +96,51 @@ def _activity_score_from_ticker(ticker: dict) -> float:
     return quote_volume * momentum_boost + trade_count * 100.0
 
 
+def _fetch_tickers_partial(symbols: list[str], *, chunk_size: int = 12) -> dict[str, dict]:
+    unique_symbols = [symbol for symbol in dict.fromkeys(symbols) if symbol]
+    if not unique_symbols:
+        return {}
+
+    tickers: dict[str, dict] = {}
+    safe_chunk_size = max(1, int(chunk_size))
+    for start in range(0, len(unique_symbols), safe_chunk_size):
+        chunk = unique_symbols[start:start + safe_chunk_size]
+        try:
+            payload = market_client.fetch_tickers(chunk)
+        except Exception:
+            payload = None
+        if not isinstance(payload, dict):
+            for symbol in chunk:
+                try:
+                    ticker = market_client.fetch_ticker(symbol)
+                except Exception:
+                    continue
+                if isinstance(ticker, dict):
+                    tickers[symbol] = ticker
+            continue
+        for symbol in chunk:
+            ticker = payload.get(symbol)
+            if isinstance(ticker, dict):
+                tickers[symbol] = ticker
+    return tickers
+
+
+def _normalize_query_symbols(symbols: str | list[str] | None) -> list[str]:
+    if symbols is None:
+        return []
+    values = [symbols] if isinstance(symbols, str) else list(symbols)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            symbol = item.strip()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            normalized.append(symbol)
+    return normalized
+
+
 def _get_usdt_swap_symbols(max_symbols: int, cache_ttl_sec: int | None = None) -> list[str]:
     ttl_sec = max(30, int(cache_ttl_sec or settings.signals_active_symbols_cache_sec))
     now = time.time()
@@ -1002,19 +1047,10 @@ def get_candles_bg_universe_snapshot(
 
 
 def get_candles_bg_vol_guards_snapshot(
-    symbols: str | None = None,
+    symbols: str | list[str] | None = None,
     max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
 ) -> dict:
-    parsed_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
-    target_symbols: list[str] = []
-    seen_symbols: set[str] = set()
-    for symbol in parsed_symbols:
-        normalized = str(symbol or "").strip()
-        if not normalized or normalized in seen_symbols:
-            continue
-        seen_symbols.add(normalized)
-        target_symbols.append(normalized)
-    target_symbols = target_symbols[:max_symbols]
+    target_symbols = _normalize_query_symbols(symbols)[:max_symbols]
 
     _, engine = get_paper_trade_runtime()
     guards: dict[str, dict | None] = {}
@@ -1038,27 +1074,16 @@ def get_candles_bg_vol_guards_snapshot(
 
 
 def get_candles_bg_latest_batch_snapshot(
-    symbols: str | None = None,
+    symbols: str | list[str] | None = None,
     max_symbols: int = settings.paper_trade_candles_bg_max_symbols,
 ) -> dict:
-    parsed_symbols = [s.strip() for s in (symbols or "").split(",") if s.strip()]
-    target_symbols: list[str] = []
-    seen_symbols: set[str] = set()
-    for symbol in parsed_symbols:
-        normalized = str(symbol or "").strip()
-        if not normalized or normalized in seen_symbols:
-            continue
-        seen_symbols.add(normalized)
-        target_symbols.append(normalized)
-    target_symbols = target_symbols[:max_symbols]
+    target_symbols = _normalize_query_symbols(symbols)[:max_symbols]
 
     matches: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
     live_btc_phase = _resolve_live_btc_phase()
-    try:
-        tickers_map = market_client.fetch_tickers(target_symbols) if target_symbols else {}
-    except Exception:
-        tickers_map = {}
+    tickers_map = _fetch_tickers_partial(target_symbols) if target_symbols else {}
+    _, engine = get_paper_trade_runtime()
 
     for symbol in target_symbols:
         try:
@@ -1071,6 +1096,11 @@ def get_candles_bg_latest_batch_snapshot(
                 ask = _safe_float(ticker.get("ask"))
                 if bid is not None and ask is not None:
                     last_price = (bid + ask) / 2
+            if last_price is None and engine is not None:
+                try:
+                    last_price = _safe_float(engine._resolve_market_price(symbol))
+                except Exception:
+                    last_price = None
             if last_price is None:
                 continue
 
@@ -1228,7 +1258,7 @@ def get_candles_bg_universe(
 
 @router.get("/candles/bg/vol-guards")
 def get_candles_bg_vol_guards(
-    symbols: str | None = Query(default=None),
+    symbols: list[str] | None = Query(default=None),
     max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
 ) -> dict:
     return get_candles_bg_vol_guards_snapshot(symbols=symbols, max_symbols=max_symbols)
@@ -1236,7 +1266,7 @@ def get_candles_bg_vol_guards(
 
 @router.get("/candles/bg/latest-batch")
 def get_candles_bg_latest_batch(
-    symbols: str | None = Query(default=None),
+    symbols: list[str] | None = Query(default=None),
     max_symbols: int = Query(default=settings.paper_trade_candles_bg_max_symbols, ge=1, le=600),
 ) -> dict:
     return get_candles_bg_latest_batch_snapshot(symbols=symbols, max_symbols=max_symbols)

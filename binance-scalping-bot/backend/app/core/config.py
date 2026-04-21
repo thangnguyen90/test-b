@@ -14,6 +14,11 @@ def _csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _line_list(value: str) -> list[str]:
+    normalized = str(value or "").replace(";", "\n")
+    return [item.strip() for item in normalized.splitlines() if item.strip()]
+
+
 class Settings(BaseModel):
     app_name: str = os.getenv("APP_NAME", "Binance Scalping Bot API")
     app_env: str = os.getenv("APP_ENV", "development")
@@ -477,6 +482,9 @@ class Settings(BaseModel):
     ).strip()
     paper_trade_candles_bg_strict_min_win_bonus: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_STRICT_MIN_WIN_BONUS", "0.04")
+    )
+    paper_trade_candles_bg_blocked_pattern_rules: list[str] = _line_list(
+        os.getenv("PAPER_TRADE_CANDLES_BG_BLOCKED_PATTERN_RULES", "")
     )
     paper_trade_candles_bg_bullish_long_entry_buffer_pct: float = float(
         os.getenv("PAPER_TRADE_CANDLES_BG_BULLISH_LONG_ENTRY_BUFFER_PCT", "0.002")
