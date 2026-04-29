@@ -45,7 +45,7 @@ class PaperTradingEngine:
         predictor_candles: MLPredictor | None = None,
         liquid_predictor: LiquidationMLPredictor | None = None,
         price_stream: Any | None = None,
-        min_win_probability: float = 0.75,
+        min_win_probability: float = 0.70,
         quantity: float = 0.01,
         order_usdt: float = 10.0,
         margin_usdt: float = 0.0,
@@ -215,11 +215,11 @@ class PaperTradingEngine:
         basic_ml_post_pump_long_follow_min_win: float = 0.84,
         basic_ml_reversal_long_guard_enabled: bool = True,
         test_ml_enabled: bool = False,
-        test_ml_min_win_probability: float = 0.75,
+        test_ml_min_win_probability: float = 0.70,
         test_ml_max_symbols: int = 80,
         test_ml_max_orders_per_cycle: int = 2,
         candles_bg_enabled: bool = False,
-        candles_bg_min_win_probability: float = 0.75,
+        candles_bg_min_win_probability: float = 0.70,
         candles_bg_max_symbols: int = 80,
         candles_bg_max_orders_per_cycle: int = 2,
         candles_bg_max_open_trades: int = 50,
@@ -7900,4 +7900,3 @@ class PaperTradingEngine:
 
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
         return held_seconds >= (self.max_hold_minutes * 60)
-
