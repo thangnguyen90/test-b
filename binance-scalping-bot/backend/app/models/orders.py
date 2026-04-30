@@ -39,6 +39,30 @@ class Order(OrderBase):
     expiration_time: Optional[datetime] = None
 
 
+class HunterLiveOrder(BaseModel):
+    key: str
+    symbol: str
+    side: str
+    score: float = 0.0
+    signal_label: Optional[str] = None
+    stage: Optional[str] = None
+    entry_order_type: Optional[str] = None
+    entry_price: Optional[float] = None
+    tp_price: Optional[float] = None
+    sl_price: Optional[float] = None
+    quantity: Optional[str] = None
+    filled_qty: Optional[str] = None
+    leverage: Optional[int] = None
+    margin_type: Optional[str] = None
+    placed_at_text: Optional[str] = None
+    age_minutes: float = 0.0
+    entry_filled: bool = False
+    tp_order_placed: bool = False
+    tp_moved_to_entry: bool = False
+    sl_order_placed: bool = False
+    sl_moved_to_entry: bool = False
+
+
 class ApiHealth(BaseModel):
     status: str
     app_name: str

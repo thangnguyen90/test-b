@@ -35,6 +35,30 @@ type Order = {
   expiration_time?: string
 }
 
+type HunterLiveOrder = {
+  key: string
+  symbol: string
+  side: 'LONG' | 'SHORT'
+  score: number
+  signal_label?: string | null
+  stage?: string | null
+  entry_order_type?: string | null
+  entry_price?: number | null
+  tp_price?: number | null
+  sl_price?: number | null
+  quantity?: string | null
+  filled_qty?: string | null
+  leverage?: number | null
+  margin_type?: string | null
+  placed_at_text?: string | null
+  age_minutes: number
+  entry_filled: boolean
+  tp_order_placed: boolean
+  tp_moved_to_entry: boolean
+  sl_order_placed: boolean
+  sl_moved_to_entry: boolean
+}
+
 type PriceStreamMessage = {
   type: string
   symbol?: string
@@ -230,6 +254,31 @@ type PaperTradeStats = {
   limit_avg_pnl: number
   limit_total_pnl_pct: number
   limit_avg_pnl_pct: number
+}
+
+type Ema99BounceSignal = {
+  symbol: string
+  timeframe: string
+  side: string
+  signal_time: string
+  mark_price?: number | null
+  close_price: number
+  ema25: number
+  ema99: number
+  volume_ratio: number
+  touch_gap_pct: number
+  ema99_gap_pct: number
+  entry_ok: boolean
+  entry_status: string
+  rsi14: number
+  score: number
+}
+
+type Ema99BounceSignalsResponse = {
+  count: number
+  scanned: number
+  generated_at: string
+  items: Ema99BounceSignal[]
 }
 
 type PaperTradeHistoryResponse = {
@@ -1221,11 +1270,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   const toastTimerRef = useRef<Map<number, number>>(new Map())
   const liqAutoOpenedRef = useRef<Record<string, number>>({})
   const mlCandlesAutoOpenedRef = useRef<Record<string, number>>({})
+  const ema99BounceReqRef = useRef(false)
   const [health, setHealth] = useState<Health | null>(null)
   const [healthLastOkAt, setHealthLastOkAt] = useState<number | null>(null)
   const [mlStatus, setMlStatus] = useState<MlStatus | null>(null)
   const [signal, setSignal] = useState<Signal | null>(null)
   const [pendingOrders, setPendingOrders] = useState<Order[]>([])
+  const [hunterLiveOrders, setHunterLiveOrders] = useState<HunterLiveOrder[]>([])
   const [error, setError] = useState<string>('')
   const [isLoadingOrder, setIsLoadingOrder] = useState(false)
   const [coins, setCoins] = useState<string[]>(FALLBACK_COINS)
@@ -1258,7 +1309,9 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   const [mlCandlesScreenView, setMlCandlesScreenView] = useState<MlCandlesScreenView>(
     initialScreenView === 'ml-candles-compare' ? 'compare' : 'signals',
   )
+  const [ema99BounceAutoRefresh, setEma99BounceAutoRefresh] = useState(true)
   const [paperStats, setPaperStats] = useState<PaperTradeStats | null>(null)
+  const [ema99BounceData, setEma99BounceData] = useState<Ema99BounceSignalsResponse | null>(null)
   const [paperOpenTrades, setPaperOpenTrades] = useState<PaperTrade[]>([])
   const [paperHistory, setPaperHistory] = useState<PaperTrade[]>([])
   const [closedPatternStats, setClosedPatternStats] = useState<ClosedPatternStatsItem[]>([])
@@ -2229,6 +2282,12 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     setPendingOrders(await response.json())
   }
 
+  async function fetchHunterLiveOrders() {
+    const response = await fetch(`${API_BASE}/api/v1/orders/hunter-live`)
+    if (!response.ok) throw new Error('Hunter live orders API failed')
+    setHunterLiveOrders(await response.json())
+  }
+
   async function fetchFuturesSymbols() {
     const response = await fetch(`${API_BASE}/api/v1/market/symbols`)
     if (!response.ok) throw new Error('Cannot fetch Binance Futures symbols')
@@ -2305,6 +2364,20 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     markBackendAlive()
     setMlCandlesSignals(data.signals ?? [])
     setMlCandlesScannedCount(data.scanned ?? 0)
+  }
+
+  async function fetchEma99BounceSignals() {
+    if (ema99BounceReqRef.current) return
+    ema99BounceReqRef.current = true
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/paper-trades/ema99-bounce-signals`)
+      if (!response.ok) throw new Error('EMA99 bounce signals API unavailable')
+      const payload = await response.json() as Ema99BounceSignalsResponse
+      setEma99BounceData(payload ?? null)
+      markBackendAlive()
+    } finally {
+      ema99BounceReqRef.current = false
+    }
   }
 
   async function fetchPaperTradingStats(targetPage = historyPage, targetPageSize = historyPageSize) {
@@ -2816,6 +2889,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
           fetchHealth(),
           fetchMlStatus(),
           fetchPendingOrders(),
+          fetchHunterLiveOrders(),
           fetchSignal(selectedCoin, chartBasePrice),
           fetchHighWinSignals(),
           fetchKlines(selectedCoin),
@@ -2918,9 +2992,15 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     fetchPaperTradingStats().catch((err) => {
       setError(err instanceof Error ? err.message : 'Unknown error')
     })
+    fetchHunterLiveOrders().catch(() => {
+      // Keep page usable if hunter live endpoint is temporarily unavailable.
+    })
 
     const timer = window.setInterval(() => {
-      fetchPaperTradingStats().catch(() => {
+      Promise.all([
+        fetchPaperTradingStats(),
+        fetchHunterLiveOrders(),
+      ]).catch(() => {
         // Keep previous panel data when one refresh fails.
       })
     }, 8000)
@@ -2929,6 +3009,26 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       window.clearInterval(timer)
     }
   }, [showPaperScreen, historyPage, historyPageSize])
+
+  useEffect(() => {
+    if (!showPaperScreen) return () => undefined
+
+    fetchEma99BounceSignals().catch((err) => {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    })
+
+    if (!ema99BounceAutoRefresh) return () => undefined
+
+    const timer = window.setInterval(() => {
+      fetchEma99BounceSignals().catch(() => {
+        // Keep previous EMA99 signals on transient failures.
+      })
+    }, 20000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [showPaperScreen, ema99BounceAutoRefresh])
 
   useEffect(() => {
     if (!showMlCandlesScreen) return
@@ -4012,6 +4112,67 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             <div className="stats-item"><strong>Avg PnL%:</strong> {paperStats && typeof paperStats.avg_pnl_pct === 'number' ? `${paperStats.avg_pnl_pct.toFixed(2)}%` : '0.00%'}</div>
             <div className="stats-item"><strong>Market Win Rate:</strong> {paperStats ? `${(paperStats.market_win_rate * 100).toFixed(2)}% (${paperStats.market_closed_trades})` : '0.00%'}</div>
             <div className="stats-item"><strong>Limit Win Rate:</strong> {paperStats ? `${(paperStats.limit_win_rate * 100).toFixed(2)}% (${paperStats.limit_closed_trades})` : '0.00%'}</div>
+          </div>
+          <div className="section-header">
+            <h3 className="section-title">EMA99 Bounce Signals</h3>
+            <div className="section-badges">
+              <span className="badge neutral">Live ~20s</span>
+              <span className="badge neutral">Matches: {ema99BounceData?.count ?? 0}</span>
+              <span className="badge neutral">Scanned: {ema99BounceData?.scanned ?? 0}</span>
+              <span className="badge neutral">Updated: {formatVnTimestamp(ema99BounceData?.generated_at) || '-'}</span>
+              <label className="ema-toggle">
+                <input
+                  type="checkbox"
+                  checked={ema99BounceAutoRefresh}
+                  onChange={(event) => setEma99BounceAutoRefresh(event.target.checked)}
+                />
+                <span>Auto Refresh</span>
+              </label>
+            </div>
+          </div>
+          <div className="content table-wrap">
+            {!(ema99BounceData?.items?.length) ? (
+              <p>No EMA99 bounce signals right now.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>TF</th>
+                    <th>Side</th>
+                    <th>Mark</th>
+                    <th>Close</th>
+                    <th>EMA99</th>
+                    <th>Gap</th>
+                    <th>Touch</th>
+                    <th>Entry</th>
+                    <th>Vol x</th>
+                    <th>RSI14</th>
+                    <th>Score</th>
+                    <th>Signal Time</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ema99BounceData.items.map((item) => (
+                    <tr key={`${item.symbol}-${item.timeframe}-${item.signal_time}`}>
+                      <td>{item.symbol}</td>
+                      <td>{item.timeframe}</td>
+                      <td><span className={`badge ${item.side === 'SHORT' ? 'danger' : 'success'}`}>{item.side}</span></td>
+                      <td>{typeof item.mark_price === 'number' ? item.mark_price.toFixed(item.mark_price >= 100 ? 2 : 6) : '-'}</td>
+                      <td>{item.close_price.toFixed(item.close_price >= 100 ? 2 : 6)}</td>
+                      <td>{item.ema99.toFixed(item.ema99 >= 100 ? 2 : 6)}</td>
+                      <td>{`${item.ema99_gap_pct >= 0 ? '+' : ''}${item.ema99_gap_pct.toFixed(2)}%`}</td>
+                      <td>{item.touch_gap_pct.toFixed(2)}%</td>
+                      <td><span className={`badge ${item.entry_ok ? 'success' : 'danger'}`}>{item.entry_status}</span></td>
+                      <td>{item.volume_ratio.toFixed(2)}x</td>
+                      <td>{item.rsi14.toFixed(1)}</td>
+                      <td>{item.score.toFixed(2)}</td>
+                      <td>{formatVnTimestamp(item.signal_time)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
           <h3 className="section-title">Entry Type Breakdown</h3>
           <div className="content table-wrap">
@@ -5435,6 +5596,75 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             )}
           </div>
         </article>
+      </section>
+
+      <section className="card">
+        <header className="card-header">
+          <h2>Hunter Live Orders</h2>
+          <span className="badge neutral">{hunterLiveOrders.length}</span>
+        </header>
+        <div className="content table-wrap">
+          {hunterLiveOrders.length === 0 ? (
+            <p>No Hunter live orders.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Pair</th>
+                  <th>Side</th>
+                  <th>Score</th>
+                  <th>Signal</th>
+                  <th>Stage</th>
+                  <th>Order Type</th>
+                  <th>Entry</th>
+                  <th>TP</th>
+                  <th>SL</th>
+                  <th>Qty</th>
+                  <th>Filled</th>
+                  <th>Lev</th>
+                  <th>Margin</th>
+                  <th>Age</th>
+                  <th>Placed</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hunterLiveOrders.map((order) => (
+                  <tr key={order.key}>
+                    <td>{renderSymbolJump(order.symbol, order.entry_price ?? undefined)}</td>
+                    <td><span className={order.side === 'LONG' ? 'pill-long' : 'pill-short'}>{order.side}</span></td>
+                    <td>{Number.isFinite(order.score) ? order.score.toFixed(1) : '-'}</td>
+                    <td>{order.signal_label ?? '-'}</td>
+                    <td>{order.stage ?? '-'}</td>
+                    <td>{order.entry_order_type ?? '-'}</td>
+                    <td>{typeof order.entry_price === 'number' ? order.entry_price : '-'}</td>
+                    <td>{typeof order.tp_price === 'number' ? order.tp_price : '-'}</td>
+                    <td>{typeof order.sl_price === 'number' ? order.sl_price : '-'}</td>
+                    <td>{order.quantity ?? '-'}</td>
+                    <td>{order.filled_qty ?? '-'}</td>
+                    <td>{order.leverage ? `${order.leverage}x` : '-'}</td>
+                    <td>{order.margin_type ?? '-'}</td>
+                    <td>{Number.isFinite(order.age_minutes) ? `${order.age_minutes.toFixed(1)}m` : '-'}</td>
+                    <td>{order.placed_at_text ?? '-'}</td>
+                    <td>
+                      <div className="signal-model-stack">
+                        <span className={`badge ${order.entry_filled ? 'success' : 'warn'}`}>
+                          {order.entry_filled ? 'FILLED' : 'WAITING'}
+                        </span>
+                        <span className="signal-model-meta">
+                          TP {order.tp_order_placed ? (order.tp_moved_to_entry ? 'MOVED' : 'PLACED') : '-'}
+                        </span>
+                        <span className="signal-model-meta">
+                          SL {order.sl_order_placed ? (order.sl_moved_to_entry ? 'MOVED' : 'PLACED') : '-'}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </section>
 
       <section className="card">

@@ -90,6 +90,31 @@ class PaperTradeStatsResponse(BaseModel):
     stats: PaperTradeStats
 
 
+class PaperTradeEma99BounceSignal(BaseModel):
+    symbol: str
+    timeframe: str
+    side: str = "LONG"
+    signal_time: datetime
+    mark_price: Optional[float] = None
+    close_price: float
+    ema25: float
+    ema99: float
+    volume_ratio: float
+    touch_gap_pct: float
+    ema99_gap_pct: float
+    entry_ok: bool
+    entry_status: str
+    rsi14: float
+    score: float
+
+
+class PaperTradeEma99BounceSignalsResponse(BaseModel):
+    count: int
+    scanned: int
+    generated_at: datetime
+    items: list[PaperTradeEma99BounceSignal]
+
+
 class PaperTradeDailySummary(BaseModel):
     trade_date: str
     total_trades: int

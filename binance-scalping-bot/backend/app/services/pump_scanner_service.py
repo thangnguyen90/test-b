@@ -18,6 +18,7 @@ from app.services.binance_futures_trade_service import BinanceFuturesTradeServic
 logger = logging.getLogger(__name__)
 
 PUMP_HUNTER_HIGHLIGHT_TP_PCT = 10.0
+PUMP_HUNTER_MIN_BINANCE_ORDER_TP_PCT = 20.0
 
 
 def _safe_float(value: Any) -> float | None:
@@ -189,6 +190,34 @@ class PumpScannerService:
                 tp_pct = ((entry - take_profit) / entry) * leverage * 100.0
                 sl_pct = ((entry - stop_loss) / entry) * leverage * 100.0
         return float(tp_pct), float(sl_pct)
+
+    @staticmethod
+    def _live_order_tp_threshold_pct() -> float:
+        configured_threshold = float(settings.pump_hunter_live_min_tp_pct)
+        return max(configured_threshold, PUMP_HUNTER_MIN_BINANCE_ORDER_TP_PCT)
+
+    def _validate_live_order_tp_requirement(
+        self,
+        row: dict[str, Any],
+        *,
+        leverage: int,
+    ) -> tuple[str, float, float, float, float]:
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        if entry <= 0 or take_profit <= 0:
+            raise ValueError("Cannot place Binance order without a valid entry and take-profit")
+        tp_pct, _ = self._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            leverage=leverage,
+        )
+        threshold_pct = self._live_order_tp_threshold_pct()
+        if tp_pct <= threshold_pct:
+            raise ValueError(
+                f"Expected TP {tp_pct:.2f}% must be greater than {threshold_pct:.2f}% for Binance live orders"
+            )
+        return side, entry, take_profit, stop_loss, tp_pct
 
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_discord_alert_enabled:
@@ -365,22 +394,17 @@ class PumpScannerService:
         score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
         if score < float(settings.pump_hunter_live_min_score):
             return
-        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
-        if entry <= 0 or take_profit <= 0:
-            return
-        leverage = max(1, int(settings.pump_hunter_live_leverage))
-        tp_pct, _ = self._calc_trade_pct_metrics(
-            side=side,
-            entry=entry,
-            take_profit=take_profit,
-            stop_loss=stop_loss,
-            leverage=leverage,
-        )
-        if tp_pct < float(settings.pump_hunter_live_min_tp_pct):
-            return
-        if tp_pct < PUMP_HUNTER_HIGHLIGHT_TP_PCT:
-            return
         symbol = str(row.get("symbol") or "").strip()
+        leverage = max(1, int(settings.pump_hunter_live_leverage))
+        try:
+            side, entry, take_profit, stop_loss, tp_pct = self._validate_live_order_tp_requirement(
+                row,
+                leverage=leverage,
+            )
+        except ValueError as exc:
+            if symbol:
+                logger.info("Pump hunter Binance order skipped: symbol=%s reason=%s", symbol, str(exc))
+            return
         if not symbol:
             return
         order_key = f"pump_live_order:{symbol}:{side}:high_tp"
@@ -421,11 +445,16 @@ class PumpScannerService:
         leverage: int | None = None,
         margin_type: str | None = None,
     ) -> dict[str, Any]:
+        effective_leverage = max(1, int(leverage or settings.pump_hunter_live_leverage))
+        self._validate_live_order_tp_requirement(
+            row,
+            leverage=effective_leverage,
+        )
         result = self._submit_binance_entry_order(
             row,
             test_mode=bool(test_mode),
             order_usdt=float(order_usdt or settings.pump_hunter_live_order_usdt),
-            leverage=int(leverage or settings.pump_hunter_live_leverage),
+            leverage=effective_leverage,
             margin_type=str(margin_type or settings.pump_hunter_live_margin_type or "ISOLATED").upper(),
         )
         result = self._attach_signal_to_order_result(result, row)
@@ -768,6 +797,44 @@ class PumpScannerService:
                 pass
         with self._live_order_lock:
             self._live_order_registry[key] = tracked
+
+    def list_live_orders(self) -> list[dict[str, Any]]:
+        now_ts = time.time()
+        with self._live_order_lock:
+            snapshot = [(key, dict(value)) for key, value in self._live_order_registry.items()]
+
+        items: list[dict[str, Any]] = []
+        for key, tracked in snapshot:
+            placed_at_ts = float(tracked.get("placed_at_ts") or now_ts)
+            age_minutes = max(0.0, (now_ts - placed_at_ts) / 60.0)
+            items.append(
+                {
+                    "key": key,
+                    "symbol": str(tracked.get("symbol") or "").strip(),
+                    "side": str(tracked.get("side") or "").upper(),
+                    "score": float(tracked.get("score") or 0.0),
+                    "signal_label": str(tracked.get("signal_label") or "").upper() or None,
+                    "stage": str(tracked.get("stage") or "").upper() or None,
+                    "entry_order_type": str(tracked.get("entry_order_type") or "").upper() or None,
+                    "entry_price": _safe_float(tracked.get("entry_price")),
+                    "tp_price": _safe_float(tracked.get("tp_price")),
+                    "sl_price": _safe_float(tracked.get("sl_price")),
+                    "quantity": str(tracked.get("quantity") or "") or None,
+                    "filled_qty": str(tracked.get("filled_qty") or "") or None,
+                    "leverage": int(tracked.get("leverage") or 0) or None,
+                    "margin_type": str(tracked.get("margin_type") or "").upper() or None,
+                    "placed_at_text": str(tracked.get("placed_at_text") or "") or None,
+                    "age_minutes": age_minutes,
+                    "entry_filled": bool(tracked.get("entry_filled")),
+                    "tp_order_placed": bool(tracked.get("tp_order_placed")),
+                    "tp_moved_to_entry": bool(tracked.get("tp_moved_to_entry")),
+                    "sl_order_placed": bool(tracked.get("sl_order_placed")),
+                    "sl_moved_to_entry": bool(tracked.get("sl_moved_to_entry")),
+                }
+            )
+
+        items.sort(key=lambda item: float(item.get("age_minutes") or 0.0), reverse=True)
+        return items
 
     @staticmethod
     def _register_child_order(tracked: dict[str, Any], prefix: str, result: dict[str, Any]) -> None:

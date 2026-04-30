@@ -22,6 +22,7 @@ from app.models.paper_trades import (
     PaperManualCloseRequest,
     PaperTradeDailySummary,
     PaperTradeDailySummaryResponse,
+    PaperTradeEma99BounceSignalsResponse,
     PaperTradeEntryHourCell,
     PaperTradeEntryHourMatrixResponse,
     PaperTradeEntryHourRow,
@@ -42,6 +43,7 @@ from app.models.paper_trades import (
 from app.services.binance_client import BinanceFuturesClient
 from app.services.candle_pattern_analyzer import CandlePatternAnalyzer
 from app.services.data_pipeline import DataPipeline
+from app.services.ema99_bounce_scanner import Ema99BounceScannerService
 from app.services.mysql_trade_repo import MySQLTradeRepository
 from app.services.pattern_performance import PatternPerformanceResolver
 from app.services.risk_manager import (
@@ -76,11 +78,13 @@ class PaperTradeAPI:
         self.btc_follow_resolver = None
         self.market_client = BinanceFuturesClient()
         self.pattern_analyzer = CandlePatternAnalyzer(client=self.market_client)
+        self.ema99_bounce_scanner = Ema99BounceScannerService(client=self.market_client)
         self.data_pipeline = DataPipeline()
 
         self.router.add_api_route("/open", self.get_open, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/history", self.get_history, methods=["GET"], response_model=PaperTradeListResponse)
         self.router.add_api_route("/stats", self.get_stats, methods=["GET"], response_model=PaperTradeStatsResponse)
+        self.router.add_api_route("/ema99-bounce-signals", self.get_ema99_bounce_signals, methods=["GET"], response_model=PaperTradeEma99BounceSignalsResponse)
         self.router.add_api_route("/daily", self.get_daily_summary, methods=["GET"], response_model=PaperTradeDailySummaryResponse)
         self.router.add_api_route("/entry-hour-matrix", self.get_entry_hour_matrix, methods=["GET"], response_model=PaperTradeEntryHourMatrixResponse)
         self.router.add_api_route("/hourly-windows", self.get_hourly_windows, methods=["GET"], response_model=PaperTradeHourlyWindowResponse)
@@ -708,6 +712,17 @@ class PaperTradeAPI:
         payload["max_risk_pct"] = settings.paper_trade_max_risk_pct
         stats = PaperTradeStats(**payload)
         return PaperTradeStatsResponse(stats=stats)
+
+    def get_ema99_bounce_signals(
+        self,
+        max_symbols: int = Query(default=200, ge=10, le=250),
+        max_items: int = Query(default=12, ge=1, le=50),
+    ) -> PaperTradeEma99BounceSignalsResponse:
+        payload = self.ema99_bounce_scanner.scan_current_signals(
+            max_symbols=max_symbols,
+            max_items=max_items,
+        )
+        return PaperTradeEma99BounceSignalsResponse(**payload)
 
     def get_daily_summary(self, days: int = Query(default=30, ge=1, le=365)) -> PaperTradeDailySummaryResponse:
         repo = self._require_repo()

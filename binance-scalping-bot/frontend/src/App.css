@@ -86,6 +86,26 @@ h1 {
   color: #2f3f52;
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.section-header .section-title {
+  margin: 0;
+}
+
+.section-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
 .history-header {
   display: flex;
   align-items: center;

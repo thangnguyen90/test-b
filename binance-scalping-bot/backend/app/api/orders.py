@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
+from app.api.analytics import pump_service
 from app.deps import order_manager
-from app.models.orders import Order, OrderCreate
+from app.models.orders import HunterLiveOrder, Order, OrderCreate
 
 router = APIRouter(prefix="/api/v1/orders", tags=["orders"])
 
@@ -27,3 +28,9 @@ def get_open_orders() -> list[Order]:
 @router.get("/closed", response_model=list[Order])
 def get_closed_orders() -> list[Order]:
     return order_manager.list_closed()
+
+
+@router.get("/hunter-live", response_model=list[HunterLiveOrder])
+def get_hunter_live_orders() -> list[HunterLiveOrder]:
+    items = pump_service.list_live_orders()
+    return [HunterLiveOrder(**item) for item in items]

@@ -37,6 +37,7 @@ paper_trade_candle_repo: MySQLTradeRepository | None = None
 paper_trade_engine: PaperTradingEngine | None = None
 pump_hunter_bg_task: asyncio.Task | None = None
 pump_hunter_cancel_task: asyncio.Task | None = None
+ema99_bounce_bg_task: asyncio.Task | None = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -110,9 +111,35 @@ async def _pump_hunter_cancel_loop() -> None:
         await asyncio.sleep(interval_sec)
 
 
+async def _ema99_bounce_background_loop() -> None:
+    interval_sec = max(15.0, float(settings.ema99_bounce_bg_interval_sec))
+    while True:
+        try:
+            payload = await asyncio.to_thread(
+                paper_trade_api.ema99_bounce_scanner.scan_current_signals,
+                max_symbols=int(settings.ema99_bounce_bg_max_symbols),
+                max_items=int(settings.ema99_bounce_bg_max_items),
+                send_alerts=True,
+            )
+            count = int(payload.get("count") or 0)
+            if count > 0:
+                logger.info(
+                    "EMA99 bounce background scan finished: count=%s scanned=%s min_score=%.1f max_symbols=%s",
+                    count,
+                    int(payload.get("scanned") or 0),
+                    float(settings.ema99_bounce_discord_min_score),
+                    int(settings.ema99_bounce_bg_max_symbols),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("EMA99 bounce background scan failed")
+        await asyncio.sleep(interval_sec)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
-    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine, pump_hunter_bg_task, pump_hunter_cancel_task
+    global paper_trade_repo, paper_trade_candle_repo, paper_trade_engine, pump_hunter_bg_task, pump_hunter_cancel_task, ema99_bounce_bg_task
 
     paper_trade_api.bind_price_stream(price_stream)
     paper_trade_api.bind_major_symbol_resolver(None)
@@ -375,6 +402,17 @@ async def on_startup() -> None:
         )
     else:
         logger.info("Pump hunter background scan disabled via settings")
+    if settings.ema99_bounce_bg_enabled:
+        ema99_bounce_bg_task = asyncio.create_task(_ema99_bounce_background_loop())
+        logger.info(
+            "EMA99 bounce background scan started: interval=%.1fs max_symbols=%s min_score=%.1f webhook=%s",
+            float(settings.ema99_bounce_bg_interval_sec),
+            int(settings.ema99_bounce_bg_max_symbols),
+            float(settings.ema99_bounce_discord_min_score),
+            "configured" if str(settings.ema99_bounce_discord_webhook_url or "").strip() else "missing",
+        )
+    else:
+        logger.info("EMA99 bounce background scan disabled via settings")
     if (
         settings.pump_hunter_live_trade_enabled
         and not settings.pump_hunter_live_order_test_mode
@@ -401,7 +439,7 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global pump_hunter_bg_task, pump_hunter_cancel_task
+    global pump_hunter_bg_task, pump_hunter_cancel_task, ema99_bounce_bg_task
     if pump_hunter_bg_task is not None:
         pump_hunter_bg_task.cancel()
         try:
@@ -409,6 +447,13 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         pump_hunter_bg_task = None
+    if ema99_bounce_bg_task is not None:
+        ema99_bounce_bg_task.cancel()
+        try:
+            await ema99_bounce_bg_task
+        except asyncio.CancelledError:
+            pass
+        ema99_bounce_bg_task = None
     if pump_hunter_cancel_task is not None:
         pump_hunter_cancel_task.cancel()
         try:

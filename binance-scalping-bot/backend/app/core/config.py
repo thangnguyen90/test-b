@@ -328,6 +328,14 @@ class Settings(BaseModel):
     pump_hunter_discord_min_score: float = float(os.getenv("PUMP_HUNTER_DISCORD_MIN_SCORE", "75"))
     pump_hunter_discord_alert_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_DISCORD_ALERT_COOLDOWN_SEC", "900"))
     pump_hunter_discord_webhook_url: str = os.getenv("PUMP_HUNTER_DISCORD_WEBHOOK_URL", os.getenv("PAPER_TRADE_DISCORD_LOSS_WEBHOOK_URL", ""))
+    ema99_bounce_discord_alert_enabled: bool = os.getenv("EMA99_BOUNCE_DISCORD_ALERT_ENABLED", "true").lower() == "true"
+    ema99_bounce_discord_min_score: float = float(os.getenv("EMA99_BOUNCE_DISCORD_MIN_SCORE", "7"))
+    ema99_bounce_discord_alert_cooldown_sec: int = int(os.getenv("EMA99_BOUNCE_DISCORD_ALERT_COOLDOWN_SEC", "21600"))
+    ema99_bounce_discord_webhook_url: str = os.getenv("EMA99_BOUNCE_DISCORD_WEBHOOK_URL", "")
+    ema99_bounce_bg_enabled: bool = os.getenv("EMA99_BOUNCE_BG_ENABLED", "true").lower() == "true"
+    ema99_bounce_bg_interval_sec: float = float(os.getenv("EMA99_BOUNCE_BG_INTERVAL_SEC", "20"))
+    ema99_bounce_bg_max_symbols: int = int(os.getenv("EMA99_BOUNCE_BG_MAX_SYMBOLS", "200"))
+    ema99_bounce_bg_max_items: int = int(os.getenv("EMA99_BOUNCE_BG_MAX_ITEMS", "12"))
     pump_hunter_bg_enabled: bool = os.getenv("PUMP_HUNTER_BG_ENABLED", "true").lower() == "true"
     pump_hunter_bg_interval_sec: float = float(os.getenv("PUMP_HUNTER_BG_INTERVAL_SEC", "45"))
     pump_hunter_bg_max_symbols: int = int(os.getenv("PUMP_HUNTER_BG_MAX_SYMBOLS", "0"))
@@ -345,7 +353,7 @@ class Settings(BaseModel):
     pump_hunter_live_leverage: int = int(os.getenv("PUMP_HUNTER_LIVE_LEVERAGE", "5"))
     pump_hunter_live_margin_type: str = os.getenv("PUMP_HUNTER_LIVE_MARGIN_TYPE", "ISOLATED").upper()
     pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
-    pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "10"))
+    pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "20"))
     pump_hunter_live_low_expected_pnl_threshold_pct: float = float(
         os.getenv("PUMP_HUNTER_LIVE_LOW_EXPECTED_PNL_THRESHOLD_PCT", "30")
     )
