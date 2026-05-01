@@ -245,6 +245,37 @@ class Ema99BounceScannerService:
     def _probability_from_score(score: float) -> float:
         return max(0.05, min(1.0, float(score) / 10.0))
 
+    @staticmethod
+    def _is_strong_signal(item: dict[str, Any]) -> bool:
+        score = float(item.get("score") or 0.0)
+        return score >= float(settings.ema99_bounce_paper_strong_min_score)
+
+    def _resolve_paper_leverage(self, item: dict[str, Any]) -> int:
+        if self._is_strong_signal(item):
+            return max(1, int(settings.ema99_bounce_paper_strong_leverage))
+        return max(1, int(settings.ema99_bounce_paper_leverage))
+
+    @staticmethod
+    def _dynamic_tp_pct(item: dict[str, Any], *, timeframe: str, risk_pct: float) -> float:
+        is_4h = timeframe == "4h"
+        base_tp_pct = float(settings.ema99_bounce_4h_tp_pct if is_4h else settings.ema99_bounce_1h_tp_pct)
+        max_tp_pct = max(base_tp_pct, float(settings.ema99_bounce_max_tp_pct))
+        score = max(0.0, float(item.get("score") or 0.0))
+        volume_ratio = max(0.0, float(item.get("volume_ratio") or 0.0))
+        touch_gap_pct = max(0.0, abs(float(item.get("touch_gap_pct") or 0.0)))
+        touch_tol_pct = 1.2 if is_4h else 0.8
+
+        score_component = max(0.0, score - float(settings.ema99_bounce_paper_min_score)) * (0.9 if is_4h else 0.7)
+        volume_component = min(max(0.0, volume_ratio - 1.0), 4.0) * (1.0 if is_4h else 0.8)
+        touch_quality = max(0.0, min(1.0, (touch_tol_pct - touch_gap_pct) / touch_tol_pct))
+        touch_component = touch_quality * (2.5 if is_4h else 1.8)
+        timeframe_bonus = 1.0 if is_4h else 0.0
+        rr_floor_pct = max(base_tp_pct, risk_pct * 1.6)
+
+        dynamic_tp_pct = base_tp_pct + score_component + volume_component + touch_component + timeframe_bonus
+        dynamic_tp_pct = max(dynamic_tp_pct, rr_floor_pct)
+        return min(max_tp_pct, dynamic_tp_pct)
+
     def _derive_paper_trade_plan(self, item: dict[str, Any]) -> tuple[float, float, float] | None:
         timeframe = str(item.get("timeframe") or "").strip().lower()
         side = str(item.get("side") or "").strip().upper()
@@ -254,7 +285,6 @@ class Ema99BounceScannerService:
             return None
 
         is_4h = timeframe == "4h"
-        tp_pct = float(settings.ema99_bounce_4h_tp_pct if is_4h else settings.ema99_bounce_1h_tp_pct)
         sl_pct = float(settings.ema99_bounce_4h_sl_pct if is_4h else settings.ema99_bounce_1h_sl_pct)
         ema_buffer_pct = 0.25 if is_4h else 0.15
 
@@ -265,7 +295,7 @@ class Ema99BounceScannerService:
             if stop_loss >= entry:
                 stop_loss = stop_from_pct
             risk_pct = max(0.2, ((entry - stop_loss) / entry) * 100.0)
-            target_pct = max(tp_pct, risk_pct * 1.8)
+            target_pct = self._dynamic_tp_pct(item, timeframe=timeframe, risk_pct=risk_pct)
             take_profit = entry * (1.0 + (target_pct / 100.0))
             if take_profit <= entry or stop_loss >= entry:
                 return None
@@ -277,7 +307,7 @@ class Ema99BounceScannerService:
         if stop_loss <= entry:
             stop_loss = stop_from_pct
         risk_pct = max(0.2, ((stop_loss - entry) / entry) * 100.0)
-        target_pct = max(tp_pct, risk_pct * 1.8)
+        target_pct = self._dynamic_tp_pct(item, timeframe=timeframe, risk_pct=risk_pct)
         take_profit = entry * (1.0 - (target_pct / 100.0))
         if take_profit >= entry or stop_loss <= entry:
             return None
@@ -318,6 +348,7 @@ class Ema99BounceScannerService:
             from app.models.paper_trades import PaperMarketOpenRequest
 
             probability = self._probability_from_score(score)
+            leverage = self._resolve_paper_leverage(item)
             request = PaperMarketOpenRequest(
                 symbol=symbol,
                 side=side,
@@ -332,7 +363,7 @@ class Ema99BounceScannerService:
                 entry_point_score=score,
                 order_usdt=float(settings.ema99_bounce_paper_order_usdt),
                 margin_usdt=float(settings.ema99_bounce_paper_margin_usdt),
-                leverage=max(1, int(settings.ema99_bounce_paper_leverage)),
+                leverage=leverage,
                 entry_snapshot={
                     "source": "ema99_bounce_auto_paper",
                     "symbol": symbol,
@@ -352,6 +383,8 @@ class Ema99BounceScannerService:
                     "close_price": float(item.get("close_price") or 0.0),
                     "entry_ok": bool(item.get("entry_ok")),
                     "entry_status": str(item.get("entry_status") or ""),
+                    "strong_signal": self._is_strong_signal(item),
+                    "planned_leverage": leverage,
                     "planned_entry_price": entry,
                     "take_profit_price": take_profit,
                     "stop_loss_price": stop_loss,
