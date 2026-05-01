@@ -50,7 +50,7 @@ def get_btc_trend() -> dict:
 
 @router.get("/pump-hunter")
 def get_pump_hunter_scan(
-    max_symbols: int = Query(default=35, ge=0, le=500),
+    max_symbols: int = Query(default=250, ge=0, le=500),
     min_score: float = Query(default=58.0, ge=0.0, le=100.0),
     limit: int = Query(default=18, ge=1, le=100),
 ) -> dict:
@@ -63,6 +63,8 @@ def get_pump_hunter_scan(
         "items": payload["items"],
         "updated_at": payload["updated_at"],
         "note": payload["note"],
+        "paper_trade_enabled": payload.get("paper_trade_enabled"),
+        "live_order_status": payload.get("live_order_status"),
     }
 
 

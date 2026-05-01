@@ -95,6 +95,18 @@ class BinanceFuturesTradeService:
         payload = self._public_request("/fapi/v1/premiumIndex", {"symbol": normalized})
         return float(payload.get("markPrice") or 0.0)
 
+    def validate_private_access(self) -> dict[str, Any]:
+        payload = self._signed_request("GET", "/fapi/v2/account", {})
+        return {
+            "can_trade": bool(payload.get("canTrade")),
+            "can_deposit": bool(payload.get("canDeposit")),
+            "can_withdraw": bool(payload.get("canWithdraw")),
+            "fee_tier": payload.get("feeTier"),
+            "asset_count": len(payload.get("assets") or []),
+            "position_count": len(payload.get("positions") or []),
+            "update_time": payload.get("updateTime"),
+        }
+
     def _signed_request(self, method: str, path: str, params: dict[str, Any]) -> Any:
         if not self.api_key or not self.api_secret:
             raise ValueError("BINANCE_API_KEY or BINANCE_API_SECRET is missing")

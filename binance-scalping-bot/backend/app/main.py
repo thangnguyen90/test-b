@@ -296,6 +296,8 @@ async def on_startup() -> None:
                 candles_bg_max_orders_per_cycle=settings.paper_trade_candles_bg_max_orders_per_cycle,
                 liquid_max_orders_per_cycle=settings.paper_trade_liquid_max_orders_per_cycle,
                 max_open_trades=settings.paper_trade_max_open_trades,
+                pump_max_open_trades=settings.paper_trade_pump_max_open_trades,
+                ema99_bounce_max_open_trades=settings.paper_trade_ema99_bounce_max_open_trades,
                 max_open_shorts=settings.paper_trade_max_open_shorts,
                 candles_bg_entry_type="ML_CANDLES_BG",
                 single_position_per_symbol_side=settings.paper_trade_single_position_per_symbol_side,

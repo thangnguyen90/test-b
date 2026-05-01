@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -54,6 +55,35 @@ class Ema99BounceScannerService:
                 return False
             self._alert_registry[key] = now + ttl_sec
             return True
+
+    def _binance_symbol_set(self) -> set[str]:
+        cache_key = "ema99_binance_symbol_list"
+        cached = self._get_cached(cache_key)
+        if isinstance(cached, list):
+            return {str(item).strip() for item in cached if str(item).strip()}
+        try:
+            markets = self.client.load_binance_markets()
+            symbols: list[str] = []
+            for market in markets.values():
+                if not market.get("active", True):
+                    continue
+                if market.get("swap") is not True:
+                    continue
+                if market.get("settle") != "USDT":
+                    continue
+                symbol = str(market.get("symbol") or "").strip()
+                if symbol:
+                    symbols.append(symbol)
+            symbols = sorted(set(symbols))
+            if symbols:
+                self._set_cached(cache_key, symbols, ttl_sec=600)
+                return set(symbols)
+        except Exception:
+            pass
+        return set()
+
+    def _is_binance_symbol(self, symbol: str) -> bool:
+        return str(symbol or "").strip() in self._binance_symbol_set()
 
     @staticmethod
     def _safe_float(value: Any) -> float | None:
@@ -205,6 +235,162 @@ class Ema99BounceScannerService:
         with urlopen(request, timeout=10) as response:
             response.read()
 
+    @staticmethod
+    def _signal_time_text(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc).isoformat()
+        return str(value or "")
+
+    @staticmethod
+    def _probability_from_score(score: float) -> float:
+        return max(0.05, min(1.0, float(score) / 10.0))
+
+    def _derive_paper_trade_plan(self, item: dict[str, Any]) -> tuple[float, float, float] | None:
+        timeframe = str(item.get("timeframe") or "").strip().lower()
+        side = str(item.get("side") or "").strip().upper()
+        entry = self._safe_float(item.get("mark_price")) or self._safe_float(item.get("close_price"))
+        ema99 = self._safe_float(item.get("ema99"))
+        if entry is None or ema99 is None or entry <= 0 or ema99 <= 0 or side not in {"LONG", "SHORT"}:
+            return None
+
+        is_4h = timeframe == "4h"
+        tp_pct = float(settings.ema99_bounce_4h_tp_pct if is_4h else settings.ema99_bounce_1h_tp_pct)
+        sl_pct = float(settings.ema99_bounce_4h_sl_pct if is_4h else settings.ema99_bounce_1h_sl_pct)
+        ema_buffer_pct = 0.25 if is_4h else 0.15
+
+        if side == "LONG":
+            stop_from_pct = entry * (1.0 - (sl_pct / 100.0))
+            stop_from_ema = ema99 * (1.0 - (ema_buffer_pct / 100.0))
+            stop_loss = min(stop_from_pct, stop_from_ema)
+            if stop_loss >= entry:
+                stop_loss = stop_from_pct
+            risk_pct = max(0.2, ((entry - stop_loss) / entry) * 100.0)
+            target_pct = max(tp_pct, risk_pct * 1.8)
+            take_profit = entry * (1.0 + (target_pct / 100.0))
+            if take_profit <= entry or stop_loss >= entry:
+                return None
+            return float(entry), float(take_profit), float(stop_loss)
+
+        stop_from_pct = entry * (1.0 + (sl_pct / 100.0))
+        stop_from_ema = ema99 * (1.0 + (ema_buffer_pct / 100.0))
+        stop_loss = max(stop_from_pct, stop_from_ema)
+        if stop_loss <= entry:
+            stop_loss = stop_from_pct
+        risk_pct = max(0.2, ((stop_loss - entry) / entry) * 100.0)
+        target_pct = max(tp_pct, risk_pct * 1.8)
+        take_profit = entry * (1.0 - (target_pct / 100.0))
+        if take_profit >= entry or stop_loss <= entry:
+            return None
+        return float(entry), float(take_profit), float(stop_loss)
+
+    def _maybe_execute_paper_order(self, item: dict[str, Any]) -> None:
+        if not settings.ema99_bounce_paper_trade_enabled:
+            return
+        if not bool(item.get("entry_ok")):
+            return
+        score = float(item.get("score") or 0.0)
+        if score < float(settings.ema99_bounce_paper_min_score):
+            return
+        symbol = str(item.get("symbol") or "").strip()
+        timeframe = str(item.get("timeframe") or "").strip()
+        side = str(item.get("side") or "").strip().upper()
+        signal_time_text = self._signal_time_text(item.get("signal_time"))
+        if not symbol or not timeframe or side not in {"LONG", "SHORT"} or not signal_time_text:
+            return
+        if not self._is_binance_symbol(symbol):
+            logger.info(
+                "EMA99 bounce paper order skipped: symbol=%s timeframe=%s side=%s reason=not_listed_on_binance",
+                symbol,
+                timeframe,
+                side,
+            )
+            return
+        plan = self._derive_paper_trade_plan(item)
+        if plan is None:
+            return
+        entry, take_profit, stop_loss = plan
+        order_key = f"ema99_paper_order:{symbol}:{timeframe}:{side}:{signal_time_text}"
+        cooldown_sec = max(900, int(settings.ema99_bounce_paper_signal_cooldown_sec))
+        if not self._claim_alert_slot(order_key, ttl_sec=cooldown_sec):
+            return
+        try:
+            from app.api.paper_trades import paper_trade_api
+            from app.models.paper_trades import PaperMarketOpenRequest
+
+            probability = self._probability_from_score(score)
+            request = PaperMarketOpenRequest(
+                symbol=symbol,
+                side=side,
+                signal_win_probability=probability,
+                effective_win_probability=probability,
+                repo_scope="main",
+                entry_type="EMA99_BOUNCE",
+                entry_price=entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                reference_win_symbol=symbol,
+                entry_point_score=score,
+                order_usdt=float(settings.ema99_bounce_paper_order_usdt),
+                margin_usdt=float(settings.ema99_bounce_paper_margin_usdt),
+                leverage=max(1, int(settings.ema99_bounce_paper_leverage)),
+                entry_snapshot={
+                    "source": "ema99_bounce_auto_paper",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "side": side,
+                    "signal_type": f"EMA99_BOUNCE_{side}",
+                    "signal_label": str(item.get("entry_status") or "").upper() or "ENTRY_OK",
+                    "execution_mode": "AUTO_BG",
+                    "signal_time": signal_time_text,
+                    "ema99_score": score,
+                    "ema25": float(item.get("ema25") or 0.0),
+                    "ema99": float(item.get("ema99") or 0.0),
+                    "volume_ratio": float(item.get("volume_ratio") or 0.0),
+                    "touch_gap_pct": float(item.get("touch_gap_pct") or 0.0),
+                    "ema99_gap_pct": float(item.get("ema99_gap_pct") or 0.0),
+                    "mark_price": float(item.get("mark_price") or 0.0),
+                    "close_price": float(item.get("close_price") or 0.0),
+                    "entry_ok": bool(item.get("entry_ok")),
+                    "entry_status": str(item.get("entry_status") or ""),
+                    "planned_entry_price": entry,
+                    "take_profit_price": take_profit,
+                    "stop_loss_price": stop_loss,
+                },
+            )
+            trade = asyncio.run(paper_trade_api.market_open(request))
+            self._set_cached(order_key, {"trade_id": int(trade.id)}, ttl_sec=cooldown_sec)
+            logger.info(
+                "EMA99 bounce paper order opened: symbol=%s timeframe=%s side=%s trade_id=%s score=%.2f entry=%.8f tp=%.8f sl=%.8f",
+                symbol,
+                timeframe,
+                side,
+                int(trade.id),
+                score,
+                entry,
+                take_profit,
+                stop_loss,
+            )
+        except Exception as exc:
+            self._alert_registry.pop(order_key, None)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            if status_code is not None:
+                logger.info(
+                    "EMA99 bounce paper order skipped: symbol=%s timeframe=%s side=%s status=%s reason=%s",
+                    symbol,
+                    timeframe,
+                    side,
+                    status_code,
+                    detail or str(exc),
+                )
+                return
+            logger.exception("EMA99 bounce paper order failed: symbol=%s timeframe=%s side=%s", symbol, timeframe, side)
+
+    def _process_signal_side_effects(self, payload: dict[str, Any]) -> None:
+        for item in list(payload.get("items") or []):
+            self._send_discord_alert(item)
+            self._maybe_execute_paper_order(item)
+
     def _send_discord_alert(self, item: dict[str, Any]) -> None:
         if not settings.ema99_bounce_discord_alert_enabled:
             return
@@ -294,7 +480,7 @@ class Ema99BounceScannerService:
             logger.exception("EMA99 bounce Discord alert failed for %s %s %s", symbol, timeframe, side)
 
     def _load_candidate_symbols(self, max_symbols: int) -> list[tuple[str, float]]:
-        markets = self.client.load_markets()
+        markets = self.client.load_binance_markets()
         symbols: list[str] = []
         for market in markets.values():
             if not market.get("active", True):
@@ -307,7 +493,7 @@ class Ema99BounceScannerService:
             if symbol:
                 symbols.append(symbol)
 
-        tickers = self.client.fetch_tickers()
+        tickers = self.client.fetch_binance_tickers()
         ranked: list[tuple[str, float]] = []
         for symbol in sorted(set(symbols)):
             ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
@@ -329,14 +515,24 @@ class Ema99BounceScannerService:
         cache_key = f"ema99_bounce:{max_symbols}:{max_items}:{','.join(timeframes)}"
         cached = self._get_cached(cache_key)
         if cached is not None:
+            if send_alerts:
+                self._process_signal_side_effects(cached)
             return cached
 
         ranked_symbols = self._load_candidate_symbols(max_symbols=max_symbols)
-        tickers = self.client.fetch_tickers([symbol for symbol, _ in ranked_symbols])
+        try:
+            tickers = self.client.fetch_binance_tickers([symbol for symbol, _ in ranked_symbols])
+        except Exception:
+            tickers = {}
         items: list[dict[str, Any]] = []
 
         for symbol, _quote_volume in ranked_symbols:
             ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
+            if ticker is None:
+                try:
+                    ticker = self.client.fetch_binance_ticker(symbol)
+                except Exception:
+                    ticker = None
             mark_price = None
             if isinstance(ticker, dict):
                 mark_price = (
@@ -347,7 +543,7 @@ class Ema99BounceScannerService:
                 )
             for timeframe in timeframes:
                 try:
-                    rows = self.client.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=220)
+                    rows = self.client.fetch_binance_ohlcv(symbol=symbol, timeframe=timeframe, limit=220)
                     frame = self._prepare_frame(rows)
                     if len(frame) < 120:
                         continue
@@ -402,13 +598,12 @@ class Ema99BounceScannerService:
                     continue
 
         items.sort(key=lambda item: (item["score"], item["volume_ratio"]), reverse=True)
-        if send_alerts:
-            for item in items:
-                self._send_discord_alert(item)
         payload = {
             "count": min(len(items), max_items),
             "scanned": len(ranked_symbols),
             "generated_at": datetime.now(timezone.utc),
             "items": items[:max_items],
         }
+        if send_alerts:
+            self._process_signal_side_effects(payload)
         return self._set_cached(cache_key, payload, ttl_sec=cache_ttl_sec)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import json
 import math
 import xml.etree.ElementTree as ET
 
@@ -120,6 +121,10 @@ class PaperTradeAPI:
     @staticmethod
     def _is_ml_basic_entry_type(value: object) -> bool:
         return str(value or "").strip().upper() == "LIMIT"
+
+    @staticmethod
+    def _uses_isolated_entry_scope(entry_type: str | None) -> bool:
+        return str(entry_type or "").strip().upper() == "EMA99_BOUNCE"
 
     def _is_major_symbol(self, symbol: str) -> bool:
         if callable(self.major_symbol_resolver):
@@ -296,6 +301,50 @@ class PaperTradeAPI:
         return None
 
     @staticmethod
+    def _parse_feature_snapshot(raw: object) -> dict[str, Any] | None:
+        if raw is None:
+            return None
+        payload: object = raw
+        if isinstance(payload, (bytes, bytearray)):
+            payload = payload.decode("utf-8", errors="ignore")
+        if isinstance(payload, str):
+            text = payload.strip()
+            if not text:
+                return None
+            try:
+                payload = json.loads(text)
+            except Exception:
+                return None
+        return payload if isinstance(payload, dict) else None
+
+    @classmethod
+    def _extract_entry_snapshot_context(cls, raw: object) -> dict[str, str | None]:
+        snapshot = cls._parse_feature_snapshot(raw)
+        if not snapshot:
+            return {
+                "entry_source": None,
+                "entry_stage": None,
+                "entry_signal_label": None,
+                "entry_signal_type": None,
+                "entry_execution_mode": None,
+            }
+
+        def pick(key: str) -> str | None:
+            value = snapshot.get(key)
+            if value is None:
+                return None
+            text = str(value).strip()
+            return text or None
+
+        return {
+            "entry_source": pick("source"),
+            "entry_stage": pick("stage"),
+            "entry_signal_label": pick("signal_label"),
+            "entry_signal_type": pick("signal_type"),
+            "entry_execution_mode": pick("execution_mode"),
+        }
+
+    @staticmethod
     def _hourly_stats_from_row(row: dict | None) -> dict[str, float | int]:
         if not row:
             return {
@@ -341,6 +390,7 @@ class PaperTradeAPI:
 
     @classmethod
     def _map_trade(cls, row: dict, btc_following: bool | None = None) -> PaperTrade:
+        snapshot_context = cls._extract_entry_snapshot_context(row.get("feature_snapshot_json"))
         entry_price = float(row["entry_price"])
         quantity = float(row["quantity"])
         leverage = int(row["leverage"])
@@ -401,6 +451,11 @@ class PaperTradeAPI:
             current_btc_trend=str(row["current_btc_trend"]) if row.get("current_btc_trend") is not None else None,
             close_candle_pattern=str(row["close_candle_pattern"]) if row.get("close_candle_pattern") is not None else None,
             btc_trend_at_close=str(row["btc_trend_at_close"]) if row.get("btc_trend_at_close") is not None else None,
+            entry_source=snapshot_context["entry_source"],
+            entry_stage=snapshot_context["entry_stage"],
+            entry_signal_label=snapshot_context["entry_signal_label"],
+            entry_signal_type=snapshot_context["entry_signal_type"],
+            entry_execution_mode=snapshot_context["entry_execution_mode"],
         )
 
     def _enrich_live_context(self, row: dict) -> dict:
@@ -559,6 +614,8 @@ class PaperTradeAPI:
         return [
             ("ALL", "ALL"),
             ("LIMIT", "ML (LIMIT)"),
+            ("EMA99_BOUNCE", "EMA99 Bounce"),
+            ("PUMP_ENTRY_TOUCH", "Pump Hunter"),
             ("ML_CANDLES_BG", "ML Candles BG"),
             ("ML_CANDLES_TEST", "ML Candles Test"),
             ("ML_TEST", "ML Test"),
@@ -1451,17 +1508,23 @@ class PaperTradeAPI:
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._resolve_repo(repo_scope=req.repo_scope, entry_type=req.entry_type)
         entry_type = str(req.entry_type or "MARKET").strip().upper() or "MARKET"
-        if repo.has_open_trade(symbol=req.symbol, side=req.side):
+        isolated_entry_scope = self._uses_isolated_entry_scope(entry_type)
+        if repo.has_open_trade(
+            symbol=req.symbol,
+            side=req.side,
+            entry_type=entry_type if isolated_entry_scope else None,
+        ):
             raise HTTPException(status_code=409, detail=f"Open trade already exists for {req.symbol} {req.side}")
         runtime_repo, runtime_engine = get_paper_trade_runtime()
         if runtime_engine is not None and runtime_repo is repo:
             hard_block_reason = runtime_engine._entry_hard_block_reason()
             if hard_block_reason:
                 raise HTTPException(status_code=409, detail=str(hard_block_reason))
-            entry_guard_reason = runtime_engine._entry_guard_reason(symbol=req.symbol, side=req.side)
-            if entry_guard_reason:
-                raise HTTPException(status_code=409, detail=str(entry_guard_reason))
-            portfolio_guard_reason = runtime_engine._portfolio_guard_reason(side=req.side)
+            if not isolated_entry_scope:
+                entry_guard_reason = runtime_engine._entry_guard_reason(symbol=req.symbol, side=req.side)
+                if entry_guard_reason:
+                    raise HTTPException(status_code=409, detail=str(entry_guard_reason))
+            portfolio_guard_reason = runtime_engine._portfolio_guard_reason(side=req.side, entry_type=entry_type)
             if portfolio_guard_reason:
                 raise HTTPException(status_code=409, detail=str(portfolio_guard_reason))
             if runtime_engine._is_reentry_cooldown_active(
@@ -1548,6 +1611,13 @@ class PaperTradeAPI:
                 leverage=leverage,
             )
         feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, req.symbol, req.side)
+        if isinstance(req.entry_snapshot, dict) and req.entry_snapshot:
+            merged_snapshot = dict(feature_snapshot or {})
+            for key, value in req.entry_snapshot.items():
+                if not isinstance(key, str):
+                    continue
+                merged_snapshot[key] = value
+            feature_snapshot = merged_snapshot
         btc_following: bool | None = None
         if callable(self.btc_follow_resolver):
             try:
@@ -1575,7 +1645,7 @@ class PaperTradeAPI:
                 "feature_snapshot": feature_snapshot,
             }
         )
-        if runtime_engine is not None and runtime_repo is repo:
+        if runtime_engine is not None and runtime_repo is repo and not isolated_entry_scope:
             try:
                 runtime_engine.register_open_pressure_event(side=req.side)
                 await runtime_engine.apply_open_pressure_profit_exit()

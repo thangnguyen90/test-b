@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,11 @@ class PaperTrade(BaseModel):
     current_btc_trend: Optional[str] = None
     close_candle_pattern: Optional[str] = None
     btc_trend_at_close: Optional[str] = None
+    entry_source: Optional[str] = None
+    entry_stage: Optional[str] = None
+    entry_signal_label: Optional[str] = None
+    entry_signal_type: Optional[str] = None
+    entry_execution_mode: Optional[str] = None
 
 
 class PaperTradeStats(BaseModel):
@@ -240,7 +245,7 @@ class PaperMarketOpenRequest(BaseModel):
     signal_win_probability: float = Field(ge=0, le=1)
     effective_win_probability: Optional[float] = Field(default=None, ge=0, le=1)
     repo_scope: Optional[str] = Field(default=None, pattern="^(main|candles|auto)$")
-    entry_type: Optional[str] = Field(default=None, pattern="^[A-Z_]+$")
+    entry_type: Optional[str] = Field(default=None, pattern="^[A-Z0-9_]+$")
     entry_price: Optional[float] = Field(default=None, gt=0)
     take_profit: float = Field(gt=0)
     stop_loss: float = Field(gt=0)
@@ -251,6 +256,7 @@ class PaperMarketOpenRequest(BaseModel):
     margin_usdt: Optional[float] = Field(default=None, gt=0)
     quantity: Optional[float] = Field(default=None, gt=0)
     leverage: Optional[int] = Field(default=None, ge=1, le=125)
+    entry_snapshot: Optional[dict[str, Any]] = None
 
 
 class PaperManualCloseRequest(BaseModel):

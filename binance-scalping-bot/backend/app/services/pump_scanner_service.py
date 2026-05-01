@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -13,7 +14,7 @@ import pandas as pd
 
 from app.core.config import settings
 from app.services.binance_client import BinanceFuturesClient
-from app.services.binance_futures_trade_service import BinanceFuturesTradeService
+from app.services.binance_futures_trade_service import BinanceApiError, BinanceFuturesTradeService
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,45 @@ class PumpScannerService:
         self.cache: dict[str, CacheItem] = {}
         self._alert_lock = threading.Lock()
         self._live_order_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._live_order_registry: dict[str, dict[str, Any]] = {}
+        self._live_order_status: dict[str, Any] = {
+            "state": "disabled",
+            "mode": "DISABLED",
+            "reason": "live_trade_disabled",
+            "message": "Pump Hunter live trade is disabled",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+    def _binance_symbol_set(self) -> set[str]:
+        cache_key = "binance_symbol_set"
+        cached = self._get_cached(cache_key)
+        if isinstance(cached, set):
+            return cached
+        stale_cached = self._get_cached(cache_key, allow_stale=True)
+        try:
+            markets = self.client.load_binance_markets()
+            symbols: set[str] = set()
+            for market in markets.values():
+                if not market.get("active", True):
+                    continue
+                if market.get("swap") is not True:
+                    continue
+                if market.get("settle") != "USDT":
+                    continue
+                symbol = str(market.get("symbol") or "").strip()
+                if symbol:
+                    symbols.add(symbol)
+            if symbols:
+                return self._set_cache(cache_key, symbols, ttl_sec=600)
+        except Exception:
+            pass
+        if isinstance(stale_cached, set):
+            return stale_cached
+        return set()
+
+    def _is_binance_symbol(self, symbol: str) -> bool:
+        return str(symbol or "").strip() in self._binance_symbol_set()
 
     @staticmethod
     def _derive_post_sweep_short_entry(
@@ -134,10 +173,14 @@ class PumpScannerService:
 
     @classmethod
     def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
-        signal_label = str(row.get("signal_label") or "").upper()
-        stage = str(row.get("stage") or "").upper()
-        is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
-        side = "SHORT" if is_post_sweep else "LONG"
+        explicit_side = str(row.get("trade_side") or "").upper()
+        if explicit_side in {"LONG", "SHORT"}:
+            side = explicit_side
+        else:
+            signal_label = str(row.get("signal_label") or "").upper()
+            stage = str(row.get("stage") or "").upper()
+            is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
+            side = "SHORT" if is_post_sweep else "LONG"
         mark_price = float(row.get("mark_price") or 0.0)
         invalidation_price = float(row.get("invalidation_price") or 0.0)
         zone_low = float(row.get("est_liq_target_low") or 0.0)
@@ -218,6 +261,214 @@ class PumpScannerService:
                 f"Expected TP {tp_pct:.2f}% must be greater than {threshold_pct:.2f}% for Binance live orders"
             )
         return side, entry, take_profit, stop_loss, tp_pct
+
+    @staticmethod
+    def _extract_binance_error_code(payload: Any) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            code = payload.get("code")
+            return int(code) if code is not None else None
+        except Exception:
+            return None
+
+    def _set_live_order_status(
+        self,
+        *,
+        state: str,
+        mode: str,
+        reason: str,
+        message: str,
+        status_code: int | None = None,
+        binance_code: int | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "state": str(state or "").lower() or "unknown",
+            "mode": str(mode or "").upper() or "UNKNOWN",
+            "reason": str(reason or "").lower() or "unknown",
+            "message": str(message or "").strip() or "Unknown live status",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if status_code is not None:
+            payload["status_code"] = int(status_code)
+        if binance_code is not None:
+            payload["binance_code"] = int(binance_code)
+        if meta:
+            payload.update(meta)
+        with self._status_lock:
+            self._live_order_status = payload
+        return dict(payload)
+
+    def get_live_order_status(self) -> dict[str, Any]:
+        with self._status_lock:
+            return dict(self._live_order_status)
+
+    def refresh_live_order_status(self, *, force: bool = False) -> dict[str, Any]:
+        if not settings.pump_hunter_live_trade_enabled:
+            return self._set_live_order_status(
+                state="disabled",
+                mode="DISABLED",
+                reason="live_trade_disabled",
+                message="Pump Hunter live trade is disabled",
+            )
+        if bool(settings.pump_hunter_live_order_test_mode):
+            return self._set_live_order_status(
+                state="ok",
+                mode="TEST",
+                reason="test_mode",
+                message="Pump Hunter is running in Binance test-order mode",
+            )
+        if not str(settings.binance_api_key or "").strip() or not str(settings.binance_api_secret or "").strip():
+            return self._set_live_order_status(
+                state="error",
+                mode="LIVE",
+                reason="missing_credentials",
+                message="BINANCE_API_KEY or BINANCE_API_SECRET is missing",
+            )
+        current = self.get_live_order_status()
+        ttl_sec = max(30, int(settings.pump_hunter_live_status_cache_sec))
+        if not force and current.get("mode") == "LIVE":
+            updated_at = str(current.get("updated_at") or "").strip()
+            if updated_at:
+                try:
+                    updated_ts = pd.Timestamp(updated_at).timestamp()
+                    if (time.time() - updated_ts) <= ttl_sec:
+                        return current
+                except Exception:
+                    pass
+        try:
+            account = self.trade_client.validate_private_access()
+        except ValueError as exc:
+            return self._set_live_order_status(
+                state="error",
+                mode="LIVE",
+                reason="config_error",
+                message=str(exc),
+            )
+        except BinanceApiError as exc:
+            return self._set_live_order_status(
+                state="error",
+                mode="LIVE",
+                reason="binance_auth_error",
+                message=str(exc),
+                status_code=exc.status_code,
+                binance_code=self._extract_binance_error_code(exc.payload),
+            )
+        except Exception as exc:
+            return self._set_live_order_status(
+                state="error",
+                mode="LIVE",
+                reason="probe_failed",
+                message=str(exc),
+            )
+        return self._set_live_order_status(
+            state="ok",
+            mode="LIVE",
+            reason="ready",
+            message="Binance futures private API reachable",
+            meta=account,
+        )
+
+    def _maybe_execute_paper_order(self, row: dict[str, Any]) -> None:
+        if not settings.pump_hunter_paper_trade_enabled:
+            return
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        if score < float(settings.pump_hunter_paper_min_score):
+            return
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            return
+        if not self._is_binance_symbol(symbol):
+            logger.info("Pump hunter paper order skipped: symbol=%s reason=not_listed_on_binance", symbol)
+            return
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
+            logger.info("Pump hunter paper order skipped: symbol=%s side=%s reason=invalid_trade_plan", symbol, side)
+            return
+        order_key = f"pump_paper_order:{symbol}:{side}:touch"
+        cooldown_sec = max(60, int(settings.pump_hunter_paper_signal_cooldown_sec))
+        if not self._claim_alert_slot(order_key, ttl_sec=cooldown_sec):
+            return
+        try:
+            from app.api.paper_trades import paper_trade_api
+            from app.models.paper_trades import PaperMarketOpenRequest
+
+            probability = _clamp(score / 100.0, 0.0, 1.0)
+            request = PaperMarketOpenRequest(
+                symbol=symbol,
+                side=side,
+                signal_win_probability=probability,
+                effective_win_probability=probability,
+                repo_scope="main",
+                entry_type="PUMP_ENTRY_TOUCH",
+                entry_price=entry,
+                take_profit=take_profit,
+                stop_loss=stop_loss,
+                reference_win_symbol=symbol,
+                entry_point_score=score,
+                order_usdt=float(settings.paper_trade_order_usdt),
+                margin_usdt=float(settings.paper_trade_margin_usdt),
+                leverage=max(1, int(settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 1)),
+                entry_snapshot={
+                    "source": str(row.get("source") or "pump_hunter_auto_paper"),
+                    "symbol": symbol,
+                    "side": side,
+                    "stage": str(row.get("stage") or "").upper() or None,
+                    "signal_label": str(row.get("signal_label") or "").upper() or None,
+                    "signal_type": str(row.get("signal_type") or ("POST_SWEEP_SHORT" if side == "SHORT" else "LONG_BUILDUP_BREAKOUT")).upper(),
+                    "execution_mode": str(row.get("execution_mode") or "AUTO_BG").upper(),
+                    "setup_quality": str(row.get("setup_quality") or "").upper() or None,
+                    "planned_entry_price": entry,
+                    "market_entry_price": float(row.get("mark_price") or 0.0),
+                    "take_profit_price": take_profit,
+                    "stop_loss_price": stop_loss,
+                    "effective_score": score,
+                    "pump_score": float(row.get("pump_score") or score),
+                    "volume_ratio_15m": float(row.get("volume_ratio_15m") or 0.0),
+                    "volume_ratio_5m": float(row.get("volume_ratio_5m") or 0.0),
+                    "rejection_score": float(row.get("rejection_score") or 0.0),
+                    "rr_ratio": float(row.get("rr_ratio") or 0.0),
+                    "est_liq_target_price": float(row.get("est_liq_target_price") or 0.0),
+                    "est_liq_distance_pct": float(row.get("est_liq_distance_pct") or 0.0),
+                    "above_ema_stack": bool(row.get("above_ema_stack")),
+                    "long_buildup_early_active": bool(row.get("long_buildup_early_active")),
+                    "kill_short_active": bool(row.get("kill_short_active")),
+                    "swept_recently": bool(row.get("swept_recently")),
+                    "entry_ready": bool(row.get("entry_ready")),
+                },
+            )
+            trade = asyncio.run(paper_trade_api.market_open(request))
+            self._set_cache(order_key, {"trade_id": int(trade.id)}, ttl_sec=cooldown_sec)
+            logger.info(
+                "Pump hunter paper order opened: symbol=%s side=%s trade_id=%s score=%.1f entry=%.8f tp=%.8f sl=%.8f",
+                symbol,
+                side,
+                int(trade.id),
+                score,
+                entry,
+                take_profit,
+                stop_loss,
+            )
+        except Exception as exc:
+            self._release_alert_slot(order_key)
+            status_code = getattr(exc, "status_code", None)
+            detail = getattr(exc, "detail", None)
+            if status_code is not None:
+                logger.info(
+                    "Pump hunter paper order skipped: symbol=%s side=%s status=%s reason=%s",
+                    symbol,
+                    side,
+                    status_code,
+                    detail or str(exc),
+                )
+                return
+            logger.exception("Pump hunter paper order failed: symbol=%s side=%s", symbol, side)
+
+    def _attach_runtime_status(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["paper_trade_enabled"] = bool(settings.pump_hunter_paper_trade_enabled)
+        payload["live_order_status"] = self.get_live_order_status()
+        return payload
 
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_discord_alert_enabled:
@@ -391,10 +642,16 @@ class PumpScannerService:
     def _maybe_execute_live_order(self, row: dict[str, Any]) -> None:
         if not settings.pump_hunter_live_trade_enabled:
             return
+        live_status = self.get_live_order_status()
+        if str(live_status.get("reason") or "").lower() in {"binance_auth_error", "missing_credentials", "config_error"}:
+            return
         score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
         if score < float(settings.pump_hunter_live_min_score):
             return
         symbol = str(row.get("symbol") or "").strip()
+        if symbol and not self._is_binance_symbol(symbol):
+            logger.info("Pump hunter Binance order skipped: symbol=%s reason=not_listed_on_binance", symbol)
+            return
         leverage = max(1, int(settings.pump_hunter_live_leverage))
         try:
             side, entry, take_profit, stop_loss, tp_pct = self._validate_live_order_tp_requirement(
@@ -432,6 +689,23 @@ class PumpScannerService:
                 result.get("quantity"),
                 result.get("entry_price"),
             )
+            self._set_live_order_status(
+                state="ok",
+                mode="TEST" if bool(settings.pump_hunter_live_order_test_mode) else "LIVE",
+                reason="order_submitted",
+                message=f"Last Pump Hunter {'test' if bool(settings.pump_hunter_live_order_test_mode) else 'live'} order submitted successfully",
+            )
+        except BinanceApiError as exc:
+            self._release_alert_slot(order_key)
+            self._set_live_order_status(
+                state="error",
+                mode="LIVE",
+                reason="binance_auth_error" if self._extract_binance_error_code(exc.payload) == -2015 else "binance_api_error",
+                message=str(exc),
+                status_code=exc.status_code,
+                binance_code=self._extract_binance_error_code(exc.payload),
+            )
+            logger.exception("Pump hunter Binance order failed: symbol=%s side=%s", symbol, side)
         except Exception:
             self._release_alert_slot(order_key)
             logger.exception("Pump hunter Binance order failed: symbol=%s side=%s", symbol, side)
@@ -1304,7 +1578,7 @@ class PumpScannerService:
         return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
     def _prepare_frame(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-        rows = self.client.fetch_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
+        rows = self.client.fetch_binance_ohlcv(symbol=symbol, timeframe=timeframe, limit=limit)
         frame = self._to_frame(rows)
         frame["ema13"] = frame["close"].ewm(span=13, adjust=False).mean()
         frame["ema25"] = frame["close"].ewm(span=25, adjust=False).mean()
@@ -1488,6 +1762,125 @@ class PumpScannerService:
             "sweep_distance_pct": round(float(sweep_distance_pct), 2) if sweep_distance_pct is not None else None,
         }
 
+    @staticmethod
+    def _detect_long_buildup_signal(
+        *,
+        breakout_pct_20: float,
+        breakout_pct_55: float,
+        vol_ratio_15m: float,
+        vol_ratio_5m: float,
+        vol_z_15m: float,
+        momentum_pct_3: float,
+        momentum_pct_12: float,
+        expansion_ratio: float,
+        close_in_range: float,
+        body_pct: float,
+        range_pct_15m: float,
+        atr_pct_15m: float,
+        stack_gap_pct: float,
+        distance_pct: float,
+        ema13_gap_pct: float,
+        ema25_gap_pct: float,
+        ema99_gap_pct: float,
+        above_ema_stack: bool,
+    ) -> dict[str, Any]:
+        inactive = {
+            "active": False,
+            "source": None,
+            "stage": None,
+            "signal_label": None,
+            "execution_mode": None,
+            "signal_type": None,
+            "score": 0.0,
+            "signal_bonus": 0.0,
+            "long_buildup_early_active": False,
+            "ma99_reclaimed": False,
+            "ma99_pressing": False,
+            "reclaimed_ema13_25": False,
+        }
+
+        reclaimed_ema13_25 = ema13_gap_pct >= -0.22 and ema25_gap_pct >= -0.22
+        ma99_pressing = -0.85 <= ema99_gap_pct <= 0.85
+        ma99_reclaimed = ema99_gap_pct >= -0.12
+        holding_rebound_zone = reclaimed_ema13_25 and momentum_pct_12 >= -1.5 and close_in_range >= 0.38
+        volume_flowing = vol_ratio_15m >= 0.9 or vol_ratio_5m >= 1.1 or vol_z_15m >= -0.1
+        breakout_pressure = (
+            breakout_pct_20 >= -0.8
+            and breakout_pct_55 >= -2.5
+            and momentum_pct_12 >= -1.5
+            and close_in_range >= 0.42
+            and range_pct_15m <= 6.5
+            and atr_pct_15m <= 3.8
+            and distance_pct >= 0.35
+        )
+        pre_breakout_ready = holding_rebound_zone and ma99_pressing and volume_flowing and breakout_pressure
+        breakout_confirmed = (
+            pre_breakout_ready
+            and ma99_reclaimed
+            and breakout_pct_20 >= -0.15
+            and close_in_range >= 0.55
+            and body_pct >= 0.1
+            and (vol_ratio_15m >= 1.0 or vol_ratio_5m >= 1.35 or momentum_pct_3 >= 0.45)
+        )
+
+        if not pre_breakout_ready and not breakout_confirmed:
+            return inactive
+
+        ma99_pressure_score = max(0.0, 1.0 - (min(abs(ema99_gap_pct), 1.4) / 1.4))
+        long_score = (
+            50.0
+            + (_norm(vol_ratio_15m, 0.8, 3.2) * 10.0)
+            + (_norm(vol_ratio_5m, 1.0, 3.2) * 8.0)
+            + (_norm(vol_z_15m, -0.2, 3.8) * 4.0)
+            + (_norm(breakout_pct_20, -1.0, 2.0) * 8.0)
+            + (_norm(breakout_pct_55, -2.5, 5.0) * 4.0)
+            + (_norm(momentum_pct_3, -0.4, 4.5) * 6.0)
+            + (_norm(momentum_pct_12, -1.5, 8.0) * 6.0)
+            + (_norm(close_in_range, 0.38, 0.98) * 7.0)
+            + (_norm(body_pct, 0.08, 2.8) * 3.0)
+            + (ma99_pressure_score * 6.0)
+            + (_norm(max(stack_gap_pct, 0.0), 0.0, 2.2) * 3.0)
+        )
+        if reclaimed_ema13_25:
+            long_score += 5.0
+        if above_ema_stack:
+            long_score += 3.0
+        if breakout_confirmed:
+            long_score += 6.0
+        long_score = round(_clamp(long_score, 0.0, 100.0), 2)
+
+        if breakout_confirmed:
+            return {
+                "active": True,
+                "source": "pump_hunter_long_buildup_test",
+                "stage": "BREAKOUT",
+                "signal_label": "ARMING",
+                "execution_mode": "CONFIRMED",
+                "signal_type": "LONG_BUILDUP_BREAKOUT",
+                "score": long_score,
+                "signal_bonus": max(0.0, round(long_score - 58.0, 2)),
+                "long_buildup_early_active": False,
+                "ma99_reclaimed": ma99_reclaimed,
+                "ma99_pressing": ma99_pressing,
+                "reclaimed_ema13_25": reclaimed_ema13_25,
+            }
+
+        signal_label = "ARMING" if (vol_ratio_5m >= 1.35 or vol_ratio_15m >= 1.1 or vol_z_15m >= 0.15 or momentum_pct_3 >= 0.35) else "WATCH"
+        return {
+            "active": True,
+            "source": "pump_hunter_long_buildup_pre_breakout_test",
+            "stage": "PRE_PUMP",
+            "signal_label": signal_label,
+            "execution_mode": "SCOUT",
+            "signal_type": "LONG_BUILDUP_PRE_BREAKOUT",
+            "score": long_score,
+            "signal_bonus": max(0.0, round(long_score - 54.0, 2)),
+            "long_buildup_early_active": signal_label == "WATCH" or ema99_gap_pct < 0,
+            "ma99_reclaimed": ma99_reclaimed,
+            "ma99_pressing": ma99_pressing,
+            "reclaimed_ema13_25": reclaimed_ema13_25,
+        }
+
     def _ranked_symbols(self, max_symbols: int) -> list[tuple[str, dict[str, Any]]]:
         cache_key = f"ranked_symbols:{max_symbols if max_symbols > 0 else 'all'}"
         cached = self._get_cached(cache_key)
@@ -1496,8 +1889,8 @@ class PumpScannerService:
         stale_cached = self._get_cached(cache_key, allow_stale=True)
 
         try:
-            markets = self.client.load_markets()
-            tickers = self.client.fetch_tickers()
+            markets = self.client.load_binance_markets()
+            tickers = self.client.fetch_binance_tickers()
         except Exception:
             if stale_cached is not None:
                 return stale_cached
@@ -1545,6 +1938,13 @@ class PumpScannerService:
             "note": note,
         }
 
+    def _process_scan_alerts(self, payload: dict[str, Any]) -> None:
+        self.refresh_live_order_status()
+        for row in payload.get("items", []):
+            self._maybe_execute_paper_order(row)
+            self._maybe_send_discord_alert(row)
+            self._maybe_execute_live_order(row)
+
     def analyze_symbol(self, symbol: str, *, ticker: dict[str, Any] | None = None, include_candles: bool = False) -> dict[str, Any]:
         cache_key = f"pump_symbol:{symbol}:{1 if include_candles else 0}"
         cached = self._get_cached(cache_key)
@@ -1559,7 +1959,7 @@ class PumpScannerService:
         latest_15m = frame_15m.iloc[-1]
         latest_5m = frame_5m.iloc[-1]
 
-        ticker = ticker or self.client.fetch_ticker(symbol)
+        ticker = ticker or self.client.fetch_binance_ticker(symbol)
         current_price = _safe_float(ticker.get("last")) or _safe_float(ticker.get("close")) or float(latest_15m["close"])
         if current_price <= 0:
             current_price = float(latest_15m["close"])
@@ -1593,6 +1993,9 @@ class PumpScannerService:
         atr_pct_15m = float(latest_15m.get("atr_pct") or 0.0) * 100.0
         upper_wick_pct_15m = float(latest_15m.get("upper_wick_pct") or 0.0) * 100.0
         stack_gap_pct = float(latest_15m.get("ema_stack_gap_pct") or 0.0) * 100.0
+        ema13_gap_pct = (((current_price - float(latest_15m.get("ema13") or current_price)) / float(latest_15m.get("ema13") or current_price)) * 100.0) if float(latest_15m.get("ema13") or 0.0) > 0 else 0.0
+        ema25_gap_pct = (((current_price - float(latest_15m.get("ema25") or current_price)) / float(latest_15m.get("ema25") or current_price)) * 100.0) if float(latest_15m.get("ema25") or 0.0) > 0 else 0.0
+        ema99_gap_pct = (((current_price - float(latest_15m.get("ema99") or current_price)) / float(latest_15m.get("ema99") or current_price)) * 100.0) if float(latest_15m.get("ema99") or 0.0) > 0 else 0.0
         above_ema_stack = bool(latest_15m.get("above_ema_stack"))
 
         pump_score = (
@@ -1619,7 +2022,7 @@ class PumpScannerService:
             pump_score -= 6.0
 
         pump_score = round(_clamp(pump_score, 0.0, 100.0), 2)
-        stage = self._classify_stage(breakout_pct_20=breakout_pct_20, distance_pct=distance_pct, volume_ratio_fast=vol_ratio_5m)
+        base_stage = self._classify_stage(breakout_pct_20=breakout_pct_20, distance_pct=distance_pct, volume_ratio_fast=vol_ratio_5m)
         sweep_ctx = self._detect_sweep_signal(
             frame_15m,
             zone_low=zone_low,
@@ -1627,15 +2030,77 @@ class PumpScannerService:
             current_price=current_price,
             atr=atr,
         )
-        if bool(sweep_ctx["entry_ready"]):
-            stage = "POST_SWEEP"
-        elif bool(sweep_ctx["swept_recently"]):
-            stage = "SWEEPED"
-        elif stage == "NEAR_SWEEP":
-            sweep_ctx["signal_label"] = "ARMING"
-            sweep_ctx["signal_bonus"] = max(float(sweep_ctx["signal_bonus"]), 4.0)
+        long_ctx = self._detect_long_buildup_signal(
+            breakout_pct_20=breakout_pct_20,
+            breakout_pct_55=breakout_pct_55,
+            vol_ratio_15m=vol_ratio_15m,
+            vol_ratio_5m=vol_ratio_5m,
+            vol_z_15m=vol_z_15m,
+            momentum_pct_3=momentum_pct_3,
+            momentum_pct_12=momentum_pct_12,
+            expansion_ratio=expansion_ratio,
+            close_in_range=close_in_range,
+            body_pct=body_pct,
+            range_pct_15m=range_pct_15m,
+            atr_pct_15m=atr_pct_15m,
+            stack_gap_pct=stack_gap_pct,
+            distance_pct=distance_pct,
+            ema13_gap_pct=ema13_gap_pct,
+            ema25_gap_pct=ema25_gap_pct,
+            ema99_gap_pct=ema99_gap_pct,
+            above_ema_stack=above_ema_stack,
+        )
+        if bool(long_ctx.get("active")):
+            target_price = max(float(target_price), current_price * 1.01)
+            distance_pct = ((target_price - current_price) / current_price) * 100 if current_price > 0 else distance_pct
+            reward_pct = max(0.0, distance_pct)
+            rr_ratio = (reward_pct / risk_pct) if risk_pct > 0 else 0.0
 
-        effective_score = round(_clamp(pump_score + float(sweep_ctx["signal_bonus"]), 0.0, 100.0), 2)
+        trade_side = "LONG"
+        source = long_ctx.get("source") if bool(long_ctx.get("active")) else "pump_hunter_generic"
+        stage = str(long_ctx.get("stage") or base_stage)
+        signal_label = str(long_ctx.get("signal_label") or "WATCH")
+        execution_mode = str(long_ctx.get("execution_mode") or "")
+        signal_type = str(long_ctx.get("signal_type") or "")
+        selected_bonus = float(long_ctx.get("signal_bonus") or 0.0)
+
+        short_effective_score = round(_clamp(pump_score + float(sweep_ctx["signal_bonus"]), 0.0, 100.0), 2)
+        long_effective_score = round(float(long_ctx.get("score") or 0.0), 2)
+
+        if bool(sweep_ctx["entry_ready"]) and not (
+            bool(long_ctx.get("active"))
+            and long_effective_score >= short_effective_score
+        ):
+            trade_side = "SHORT"
+            source = "pump_hunter_post_sweep_test"
+            stage = "POST_SWEEP"
+            signal_label = "ENTER"
+            execution_mode = "WAIT_TOUCH"
+            signal_type = "POST_SWEEP_SHORT"
+            selected_bonus = float(sweep_ctx["signal_bonus"])
+        elif bool(long_ctx.get("active")):
+            trade_side = "LONG"
+            source = str(long_ctx.get("source") or "pump_hunter_long_buildup_test")
+            stage = str(long_ctx.get("stage") or base_stage)
+            signal_label = str(long_ctx.get("signal_label") or "WATCH")
+            execution_mode = str(long_ctx.get("execution_mode") or "")
+            signal_type = str(long_ctx.get("signal_type") or "")
+            selected_bonus = float(long_ctx.get("signal_bonus") or 0.0)
+        elif bool(sweep_ctx["swept_recently"]):
+            trade_side = "SHORT"
+            source = "pump_hunter_post_sweep_test"
+            stage = "SWEEPED"
+            signal_label = "SWEEPED"
+            execution_mode = "WAIT_TOUCH"
+            signal_type = "POST_SWEEP_SHORT"
+            selected_bonus = float(sweep_ctx["signal_bonus"])
+        elif base_stage == "NEAR_SWEEP":
+            signal_label = "ARMING"
+            selected_bonus = max(selected_bonus, 4.0)
+
+        effective_score = round(_clamp(pump_score + selected_bonus, 0.0, 100.0), 2)
+        if trade_side == "LONG" and bool(long_ctx.get("active")):
+            effective_score = long_effective_score
 
         notes: list[str] = []
         if vol_ratio_15m >= 2.0:
@@ -1650,13 +2115,24 @@ class PumpScannerService:
             notes.append("Overhead wick cluster suggests short-liq sweep")
         if rr_ratio >= 1.5:
             notes.append(f"Reward/risk ~ {rr_ratio:.2f}")
-        if bool(sweep_ctx["entry_ready"]):
+        if trade_side == "LONG" and source == "pump_hunter_long_buildup_test":
+            notes.append("Long buildup breakout duoc xac nhan")
+            notes.append("Reclaimed EMA13/EMA25")
+            notes.append("MA99 reclaimed")
+        elif trade_side == "LONG" and source == "pump_hunter_long_buildup_pre_breakout_test":
+            notes.append("Long buildup pre-breakout dang duoc gom")
+            notes.append("Reclaimed EMA13/EMA25")
+            if bool(long_ctx.get("ma99_reclaimed")):
+                notes.append("MA99 reclaimed")
+            elif bool(long_ctx.get("ma99_pressing")):
+                notes.append(f"Pressing MA99 ({abs(ema99_gap_pct):.2f}% away)")
+        if trade_side == "SHORT" and bool(sweep_ctx["entry_ready"]):
             notes.append("Da quet len kill zone va bi tu choi xuong")
-        elif bool(sweep_ctx["swept_recently"]):
+        elif trade_side == "SHORT" and bool(sweep_ctx["swept_recently"]):
             notes.append("Gia vua quet len vung thanh ly gan day")
 
         suggested_entry_price = current_price
-        if str(sweep_ctx["signal_label"]) in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}:
+        if trade_side == "SHORT":
             suggested_entry_price = self._derive_post_sweep_short_entry(
                 current_price=current_price,
                 invalidation_price=invalidation_price,
@@ -1670,8 +2146,12 @@ class PumpScannerService:
             "suggested_entry_price": round(float(suggested_entry_price), 6),
             "pump_score": pump_score,
             "effective_score": effective_score,
+            "trade_side": trade_side,
+            "source": source,
             "stage": stage,
-            "signal_label": str(sweep_ctx["signal_label"]),
+            "signal_label": signal_label,
+            "execution_mode": execution_mode,
+            "signal_type": signal_type,
             "setup_quality": (
                 "A"
                 if pump_score >= 78
@@ -1695,6 +2175,9 @@ class PumpScannerService:
             "atr_pct_15m": round(atr_pct_15m, 2),
             "upper_wick_pct_15m": round(upper_wick_pct_15m, 2),
             "ema_stack_gap_pct": round(stack_gap_pct, 2),
+            "ema13_gap_pct": round(ema13_gap_pct, 2),
+            "ema25_gap_pct": round(ema25_gap_pct, 2),
+            "ema99_gap_pct": round(ema99_gap_pct, 2),
             "above_ema_stack": above_ema_stack,
             "est_liq_target_price": round(float(target_price), 6),
             "est_liq_target_low": round(float(zone_low), 6),
@@ -1709,6 +2192,8 @@ class PumpScannerService:
             "entry_ready": bool(sweep_ctx["entry_ready"]),
             "rejection_score": round(float(sweep_ctx["rejection_score"]), 2),
             "sweep_distance_pct": sweep_ctx["sweep_distance_pct"],
+            "long_buildup_early_active": bool(long_ctx.get("long_buildup_early_active")),
+            "kill_short_active": trade_side == "SHORT" and bool(sweep_ctx["entry_ready"]),
             "notes": notes[:5],
             "ticker_quote_volume": round(_safe_float(ticker.get("quoteVolume")) or 0.0, 2),
             "ticker_change_pct_24h": round(_safe_float(ticker.get("percentage")) or 0.0, 2),
@@ -1749,7 +2234,10 @@ class PumpScannerService:
         cache_key = f"pump_scan:{safe_max_symbols if safe_max_symbols > 0 else 'all'}:{safe_min_score:.2f}:{safe_limit}"
         cached = self._get_cached(cache_key)
         if cached is not None:
-            return cached
+            payload = self._attach_runtime_status(cached)
+            if send_alerts:
+                self._process_scan_alerts(payload)
+            return payload
         stale_cached = self._get_cached(cache_key, allow_stale=True)
 
         items: list[dict[str, Any]] = []
@@ -1757,27 +2245,27 @@ class PumpScannerService:
             ranked_symbols = self._ranked_symbols(max_symbols=safe_max_symbols)
         except Exception as exc:
             if stale_cached is not None:
-                return stale_cached
-            return self._build_scan_payload(
+                return self._attach_runtime_status(stale_cached)
+            return self._attach_runtime_status(self._build_scan_payload(
                 scanned=0,
                 items=[],
                 min_score=safe_min_score,
                 max_symbols=safe_max_symbols,
                 limit=safe_limit,
                 note=f"Pump hunter tam thoi khong lay duoc du lieu dau vao: {exc}",
-            )
+            ))
 
         if not ranked_symbols:
             if stale_cached is not None:
-                return stale_cached
-            return self._build_scan_payload(
+                return self._attach_runtime_status(stale_cached)
+            return self._attach_runtime_status(self._build_scan_payload(
                 scanned=0,
                 items=[],
                 min_score=safe_min_score,
                 max_symbols=safe_max_symbols,
                 limit=safe_limit,
                 note="Pump hunter tam thoi khong lay duoc symbol/ticker tu Binance REST. Thu quet lai sau.",
-            )
+            ))
 
         for symbol, ticker in ranked_symbols:
             try:
@@ -1811,7 +2299,6 @@ class PumpScannerService:
             ),
         )
         if send_alerts:
-            for row in payload.get("items", []):
-                self._maybe_send_discord_alert(row)
-                self._maybe_execute_live_order(row)
+            self._process_scan_alerts(payload)
+        payload = self._attach_runtime_status(payload)
         return self._set_cache(cache_key, payload, ttl_sec=18)

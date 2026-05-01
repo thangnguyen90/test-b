@@ -165,6 +165,8 @@ class PaperTradingEngine:
         candles_bg_max_orders_per_cycle: int = 2,
         liquid_max_orders_per_cycle: int = 2,
         max_open_trades: int = 24,
+        pump_max_open_trades: int = 48,
+        ema99_bounce_max_open_trades: int = 24,
         max_open_shorts: int = 18,
         candles_bg_entry_type: str = "ML_CANDLES_BG",
         single_position_per_symbol_side: bool = True,
@@ -409,7 +411,10 @@ class PaperTradingEngine:
         self.candles_bg_max_orders_per_cycle = max(1, min(20, int(candles_bg_max_orders_per_cycle)))
         self.liquid_max_orders_per_cycle = max(0, min(20, int(liquid_max_orders_per_cycle)))
         self.max_open_trades = max(0, min(500, int(max_open_trades)))
+        self.pump_max_open_trades = max(0, min(500, int(pump_max_open_trades)))
+        self.ema99_bounce_max_open_trades = max(0, min(500, int(ema99_bounce_max_open_trades)))
         self.max_open_shorts = max(0, min(500, int(max_open_shorts)))
+        self.ema99_bounce_max_hold_minutes = max(15, int(settings.ema99_bounce_paper_max_hold_minutes))
         self.candles_bg_entry_type = str(candles_bg_entry_type or "ML_CANDLES_BG").strip().upper() or "ML_CANDLES_BG"
         self.single_position_per_symbol_side = bool(single_position_per_symbol_side)
         self.reentry_cooldown_minutes = max(0, int(reentry_cooldown_minutes))
@@ -1458,6 +1463,19 @@ class PaperTradingEngine:
                         mae_pct=next_mae,
                         mfe_pct=next_mfe,
                     )
+                if self._is_ema99_bounce_entry_type(entry_type):
+                    if self._handle_ema99_bounce_trade_exit(
+                        trade=trade,
+                        side=side,
+                        price=float(price),
+                        entry=entry,
+                        tp=tp,
+                        sl=sl,
+                        qty=qty,
+                        pnl=pnl,
+                    ):
+                        continue
+                    continue
                 move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
                 if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
                     lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
@@ -1831,7 +1849,7 @@ class PaperTradingEngine:
                 continue
             if status != "OPEN" or side != target_close_side or entry <= 0 or qty <= 0 or not symbol:
                 continue
-            if self._is_liquidation_style_entry_type(entry_type):
+            if self._is_liquidation_style_entry_type(entry_type) or self._is_ema99_bounce_entry_type(entry_type):
                 continue
 
             price = prices.get(symbol)
@@ -2727,6 +2745,7 @@ class PaperTradingEngine:
         self,
         *,
         side: str,
+        entry_type: str | None = None,
         open_trades_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
         open_rows: list[dict[str, Any]] | None = None,
     ) -> str | None:
@@ -2738,6 +2757,40 @@ class PaperTradingEngine:
                 except Exception:
                     rows = []
             open_trades_by_symbol = self._index_open_trades_by_symbol(rows)
+        else:
+            rows = open_rows
+
+        normalized_entry_type = str(entry_type or "").strip().upper()
+        if self._is_ema99_bounce_entry_type(normalized_entry_type):
+            if rows is None:
+                try:
+                    rows = self.repo.list_open_trades()
+                except Exception:
+                    rows = []
+            if self.ema99_bounce_max_open_trades > 0:
+                ema99_open = sum(
+                    1
+                    for row in (rows or [])
+                    if self._is_ema99_bounce_entry_type(str(row.get("entry_type") or ""))
+                )
+                if ema99_open >= self.ema99_bounce_max_open_trades:
+                    return f"Max open EMA99_BOUNCE trades reached ({self.ema99_bounce_max_open_trades})"
+            return None
+        if self._is_liquidation_style_entry_type(normalized_entry_type):
+            if rows is None:
+                try:
+                    rows = self.repo.list_open_trades()
+                except Exception:
+                    rows = []
+            if self.pump_max_open_trades > 0:
+                pump_open = sum(
+                    1
+                    for row in (rows or [])
+                    if self._is_liquidation_style_entry_type(str(row.get("entry_type") or ""))
+                )
+                if pump_open >= self.pump_max_open_trades:
+                    return f"Max open PUMP trades reached ({self.pump_max_open_trades})"
+            return None
 
         total_open, short_open = self._count_open_positions_by_side(open_trades_by_symbol)
         if self.max_open_trades > 0 and total_open >= self.max_open_trades:
@@ -2760,8 +2813,15 @@ class PaperTradingEngine:
         return normalized.startswith("PUMP_")
 
     @staticmethod
+    def _is_ema99_bounce_entry_type(entry_type: str | None) -> bool:
+        return str(entry_type or "").strip().upper() == "EMA99_BOUNCE"
+
+    @staticmethod
     def _skip_btc_guards_for_entry_type(entry_type: str | None) -> bool:
-        return PaperTradingEngine._is_liquidation_style_entry_type(entry_type)
+        return (
+            PaperTradingEngine._is_liquidation_style_entry_type(entry_type)
+            or PaperTradingEngine._is_ema99_bounce_entry_type(entry_type)
+        )
 
     def _apply_bullish_short_nonfollow_min_win_bonus(
         self,
@@ -5549,3 +5609,98 @@ class PaperTradingEngine:
 
         held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
         return held_seconds >= (self.max_hold_minutes * 60)
+
+    def _is_ema99_bounce_expired(self, opened_at: Any) -> bool:
+        if opened_at is None:
+            return False
+        if isinstance(opened_at, datetime):
+            dt = opened_at
+        else:
+            try:
+                dt = datetime.fromisoformat(str(opened_at))
+            except Exception:
+                return False
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=self._vn_tz)
+        held_seconds = (datetime.now(self._vn_tz) - dt).total_seconds()
+        return held_seconds >= (self.ema99_bounce_max_hold_minutes * 60)
+
+    def _handle_ema99_bounce_trade_exit(
+        self,
+        *,
+        trade: dict[str, Any],
+        side: str,
+        price: float,
+        entry: float,
+        tp: float,
+        sl: float,
+        qty: float,
+        pnl: float,
+    ) -> bool:
+        entry_type = str(trade.get("entry_type") or "LIMIT").strip().upper()
+        if not self._is_ema99_bounce_entry_type(entry_type):
+            return False
+
+        sl_hit = (side == "LONG" and price <= sl) or (side == "SHORT" and price >= sl)
+        if sl_hit:
+            result = 1 if pnl >= 0 else 0
+            commission = self._calc_fee(
+                entry=entry,
+                quantity=qty,
+                entry_type=entry_type,
+                fee_taker=self.fee_taker_pct,
+                fee_maker=self.fee_maker_pct,
+            )
+            net_pnl = pnl - commission
+            self._close_trade_with_context(
+                trade,
+                close_price=price,
+                pnl=net_pnl,
+                result=result,
+                close_reason="EMA99_SL",
+                commission_usdt=commission,
+            )
+            return True
+
+        tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
+        if tp_hit:
+            result = 1 if pnl >= 0 else 0
+            commission = self._calc_fee(
+                entry=entry,
+                quantity=qty,
+                entry_type=entry_type,
+                fee_taker=self.fee_taker_pct,
+                fee_maker=self.fee_maker_pct,
+            )
+            net_pnl = pnl - commission
+            self._close_trade_with_context(
+                trade,
+                close_price=price,
+                pnl=net_pnl,
+                result=result,
+                close_reason="EMA99_TP",
+                commission_usdt=commission,
+            )
+            return True
+
+        if not self._is_ema99_bounce_expired(trade.get("opened_at")):
+            return False
+
+        result = 1 if pnl >= 0 else 0
+        commission = self._calc_fee(
+            entry=entry,
+            quantity=qty,
+            entry_type=entry_type,
+            fee_taker=self.fee_taker_pct,
+            fee_maker=self.fee_maker_pct,
+        )
+        net_pnl = pnl - commission
+        self._close_trade_with_context(
+            trade,
+            close_price=price,
+            pnl=net_pnl,
+            result=result,
+            close_reason="EMA99_TIMEOUT",
+            commission_usdt=commission,
+        )
+        return True

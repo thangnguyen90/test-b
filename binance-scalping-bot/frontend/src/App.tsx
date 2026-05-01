@@ -220,6 +220,11 @@ type PaperTrade = {
   current_btc_trend?: 'LONG' | 'SHORT' | 'NEUTRAL' | string | null
   close_candle_pattern?: string | null
   btc_trend_at_close?: 'LONG' | 'SHORT' | 'NEUTRAL' | string | null
+  entry_source?: string | null
+  entry_stage?: string | null
+  entry_signal_label?: string | null
+  entry_signal_type?: string | null
+  entry_execution_mode?: string | null
 }
 
 type PaperTradeStats = {
@@ -526,7 +531,7 @@ type MlStatus = {
 }
 
 type SortDirection = 'asc' | 'desc'
-type ModelViewFilter = 'ALL' | 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
+type ModelViewFilter = 'ALL' | 'ML' | 'PUMP_ENTRY_TOUCH' | 'EMA99_BOUNCE' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'
 type MlCandlesVariant = 'ML_CANDLES_BG' | 'ML_CANDLES_TEST'
 type MlCandlesCompareTarget = 'ML' | 'PUMP_ENTRY_TOUCH' | MlCandlesVariant
 type MlCompareModelFilter = 'ALL' | MlCandlesCompareTarget
@@ -839,9 +844,10 @@ function formatSignalSource(source?: string | null): string {
   return normalized
 }
 
-function tradeModelSource(entryType?: string | null): 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST' {
+function tradeModelSource(entryType?: string | null): 'ML' | 'PUMP_ENTRY_TOUCH' | 'EMA99_BOUNCE' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST' {
   const normalized = (entryType ?? '').trim().toUpperCase()
   if (normalized === 'PUMP_ENTRY_TOUCH') return 'PUMP_ENTRY_TOUCH'
+  if (normalized === 'EMA99_BOUNCE') return 'EMA99_BOUNCE'
   if (normalized === 'ML_CANDLES_TEST' || normalized === 'ML_CANDLES_BG') return 'ML_CANDLES_TEST'
   if (normalized === 'ML_TEST') return 'ML_TEST'
   if (normalized === 'LIQ_EMA99') return 'LIQ_EMA99'
@@ -868,9 +874,10 @@ function formatMlCandlesCompareTargetLabel(target: MlCandlesCompareTarget): stri
   return 'ML'
 }
 
-function tradeModelBadge(source: 'ML' | 'PUMP_ENTRY_TOUCH' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
+function tradeModelBadge(source: 'ML' | 'PUMP_ENTRY_TOUCH' | 'EMA99_BOUNCE' | 'LIQ_EMA99' | 'ML_TEST' | 'ML_CANDLES_TEST'): 'neutral' | 'warn' | 'success' {
   if (source === 'LIQ_EMA99') return 'warn'
   if (source === 'PUMP_ENTRY_TOUCH') return 'warn'
+  if (source === 'EMA99_BOUNCE') return 'success'
   if (source === 'ML_TEST' || source === 'ML_CANDLES_TEST') return 'success'
   return 'neutral'
 }
@@ -1782,8 +1789,8 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     return sortedPaperHistory.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
   }, [sortedPaperHistory, paperModelFilter])
   const modelFilterCounts = useMemo(() => {
-    const open = { ML: 0, PUMP_ENTRY_TOUCH: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
-    const closed = { ML: 0, PUMP_ENTRY_TOUCH: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
+    const open = { ML: 0, PUMP_ENTRY_TOUCH: 0, EMA99_BOUNCE: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
+    const closed = { ML: 0, PUMP_ENTRY_TOUCH: 0, EMA99_BOUNCE: 0, LIQ_EMA99: 0, ML_TEST: 0, ML_CANDLES_TEST: 0 }
     for (const row of paperOpenTrades) {
       const model = tradeModelSource(row.entry_type)
       if (model in open) open[model] += 1
@@ -2031,6 +2038,26 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             DB {stat.wins}/{stat.losses} | {stat.win_rate_pct.toFixed(1)}%
           </span>
         ) : null}
+      </div>
+    )
+  }
+
+  function renderEntrySnapshotSummary(row: PaperTrade) {
+    const source = String(row.entry_source ?? '').trim()
+    const signalLabel = String(row.entry_signal_label ?? '').trim()
+    const stage = String(row.entry_stage ?? '').trim()
+    const signalType = String(row.entry_signal_type ?? '').trim()
+    const executionMode = String(row.entry_execution_mode ?? '').trim()
+    if (!source && !signalLabel && !stage && !signalType && !executionMode) return '-'
+    return (
+      <div className="signal-model-stack">
+        {source ? <span className="signal-model-meta">{source}</span> : null}
+        {(signalLabel || stage || executionMode) ? (
+          <span className="signal-model-meta">
+            {[signalLabel, stage, executionMode].filter(Boolean).join(' / ')}
+          </span>
+        ) : null}
+        {signalType ? <span className="signal-model-meta">{signalType}</span> : null}
       </div>
     )
   }
@@ -4242,6 +4269,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             </button>
             <button
               type="button"
+              className={`tab-btn ${paperModelFilter === 'EMA99_BOUNCE' ? 'tab-btn-active' : ''}`}
+              onClick={() => setPaperModelFilter('EMA99_BOUNCE')}
+            >
+              EMA99 ({modelFilterCounts.open.EMA99_BOUNCE}/{modelFilterCounts.closed.EMA99_BOUNCE})
+            </button>
+            <button
+              type="button"
               className={`tab-btn ${paperModelFilter === 'LIQ_EMA99' ? 'tab-btn-active' : ''}`}
               onClick={() => setPaperModelFilter('LIQ_EMA99')}
             >
@@ -4273,6 +4307,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
                     <th>Pattern / DB</th>
+                    <th>Entry Source</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
@@ -4321,6 +4356,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                         ) : '-'}
                       </td>
                       <td>{renderSignalPatternSummary(row.current_candle_pattern, row.current_btc_trend, 'BTC Trend Hien Tai:')}</td>
+                      <td>{renderEntrySnapshotSummary(row)}</td>
                       <td>
                         {typeof upnlUsdt === 'number' ? (
                           <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -4535,6 +4571,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
+                    <th>Entry Source</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
@@ -4577,6 +4614,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                             </span>
                           ) : '-'}
                         </td>
+                        <td>{renderEntrySnapshotSummary(row)}</td>
                         <td>
                           {typeof row.pnl === 'number' ? (
                             <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>

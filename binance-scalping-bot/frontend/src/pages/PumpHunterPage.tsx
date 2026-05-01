@@ -413,7 +413,7 @@ export default function PumpHunterPage() {
   const [detail, setDetail] = useState<PumpHunterSelectedView | null>(null)
   const [selectedSymbol, setSelectedSymbol] = useState<string>('')
   const [minScore, setMinScore] = useState(58)
-  const [maxSymbols, setMaxSymbols] = useState(35)
+  const [maxSymbols, setMaxSymbols] = useState(250)
   const [limit, setLimit] = useState(18)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [loadingScan, setLoadingScan] = useState(false)
