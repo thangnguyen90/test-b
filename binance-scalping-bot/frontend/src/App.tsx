@@ -4571,6 +4571,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('symbol')}>Symbol</button></th>
                     <th>BTC Follow</th>
+                    <th>Pattern / DB</th>
                     <th>Entry Source</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
@@ -4614,6 +4615,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                             </span>
                           ) : '-'}
                         </td>
+                        <td>{renderSignalPatternSummary(row.close_candle_pattern, row.btc_trend_at_close)}</td>
                         <td>{renderEntrySnapshotSummary(row)}</td>
                         <td>
                           {typeof row.pnl === 'number' ? (

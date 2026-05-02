@@ -171,16 +171,89 @@ class PumpScannerService:
             )
         return cls._compress_take_profit_if_needed(side=side, entry=entry, take_profit=take_profit)
 
-    @classmethod
-    def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
+    @staticmethod
+    def _resolve_trade_side(row: dict[str, Any]) -> str:
         explicit_side = str(row.get("trade_side") or "").upper()
         if explicit_side in {"LONG", "SHORT"}:
-            side = explicit_side
-        else:
-            signal_label = str(row.get("signal_label") or "").upper()
-            stage = str(row.get("stage") or "").upper()
-            is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
-            side = "SHORT" if is_post_sweep else "LONG"
+            return explicit_side
+        signal_label = str(row.get("signal_label") or "").upper()
+        stage = str(row.get("stage") or "").upper()
+        is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
+        return "SHORT" if is_post_sweep else "LONG"
+
+    @classmethod
+    def _paper_target_pnl_pct(cls, row: dict[str, Any], *, side: str, entry: float, take_profit: float, leverage: int) -> float:
+        stage = str(row.get("stage") or "").upper()
+        signal_label = str(row.get("signal_label") or "").upper()
+        execution_mode = str(row.get("execution_mode") or "").upper()
+        setup_quality = str(row.get("setup_quality") or "").upper()
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        volume_fast = float(row.get("volume_ratio_5m") or 0.0)
+        volume_slow = float(row.get("volume_ratio_15m") or 0.0)
+        rejection_score = float(row.get("rejection_score") or 0.0)
+
+        signal_tp_pct, _ = cls._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=entry,
+            leverage=leverage,
+        )
+
+        base_pct = 5.0
+        if stage == "PRE_PUMP":
+            base_pct = 5.5
+        elif stage == "BREAKOUT":
+            base_pct = 8.0
+        elif stage in {"POST_SWEEP", "SWEEPED"}:
+            base_pct = 7.0
+
+        if signal_label == "ARMING":
+            base_pct += 0.5
+        elif signal_label in {"ENTER", "SWEEPED"}:
+            base_pct += 1.0
+        elif signal_label == "WATCH":
+            base_pct -= 0.5
+
+        if execution_mode == "CONFIRMED":
+            base_pct += 1.5
+        elif execution_mode == "SCOUT":
+            base_pct += 0.5
+
+        if setup_quality == "A":
+            base_pct += 1.0
+        elif setup_quality == "B":
+            base_pct += 0.4
+
+        score_bonus = max(0.0, score - 58.0) * 0.16
+        volume_bonus = min(2.5, max(0.0, max(volume_fast, volume_slow) - 1.0) * 0.9)
+        rejection_bonus = min(1.5, max(0.0, rejection_score) * 0.08) if side == "SHORT" else 0.0
+
+        target_pct = base_pct + score_bonus + volume_bonus + rejection_bonus
+        target_pct = max(abs(float(signal_tp_pct)), target_pct)
+        return _clamp(target_pct, 4.0, 20.0)
+
+    @classmethod
+    def _normalize_paper_take_profit(cls, row: dict[str, Any], *, side: str, entry: float, take_profit: float, leverage: int) -> float:
+        if entry <= 0 or take_profit <= 0 or leverage <= 0:
+            return take_profit
+        target_pct = cls._paper_target_pnl_pct(
+            row,
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            leverage=leverage,
+        )
+        return cls._price_for_target_pnl_pct(
+            side=side,
+            entry=entry,
+            leverage=leverage,
+            pnl_pct=target_pct,
+        )
+
+    @classmethod
+    def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
+        side = cls._resolve_trade_side(row)
         mark_price = float(row.get("mark_price") or 0.0)
         invalidation_price = float(row.get("invalidation_price") or 0.0)
         zone_low = float(row.get("est_liq_target_low") or 0.0)
@@ -207,6 +280,36 @@ class PumpScannerService:
         )
         return side, entry, take_profit, stop_loss
 
+    @classmethod
+    def _derive_paper_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
+        side = cls._resolve_trade_side(row)
+        mark_price = float(row.get("mark_price") or 0.0)
+        invalidation_price = float(row.get("invalidation_price") or 0.0)
+        zone_low = float(row.get("est_liq_target_low") or 0.0)
+        zone_high = float(row.get("est_liq_target_high") or 0.0)
+        leverage = max(1, int(settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 5))
+        if side == "SHORT":
+            entry = cls._derive_post_sweep_short_entry(
+                current_price=mark_price,
+                invalidation_price=invalidation_price,
+                zone_low=zone_low,
+                zone_high=zone_high,
+            )
+            take_profit = invalidation_price
+            stop_loss = zone_high
+        else:
+            entry = mark_price
+            take_profit = float(row.get("est_liq_target_price") or 0.0)
+            stop_loss = invalidation_price
+        take_profit = cls._normalize_paper_take_profit(
+            row,
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            leverage=leverage,
+        )
+        return side, entry, take_profit, stop_loss
+
     @staticmethod
     def _post_webhook(request: Request) -> None:
         with urlopen(request, timeout=10) as response:
@@ -220,6 +323,25 @@ class PumpScannerService:
     @staticmethod
     def _format_signed_pct(value: float) -> str:
         return f"{float(value):+,.2f}%"
+
+    @staticmethod
+    def _entry_touched(side: str, market_price: float, entry: float) -> bool:
+        if entry <= 0 or market_price <= 0:
+            return False
+        buffer_pct = 0.0015
+        side_key = str(side or "").upper()
+        if side_key == "LONG":
+            return market_price <= (entry * (1.0 + buffer_pct))
+        if side_key == "SHORT":
+            return market_price >= (entry * (1.0 - buffer_pct))
+        return False
+
+    @staticmethod
+    def _should_market_fill_near_entry(side: str, market_price: float, entry: float) -> bool:
+        if str(side or "").upper() != "LONG" or entry <= 0 or market_price <= 0:
+            return False
+        distance_pct = abs(market_price - entry) / entry
+        return distance_pct <= 0.0015
 
     @staticmethod
     def _calc_trade_pct_metrics(*, side: str, entry: float, take_profit: float, stop_loss: float, leverage: int) -> tuple[float, float]:
@@ -245,7 +367,7 @@ class PumpScannerService:
         *,
         leverage: int,
     ) -> tuple[str, float, float, float, float]:
-        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        side, entry, take_profit, stop_loss = self._derive_paper_trade_plan(row)
         if entry <= 0 or take_profit <= 0:
             raise ValueError("Cannot place Binance order without a valid entry and take-profit")
         tp_pct, _ = self._calc_trade_pct_metrics(
@@ -382,9 +504,21 @@ class PumpScannerService:
         if not self._is_binance_symbol(symbol):
             logger.info("Pump hunter paper order skipped: symbol=%s reason=not_listed_on_binance", symbol)
             return
-        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        side, entry, take_profit, stop_loss = self._derive_paper_trade_plan(row)
         if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
             logger.info("Pump hunter paper order skipped: symbol=%s side=%s reason=invalid_trade_plan", symbol, side)
+            return
+        mark_price = float(row.get("mark_price") or 0.0)
+        touched = self._entry_touched(side=side, market_price=mark_price, entry=entry)
+        market_fill_now = self._should_market_fill_near_entry(side=side, market_price=mark_price, entry=entry)
+        if not touched:
+            logger.debug(
+                "Pump hunter paper order waiting for touch: symbol=%s side=%s mark=%.8f entry=%.8f",
+                symbol,
+                side,
+                mark_price,
+                entry,
+            )
             return
         order_key = f"pump_paper_order:{symbol}:{side}:touch"
         cooldown_sec = max(60, int(settings.pump_hunter_paper_signal_cooldown_sec))
@@ -402,7 +536,7 @@ class PumpScannerService:
                 effective_win_probability=probability,
                 repo_scope="main",
                 entry_type="PUMP_ENTRY_TOUCH",
-                entry_price=entry,
+                entry_price=None if market_fill_now else entry,
                 take_profit=take_profit,
                 stop_loss=stop_loss,
                 reference_win_symbol=symbol,
@@ -421,6 +555,7 @@ class PumpScannerService:
                     "setup_quality": str(row.get("setup_quality") or "").upper() or None,
                     "planned_entry_price": entry,
                     "market_entry_price": float(row.get("mark_price") or 0.0),
+                    "entry_execution_price_mode": "REALTIME_MARKET_NEAR_ENTRY" if market_fill_now else "TOUCH_FILL_AT_ENTRY",
                     "take_profit_price": take_profit,
                     "stop_loss_price": stop_loss,
                     "effective_score": score,

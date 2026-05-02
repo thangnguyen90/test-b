@@ -1562,24 +1562,28 @@ class PaperTradeAPI:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
         leverage = self._resolve_open_leverage(req.symbol, req.leverage, req.side)
-        atr_value = self._resolve_symbol_atr(req.symbol)
-        normalized_tp, normalized_sl = normalize_tp_sl(
-            side=req.side,
-            entry_price=float(market_price),
-            take_profit=req.take_profit,
-            stop_loss=req.stop_loss,
-            min_sl_pct=max(
-                settings.paper_trade_min_sl_pct,
-                calc_min_sl_pct_from_loss(min_sl_loss_pct=settings.paper_trade_min_sl_loss_pct),
-            ),
-            sl_extra_buffer_pct=settings.paper_trade_sl_extra_buffer_pct,
-            atr_value=atr_value,
-            sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
-            min_rr=settings.paper_trade_min_rr,
-            max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
-            leverage=leverage,
-            max_margin_loss_pct=settings.paper_trade_max_margin_loss_pct,
-        )
+        if entry_type == "PUMP_ENTRY_TOUCH":
+            normalized_tp = float(req.take_profit)
+            normalized_sl = float(req.stop_loss)
+        else:
+            atr_value = self._resolve_symbol_atr(req.symbol)
+            normalized_tp, normalized_sl = normalize_tp_sl(
+                side=req.side,
+                entry_price=float(market_price),
+                take_profit=req.take_profit,
+                stop_loss=req.stop_loss,
+                min_sl_pct=max(
+                    settings.paper_trade_min_sl_pct,
+                    calc_min_sl_pct_from_loss(min_sl_loss_pct=settings.paper_trade_min_sl_loss_pct),
+                ),
+                sl_extra_buffer_pct=settings.paper_trade_sl_extra_buffer_pct,
+                atr_value=atr_value,
+                sl_atr_multiplier=settings.paper_trade_sl_atr_multiplier,
+                min_rr=settings.paper_trade_min_rr,
+                max_tp_pct=max(0.0, settings.paper_trade_max_tp_pct) / 100.0,
+                leverage=leverage,
+                max_margin_loss_pct=settings.paper_trade_max_margin_loss_pct,
+            )
         risk_pct = calc_estimated_margin_ratio_pct(
             leverage=leverage,
             maint_margin_rate=settings.paper_trade_maint_margin_rate,
