@@ -53,14 +53,23 @@ def get_pump_hunter_scan(
     max_symbols: int = Query(default=250, ge=0, le=500),
     min_score: float = Query(default=58.0, ge=0.0, le=100.0),
     limit: int = Query(default=18, ge=1, le=100),
+    debug_near_miss: bool = Query(default=False),
+    near_miss_limit: int = Query(default=12, ge=1, le=50),
 ) -> dict:
-    payload = pump_service.scan(max_symbols=max_symbols, min_score=min_score, limit=limit)
+    payload = pump_service.scan(
+        max_symbols=max_symbols,
+        min_score=min_score,
+        limit=limit,
+        debug_near_miss=debug_near_miss,
+        near_miss_limit=near_miss_limit,
+    )
     return {
         "scanned": payload["scanned"],
         "count": payload["count"],
         "min_score": payload["min_score"],
         "max_symbols": payload["max_symbols"],
         "items": payload["items"],
+        "near_misses": payload.get("near_misses", []),
         "updated_at": payload["updated_at"],
         "note": payload["note"],
         "paper_trade_enabled": payload.get("paper_trade_enabled"),

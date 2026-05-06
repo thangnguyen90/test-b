@@ -77,6 +77,7 @@ class PaperTradingEngine:
         move_sl_lock_pnl_pct: float = 10.0,
         move_sl_scale_by_leverage: bool = True,
         move_sl_reference_leverage: float = 5.0,
+        pump_hunter_move_sl_to_entry_pnl_pct: float = 3.0,
         liquid_enabled: bool = False,
         liquid_min_win_probability: float = 0.68,
         liquid_top_vol_days: int = 1,
@@ -315,6 +316,7 @@ class PaperTradingEngine:
         self.move_sl_lock_pnl_pct = max(0.0, float(move_sl_lock_pnl_pct))
         self.move_sl_scale_by_leverage = bool(move_sl_scale_by_leverage)
         self.move_sl_reference_leverage = max(0.1, float(move_sl_reference_leverage))
+        self.pump_hunter_move_sl_to_entry_pnl_pct = max(0.0, float(pump_hunter_move_sl_to_entry_pnl_pct))
         self.liquid_enabled = liquid_enabled
         self.liquid_min_win_probability = max(0.0, liquid_min_win_probability)
         self.liquid_top_vol_days = max(1, min(7, int(liquid_top_vol_days)))
@@ -1476,20 +1478,28 @@ class PaperTradingEngine:
                     ):
                         continue
                     continue
-                move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
-                if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
-                    lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
-                    locked_sl = self._calc_locked_profit_sl(
-                        side=side,
-                        entry=entry,
-                        mark_price=price,
-                        leverage=int(trade["leverage"]),
-                        lock_pnl_pct=lock_pnl_pct,
-                    )
-                    if locked_sl is not None:
+                if self._is_liquidation_style_entry_type(entry_type):
+                    move_sl_trigger_pct = self._resolve_pump_hunter_move_sl_trigger_pnl_pct()
+                    if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
+                        locked_sl = entry
                         if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
                             self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
                             sl = locked_sl
+                else:
+                    move_sl_trigger_pct = self._resolve_move_sl_trigger_pnl_pct(leverage=int(trade["leverage"]))
+                    if not self.disable_sl and pnl_pct >= move_sl_trigger_pct:
+                        lock_pnl_pct = min(self.move_sl_lock_pnl_pct, move_sl_trigger_pct)
+                        locked_sl = self._calc_locked_profit_sl(
+                            side=side,
+                            entry=entry,
+                            mark_price=price,
+                            leverage=int(trade["leverage"]),
+                            lock_pnl_pct=lock_pnl_pct,
+                        )
+                        if locked_sl is not None:
+                            if (side == "LONG" and locked_sl > sl) or (side == "SHORT" and locked_sl < sl):
+                                self.repo.update_stop_loss(trade_id=int(trade["id"]), stop_loss=locked_sl)
+                                sl = locked_sl
 
                 # Close losing counter-trend positions on BTC 1H reversal (day-toggle capable).
                 if not skip_btc_guards:
@@ -1704,39 +1714,10 @@ class PaperTradingEngine:
                     continue
 
                 if pnl > 0:
-                    close_reason = 1
-                    commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                    net_pnl = pnl - commission
-                    self._close_trade_with_context(
-                        trade,
-                        close_price=price,
-                        pnl=net_pnl,
-                        result=close_reason,
-                        close_reason="TIMEOUT_PROFIT",
-                        commission_usdt=commission,
-                    )
                     continue
 
-                # If expired but still in loss: move TP to entry and wait for breakeven exit.
-                if abs(tp - entry) > max(1e-9, abs(entry) * 1e-8):
-                    self.repo.update_take_profit(trade_id=int(trade["id"]), take_profit=entry)
-
-                recovered_to_entry = (side == "LONG" and price >= entry) or (side == "SHORT" and price <= entry)
-                if not recovered_to_entry:
-                    continue
-
-                close_reason = 1 if pnl >= 0 else 0
-
-                commission = self._calc_fee(entry=entry, quantity=qty, entry_type=str(trade.get("entry_type") or "LIMIT"), fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
-                net_pnl = pnl - commission
-                self._close_trade_with_context(
-                    trade,
-                    close_price=price,
-                    pnl=net_pnl,
-                    result=close_reason,
-                    close_reason="TIMEOUT_BREAKEVEN",
-                    commission_usdt=commission,
-                )
+                # TIMEOUT_BREAKEVEN is temporarily disabled.
+                continue
             except Exception as exc:
                 trade_id = trade.get("id")
                 symbol = trade.get("symbol")
@@ -5389,6 +5370,9 @@ class PaperTradingEngine:
         if self.move_sl_scale_by_leverage and leverage > 0:
             trigger = trigger * (float(leverage) / self.move_sl_reference_leverage)
         return max(0.0, trigger)
+
+    def _resolve_pump_hunter_move_sl_trigger_pnl_pct(self) -> float:
+        return max(0.0, float(self.pump_hunter_move_sl_to_entry_pnl_pct))
 
     @staticmethod
     def _normalize_symbol_key(symbol: str) -> str:

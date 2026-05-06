@@ -95,6 +95,45 @@ class PumpScannerService:
         return str(symbol or "").strip() in self._binance_symbol_set()
 
     @staticmethod
+    def _normalize_symbol_key(symbol: str | None) -> str:
+        return str(symbol or "").upper().strip().replace(":USDT", "")
+
+    def _is_pump_hunter_major_symbol(self, symbol: str | None) -> bool:
+        symbol_key = self._normalize_symbol_key(symbol)
+        if not symbol_key:
+            return False
+        major_set = {self._normalize_symbol_key(item) for item in settings.paper_trade_major_symbols if item}
+        return symbol_key in major_set
+
+    @staticmethod
+    def _is_pump_hunter_tradfi_symbol(market: dict[str, Any] | None) -> bool:
+        info = market.get("info") if isinstance(market, dict) else {}
+        if not isinstance(info, dict):
+            return False
+        contract_type = str(info.get("contractType") or "").upper()
+        underlying_type = str(info.get("underlyingType") or "").upper()
+        underlying_subtypes = info.get("underlyingSubType") or []
+        if isinstance(underlying_subtypes, list):
+            subtype_text = " ".join(str(item or "").upper() for item in underlying_subtypes)
+        else:
+            subtype_text = str(underlying_subtypes or "").upper()
+        if contract_type == "TRADIFI_PERPETUAL":
+            return True
+        if underlying_type and underlying_type != "COIN":
+            return True
+        if "TRADFI" in subtype_text:
+            return True
+        return False
+
+    def _resolve_pump_hunter_leverage(self, side: str | None, symbol: str | None = None) -> int:
+        side_key = str(side or "").upper()
+        if side_key == "SHORT":
+            return max(1, int(settings.pump_hunter_short_leverage or settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 1))
+        if side_key == "LONG" and self._is_pump_hunter_major_symbol(symbol):
+            return max(1, int(settings.pump_hunter_major_long_leverage or settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 1))
+        return max(1, int(settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 1))
+
+    @staticmethod
     def _derive_post_sweep_short_entry(
         *,
         current_price: float,
@@ -151,6 +190,22 @@ class PumpScannerService:
             return max(0.0, entry * (1.0 - move_ratio))
         return entry * (1.0 + move_ratio)
 
+    @staticmethod
+    def _price_for_target_loss_pct(*, side: str, entry: float, leverage: int, loss_pct: float) -> float:
+        if entry <= 0 or leverage <= 0 or loss_pct <= 0:
+            return entry
+        move_ratio = loss_pct / (float(leverage) * 100.0)
+        if str(side or "").upper() == "SHORT":
+            return entry * (1.0 + move_ratio)
+        return max(0.0, entry * (1.0 - move_ratio))
+
+    @staticmethod
+    def _scale_pump_hunter_tp_pct(target_pct: float) -> float:
+        scale_factor = _clamp(float(settings.pump_hunter_tp_target_scale_factor), 0.05, 1.0)
+        max_pct = max(1.0, float(settings.pump_hunter_tp_target_max_pct))
+        scaled = max(0.0, float(target_pct)) * scale_factor
+        return _clamp(scaled, 2.0, max_pct)
+
     @classmethod
     def _normalize_live_take_profit(cls, *, side: str, entry: float, take_profit: float, leverage: int) -> float:
         if entry <= 0 or take_profit <= 0 or leverage <= 0:
@@ -162,6 +217,7 @@ class PumpScannerService:
             stop_loss=entry,
             leverage=leverage,
         )
+        tp_pct = cls._scale_pump_hunter_tp_pct(tp_pct)
         if tp_pct < float(settings.pump_hunter_live_low_expected_pnl_threshold_pct):
             take_profit = cls._price_for_target_pnl_pct(
                 side=side,
@@ -169,6 +225,20 @@ class PumpScannerService:
                 leverage=leverage,
                 pnl_pct=float(settings.pump_hunter_live_low_expected_pnl_target_tp_pct),
             )
+            tp_pct, _ = cls._calc_trade_pct_metrics(
+                side=side,
+                entry=entry,
+                take_profit=take_profit,
+                stop_loss=entry,
+                leverage=leverage,
+            )
+            tp_pct = cls._scale_pump_hunter_tp_pct(tp_pct)
+        take_profit = cls._price_for_target_pnl_pct(
+            side=side,
+            entry=entry,
+            leverage=leverage,
+            pnl_pct=tp_pct,
+        )
         return cls._compress_take_profit_if_needed(side=side, entry=entry, take_profit=take_profit)
 
     @staticmethod
@@ -176,9 +246,14 @@ class PumpScannerService:
         explicit_side = str(row.get("trade_side") or "").upper()
         if explicit_side in {"LONG", "SHORT"}:
             return explicit_side
+        source = str(row.get("source") or "").lower()
+        signal_type = str(row.get("signal_type") or "").upper()
         signal_label = str(row.get("signal_label") or "").upper()
         stage = str(row.get("stage") or "").upper()
         is_post_sweep = signal_label in {"ENTER", "SWEEPED"} or stage in {"POST_SWEEP", "SWEEPED"}
+        is_short_buildup = signal_type.startswith("SHORT_BUILDUP") or "short_buildup" in source or stage in {"PRE_DUMP", "BREAKDOWN"}
+        if is_short_buildup:
+            return "SHORT"
         return "SHORT" if is_post_sweep else "LONG"
 
     @classmethod
@@ -231,7 +306,7 @@ class PumpScannerService:
 
         target_pct = base_pct + score_bonus + volume_bonus + rejection_bonus
         target_pct = max(abs(float(signal_tp_pct)), target_pct)
-        return _clamp(target_pct, 4.0, 20.0)
+        return cls._scale_pump_hunter_tp_pct(target_pct)
 
     @classmethod
     def _normalize_paper_take_profit(cls, row: dict[str, Any], *, side: str, entry: float, take_profit: float, leverage: int) -> float:
@@ -252,14 +327,23 @@ class PumpScannerService:
         )
 
     @classmethod
-    def _derive_trade_plan(cls, row: dict[str, Any]) -> tuple[str, float, float, float]:
+    def _derive_trade_plan(
+        cls,
+        row: dict[str, Any],
+        *,
+        leverage: int | None = None,
+    ) -> tuple[str, float, float, float]:
         side = cls._resolve_trade_side(row)
         mark_price = float(row.get("mark_price") or 0.0)
         invalidation_price = float(row.get("invalidation_price") or 0.0)
+        short_invalidation_price = float(row.get("short_invalidation_price") or 0.0)
         zone_low = float(row.get("est_liq_target_low") or 0.0)
         zone_high = float(row.get("est_liq_target_high") or 0.0)
-        leverage = max(1, int(settings.pump_hunter_live_leverage or 5))
-        if side == "SHORT":
+        signal_type = str(row.get("signal_type") or "").upper()
+        stage = str(row.get("stage") or "").upper()
+        leverage = max(1, int(leverage or settings.pump_hunter_live_leverage or 5))
+        is_short_buildup = signal_type.startswith("SHORT_BUILDUP") or stage in {"PRE_DUMP", "BREAKDOWN"}
+        if side == "SHORT" and not is_short_buildup:
             entry = cls._derive_post_sweep_short_entry(
                 current_price=mark_price,
                 invalidation_price=invalidation_price,
@@ -268,15 +352,26 @@ class PumpScannerService:
             )
             take_profit = invalidation_price
             stop_loss = zone_high
+        elif side == "SHORT":
+            entry = mark_price
+            take_profit = float(row.get("est_liq_target_price") or 0.0)
+            stop_loss = short_invalidation_price or invalidation_price or zone_high
         else:
             entry = mark_price
             take_profit = float(row.get("est_liq_target_price") or 0.0)
             stop_loss = invalidation_price
-        take_profit = cls._normalize_live_take_profit(
+        stop_loss = cls._price_for_target_loss_pct(
+            side=side,
+            entry=entry,
+            leverage=leverage,
+            loss_pct=float(settings.pump_hunter_fixed_sl_pct),
+        )
+        # For live Binance orders, keep the signal-derived TP dynamic rather than
+        # forcing it into the low-expected fixed target path.
+        take_profit = cls._compress_take_profit_if_needed(
             side=side,
             entry=entry,
             take_profit=take_profit,
-            leverage=leverage,
         )
         return side, entry, take_profit, stop_loss
 
@@ -285,10 +380,14 @@ class PumpScannerService:
         side = cls._resolve_trade_side(row)
         mark_price = float(row.get("mark_price") or 0.0)
         invalidation_price = float(row.get("invalidation_price") or 0.0)
+        short_invalidation_price = float(row.get("short_invalidation_price") or 0.0)
         zone_low = float(row.get("est_liq_target_low") or 0.0)
         zone_high = float(row.get("est_liq_target_high") or 0.0)
+        signal_type = str(row.get("signal_type") or "").upper()
+        stage = str(row.get("stage") or "").upper()
         leverage = max(1, int(settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 5))
-        if side == "SHORT":
+        is_short_buildup = signal_type.startswith("SHORT_BUILDUP") or stage in {"PRE_DUMP", "BREAKDOWN"}
+        if side == "SHORT" and not is_short_buildup:
             entry = cls._derive_post_sweep_short_entry(
                 current_price=mark_price,
                 invalidation_price=invalidation_price,
@@ -297,10 +396,20 @@ class PumpScannerService:
             )
             take_profit = invalidation_price
             stop_loss = zone_high
+        elif side == "SHORT":
+            entry = mark_price
+            take_profit = float(row.get("est_liq_target_price") or 0.0)
+            stop_loss = short_invalidation_price or invalidation_price or zone_high
         else:
             entry = mark_price
             take_profit = float(row.get("est_liq_target_price") or 0.0)
             stop_loss = invalidation_price
+        stop_loss = cls._price_for_target_loss_pct(
+            side=side,
+            entry=entry,
+            leverage=leverage,
+            loss_pct=float(settings.pump_hunter_fixed_sl_pct),
+        )
         take_profit = cls._normalize_paper_take_profit(
             row,
             side=side,
@@ -529,6 +638,7 @@ class PumpScannerService:
             from app.models.paper_trades import PaperMarketOpenRequest
 
             probability = _clamp(score / 100.0, 0.0, 1.0)
+            leverage = self._resolve_pump_hunter_leverage(side, symbol)
             request = PaperMarketOpenRequest(
                 symbol=symbol,
                 side=side,
@@ -543,7 +653,7 @@ class PumpScannerService:
                 entry_point_score=score,
                 order_usdt=float(settings.paper_trade_order_usdt),
                 margin_usdt=float(settings.paper_trade_margin_usdt),
-                leverage=max(1, int(settings.pump_hunter_live_leverage or settings.paper_trade_leverage or 1)),
+                leverage=leverage,
                 entry_snapshot={
                     "source": str(row.get("source") or "pump_hunter_auto_paper"),
                     "symbol": symbol,
@@ -571,6 +681,7 @@ class PumpScannerService:
                     "kill_short_active": bool(row.get("kill_short_active")),
                     "swept_recently": bool(row.get("swept_recently")),
                     "entry_ready": bool(row.get("entry_ready")),
+                    "planned_leverage": leverage,
                 },
             )
             trade = asyncio.run(paper_trade_api.market_open(request))
@@ -617,10 +728,14 @@ class PumpScannerService:
         symbol = str(row.get("symbol") or "").strip()
         if not symbol:
             return
-        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        leverage = self._resolve_pump_hunter_leverage(
+            str(row.get("trade_side") or row.get("side") or ""),
+            str(row.get("symbol") or ""),
+        )
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row, leverage=leverage)
         notes = row.get("notes") or []
         notes_text = " | ".join(str(item) for item in notes[:3]) if isinstance(notes, list) and notes else "-"
-        leverage = 5
+        leverage = self._resolve_pump_hunter_leverage(side, symbol)
         margin_usdt = 20.0
         tp_pct, sl_pct = self._calc_trade_pct_metrics(
             side=side,
@@ -746,7 +861,7 @@ class PumpScannerService:
         margin_type: str,
     ) -> dict[str, Any]:
         symbol = str(row.get("symbol") or "").strip()
-        side, entry, _take_profit, _stop_loss = self._derive_trade_plan(row)
+        side, entry, _take_profit, _stop_loss = self._derive_trade_plan(row, leverage=leverage)
         use_market = self._should_use_market_entry(row, entry=entry)
         if use_market:
             result = self.trade_client.place_market_order(
@@ -787,7 +902,10 @@ class PumpScannerService:
         if symbol and not self._is_binance_symbol(symbol):
             logger.info("Pump hunter Binance order skipped: symbol=%s reason=not_listed_on_binance", symbol)
             return
-        leverage = max(1, int(settings.pump_hunter_live_leverage))
+        leverage = self._resolve_pump_hunter_leverage(
+            str(row.get("trade_side") or row.get("side") or ""),
+            str(row.get("symbol") or ""),
+        )
         try:
             side, entry, take_profit, stop_loss, tp_pct = self._validate_live_order_tp_requirement(
                 row,
@@ -854,7 +972,16 @@ class PumpScannerService:
         leverage: int | None = None,
         margin_type: str | None = None,
     ) -> dict[str, Any]:
-        effective_leverage = max(1, int(leverage or settings.pump_hunter_live_leverage))
+        effective_leverage = max(
+            1,
+            int(
+                leverage
+                or self._resolve_pump_hunter_leverage(
+                    str(row.get("trade_side") or row.get("side") or ""),
+                    str(row.get("symbol") or ""),
+                )
+            ),
+        )
         self._validate_live_order_tp_requirement(
             row,
             leverage=effective_leverage,
@@ -872,17 +999,24 @@ class PumpScannerService:
         return result
 
     def _attach_signal_to_order_result(self, result: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
-        side, entry, take_profit, stop_loss = self._derive_trade_plan(row)
+        leverage = int(result.get("leverage") or settings.pump_hunter_live_leverage or 1)
+        side, entry, take_profit, stop_loss = self._derive_trade_plan(row, leverage=leverage)
         symbol = str(row.get("symbol") or "").strip()
         score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
         entry_order_type = str(result.get("entry_order_type") or result.get("order_type") or "LIMIT").upper()
         signal_entry = float(result.get("entry_price") or entry or 0.0) if entry_order_type == "MARKET" else entry
-        leverage = int(result.get("leverage") or settings.pump_hunter_live_leverage or 1)
-        signal_tp = self._normalize_live_take_profit(
+        tp_pct, _ = self._calc_trade_pct_metrics(
+            side=side,
+            entry=entry,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            leverage=leverage,
+        )
+        signal_tp = self._price_for_target_pnl_pct(
             side=side,
             entry=signal_entry,
-            take_profit=take_profit,
             leverage=leverage,
+            pnl_pct=tp_pct,
         )
         result["signal"] = {
             "symbol": symbol,
@@ -1250,9 +1384,14 @@ class PumpScannerService:
         exchange = result.get("exchange_response") if isinstance(result.get("exchange_response"), dict) else {}
         order_id = exchange.get("orderId")
         client_order_id = exchange.get("clientOrderId") or exchange.get("origClientOrderId")
+        algo_id = result.get("algo_id") or exchange.get("algoId")
+        client_algo_id = result.get("client_algo_id") or exchange.get("clientAlgoId")
+        tracked[f"{prefix}_is_algo_order"] = bool(result.get("is_algo_order"))
         tracked[f"{prefix}_order_placed"] = True
         tracked[f"{prefix}_order_id"] = int(order_id) if order_id is not None and str(order_id).strip() else None
         tracked[f"{prefix}_client_order_id"] = str(client_order_id).strip() if client_order_id else None
+        tracked[f"{prefix}_algo_id"] = int(algo_id) if algo_id is not None and str(algo_id).strip() else None
+        tracked[f"{prefix}_client_algo_id"] = str(client_algo_id).strip() if client_algo_id else None
 
     @staticmethod
     def _calc_live_pnl_pct(*, side: str, entry_price: float, mark_price: float, leverage: int) -> float:
@@ -1267,6 +1406,8 @@ class PumpScannerService:
         if bool(settings.pump_hunter_live_order_test_mode):
             return False
         if not bool(tracked.get("entry_filled")):
+            return False
+        if bool(tracked.get("tp_order_placed")):
             return False
         timeout_hours = float(settings.pump_hunter_live_profit_timeout_hours)
         if timeout_hours <= 0:
@@ -1295,8 +1436,6 @@ class PumpScannerService:
         sl_status, _ = self._get_tracked_child_order_status(tracked, "sl")
         if tp_status == "FILLED" or sl_status == "FILLED":
             return False
-        if tp_status in {"NEW", "PARTIALLY_FILLED"}:
-            self._cancel_tracked_child_order(tracked, "tp")
         if sl_status in {"NEW", "PARTIALLY_FILLED"}:
             self._cancel_tracked_child_order(tracked, "sl")
         close_result = self.trade_client.place_close_position_market_order(
@@ -1307,7 +1446,7 @@ class PumpScannerService:
         )
         tracked["age_minutes"] = age_sec / 60.0
         logger.info(
-            "Pump hunter profitable timeout close: symbol=%s side=%s age_min=%.1f pnl_pct=%.2f mark=%s",
+            "Pump hunter profitable timeout close without TP order: symbol=%s side=%s age_min=%.1f pnl_pct=%.2f mark=%s",
             symbol,
             side,
             tracked["age_minutes"],
@@ -1351,8 +1490,17 @@ class PumpScannerService:
         symbol = str(tracked.get("symbol") or "").strip()
         order_id = tracked.get(f"{prefix}_order_id")
         client_order_id = tracked.get(f"{prefix}_client_order_id")
+        algo_id = tracked.get(f"{prefix}_algo_id")
+        client_algo_id = tracked.get(f"{prefix}_client_algo_id")
         if not symbol:
             return "", {}
+        if bool(tracked.get(f"{prefix}_is_algo_order")):
+            status_resp = self.trade_client.get_algo_order_status(
+                symbol=symbol,
+                algo_id=algo_id,
+                client_algo_id=client_algo_id,
+            )
+            return str(status_resp.get("algoStatus") or status_resp.get("status") or "").upper(), status_resp
         status_resp = self.trade_client.get_order_status(
             symbol=symbol,
             order_id=order_id,
@@ -1366,16 +1514,28 @@ class PumpScannerService:
         symbol = str(tracked.get("symbol") or "").strip()
         order_id = tracked.get(f"{prefix}_order_id")
         client_order_id = tracked.get(f"{prefix}_client_order_id")
+        algo_id = tracked.get(f"{prefix}_algo_id")
+        client_algo_id = tracked.get(f"{prefix}_client_algo_id")
         if not symbol:
             return False
-        self.trade_client.cancel_order(
-            symbol=symbol,
-            order_id=order_id,
-            client_order_id=client_order_id,
-        )
+        if bool(tracked.get(f"{prefix}_is_algo_order")):
+            self.trade_client.cancel_algo_order(
+                symbol=symbol,
+                algo_id=algo_id,
+                client_algo_id=client_algo_id,
+            )
+        else:
+            self.trade_client.cancel_order(
+                symbol=symbol,
+                order_id=order_id,
+                client_order_id=client_order_id,
+            )
         tracked[f"{prefix}_order_placed"] = False
         tracked[f"{prefix}_order_id"] = None
         tracked[f"{prefix}_client_order_id"] = None
+        tracked[f"{prefix}_algo_id"] = None
+        tracked[f"{prefix}_client_algo_id"] = None
+        tracked[f"{prefix}_is_algo_order"] = False
         return True
 
     def _maybe_place_tp_for_tracked_order(self, tracked: dict[str, Any], status_resp: dict[str, Any]) -> bool:
@@ -1752,12 +1912,20 @@ class PumpScannerService:
             & (frame["ema13"] > frame["ema25"])
             & (frame["ema25"] > frame["ema99"])
         )
+        frame["below_ema_stack"] = (
+            (frame["close"] < frame["ema13"])
+            & (frame["ema13"] < frame["ema25"])
+            & (frame["ema25"] < frame["ema99"])
+        )
 
         frame["prev_high_20"] = frame["high"].rolling(20, min_periods=5).max().shift(1)
         frame["prev_high_55"] = frame["high"].rolling(55, min_periods=10).max().shift(1)
         frame["prev_low_20"] = frame["low"].rolling(20, min_periods=5).min().shift(1)
+        frame["prev_low_55"] = frame["low"].rolling(55, min_periods=10).min().shift(1)
         frame["breakout_pct_20"] = ((frame["close"] - frame["prev_high_20"]) / frame["prev_high_20"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         frame["breakout_pct_55"] = ((frame["close"] - frame["prev_high_55"]) / frame["prev_high_55"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        frame["breakdown_pct_20"] = ((frame["prev_low_20"] - frame["close"]) / frame["prev_low_20"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        frame["breakdown_pct_55"] = ((frame["prev_low_55"] - frame["close"]) / frame["prev_low_55"]).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
         return frame
 
@@ -1793,6 +1961,43 @@ class PumpScannerService:
             target_score = 0.35
 
         band = max(atr * 0.45, target_price * 0.003)
+        zone_low = max(0.0, target_price - band)
+        zone_high = max(zone_low, target_price + band)
+        return target_price, zone_low, zone_high, target_score
+
+    @staticmethod
+    def _estimate_downside_target_zone(frame: pd.DataFrame, current_price: float, atr: float) -> tuple[float, float, float, float]:
+        if frame.empty or current_price <= 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        view = frame.tail(72).copy()
+        if view.empty:
+            return 0.0, 0.0, 0.0, 0.0
+
+        view["distance_pct"] = ((current_price - view["low"]) / current_price).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        view = view[view["distance_pct"] >= 0.003].copy()
+
+        if not view.empty:
+            rolling_low = view["low"].rolling(5, center=True, min_periods=1).min()
+            view["is_local_low"] = view["low"] <= (rolling_low + 1e-12)
+            view["recency_rank"] = np.linspace(0.72, 1.0, len(view))
+            close_range_pressure = (((1.0 - view["close_in_range"].clip(upper=1.0)).clip(lower=0.0) - 0.05) / (0.7 - 0.05)).clip(lower=0.0, upper=1.0)
+            view["target_score"] = (
+                (close_range_pressure * 2.0)
+                + (view["volume_z"].clip(lower=0.0) * 0.75)
+                + (view["body_pct"].clip(lower=0.0) * 0.45)
+                + (view["is_local_low"].astype(float) * 0.55)
+            ) * view["recency_rank"] / (1.0 + (view["distance_pct"] * 14.0))
+
+            best_idx = view["target_score"].idxmax()
+            target_price = float(view.loc[best_idx, "low"])
+            target_score = float(view.loc[best_idx, "target_score"])
+        else:
+            extension = max(atr * 1.6, current_price * 0.016)
+            target_price = max(0.0, current_price - extension)
+            target_score = 0.35
+
+        band = max(atr * 0.45, max(target_price, current_price * 0.003) * 0.003)
         zone_low = max(0.0, target_price - band)
         zone_high = max(zone_low, target_price + band)
         return target_price, zone_low, zone_high, target_score
@@ -2016,6 +2221,127 @@ class PumpScannerService:
             "reclaimed_ema13_25": reclaimed_ema13_25,
         }
 
+    @staticmethod
+    def _detect_short_buildup_signal(
+        *,
+        breakdown_pct_20: float,
+        breakdown_pct_55: float,
+        breakout_pct_20: float,
+        breakout_pct_55: float,
+        vol_ratio_15m: float,
+        vol_ratio_5m: float,
+        vol_z_15m: float,
+        momentum_pct_3: float,
+        momentum_pct_12: float,
+        expansion_ratio: float,
+        close_in_range: float,
+        body_pct: float,
+        range_pct_15m: float,
+        atr_pct_15m: float,
+        stack_gap_pct: float,
+        downside_distance_pct: float,
+        ema13_gap_pct: float,
+        ema25_gap_pct: float,
+        ema99_gap_pct: float,
+        below_ema_stack: bool,
+    ) -> dict[str, Any]:
+        inactive = {
+            "active": False,
+            "source": None,
+            "stage": None,
+            "signal_label": None,
+            "execution_mode": None,
+            "signal_type": None,
+            "score": 0.0,
+            "signal_bonus": 0.0,
+            "short_buildup_early_active": False,
+            "ma99_lost": False,
+            "ma99_pressing": False,
+            "lost_ema13_25": False,
+        }
+
+        lost_ema13_25 = ema13_gap_pct <= 0.22 and ema25_gap_pct <= 0.22
+        ma99_pressing = -0.85 <= ema99_gap_pct <= 0.85
+        ma99_lost = ema99_gap_pct <= 0.12
+        holding_breakdown_zone = lost_ema13_25 and momentum_pct_12 <= 1.5 and close_in_range <= 0.62
+        volume_flowing = vol_ratio_15m >= 0.9 or vol_ratio_5m >= 1.1 or vol_z_15m >= -0.1
+        breakdown_pressure = (
+            breakout_pct_20 <= 0.8
+            and breakout_pct_55 <= 2.5
+            and momentum_pct_12 <= 1.5
+            and close_in_range <= 0.58
+            and range_pct_15m <= 6.5
+            and atr_pct_15m <= 3.8
+            and downside_distance_pct >= 0.35
+        )
+        pre_breakdown_ready = holding_breakdown_zone and ma99_pressing and volume_flowing and breakdown_pressure
+        breakdown_confirmed = (
+            pre_breakdown_ready
+            and ma99_lost
+            and breakdown_pct_20 >= 0.15
+            and close_in_range <= 0.45
+            and body_pct >= 0.1
+            and (vol_ratio_15m >= 1.0 or vol_ratio_5m >= 1.35 or momentum_pct_3 <= -0.35)
+        )
+
+        if not pre_breakdown_ready and not breakdown_confirmed:
+            return inactive
+
+        ma99_pressure_score = max(0.0, 1.0 - (min(abs(ema99_gap_pct), 1.4) / 1.4))
+        short_score = (
+            50.0
+            + (_norm(vol_ratio_15m, 0.8, 3.2) * 10.0)
+            + (_norm(vol_ratio_5m, 1.0, 3.2) * 8.0)
+            + (_norm(vol_z_15m, -0.2, 3.8) * 4.0)
+            + (_norm(breakdown_pct_20, 0.0, 2.2) * 8.0)
+            + (_norm(breakdown_pct_55, 0.0, 5.0) * 4.0)
+            + (_norm(max(-momentum_pct_3, 0.0), 0.0, 4.5) * 6.0)
+            + (_norm(max(-momentum_pct_12, 0.0), 0.0, 8.0) * 6.0)
+            + (_norm((1.0 - close_in_range), 0.02, 0.62) * 7.0)
+            + (_norm(body_pct, 0.08, 2.8) * 3.0)
+            + (ma99_pressure_score * 6.0)
+            + (_norm(max(-stack_gap_pct, 0.0), 0.0, 2.2) * 3.0)
+        )
+        if lost_ema13_25:
+            short_score += 5.0
+        if below_ema_stack:
+            short_score += 3.0
+        if breakdown_confirmed:
+            short_score += 6.0
+        short_score = round(_clamp(short_score, 0.0, 100.0), 2)
+
+        if breakdown_confirmed:
+            return {
+                "active": True,
+                "source": "pump_hunter_short_buildup_test",
+                "stage": "BREAKDOWN",
+                "signal_label": "ARMING",
+                "execution_mode": "CONFIRMED",
+                "signal_type": "SHORT_BUILDUP_BREAKDOWN",
+                "score": short_score,
+                "signal_bonus": max(0.0, round(short_score - 58.0, 2)),
+                "short_buildup_early_active": False,
+                "ma99_lost": ma99_lost,
+                "ma99_pressing": ma99_pressing,
+                "lost_ema13_25": lost_ema13_25,
+            }
+
+        signal_label = "ARMING" if (vol_ratio_5m >= 1.35 or vol_ratio_15m >= 1.1 or vol_z_15m >= 0.15 or momentum_pct_3 <= -0.35) else "WATCH"
+        return {
+            "active": True,
+            "source": "pump_hunter_short_buildup_pre_breakdown_test",
+            "stage": "PRE_DUMP",
+            "signal_label": signal_label,
+            "execution_mode": "SCOUT",
+            "signal_type": "SHORT_BUILDUP_PRE_BREAKDOWN",
+            "score": short_score,
+            "signal_bonus": max(0.0, round(short_score - 54.0, 2)),
+            "short_buildup_early_active": signal_label == "WATCH" or ema99_gap_pct > 0,
+            "ma99_lost": ma99_lost,
+            "ma99_pressing": ma99_pressing,
+            "lost_ema13_25": lost_ema13_25,
+        }
+
     def _ranked_symbols(self, max_symbols: int) -> list[tuple[str, dict[str, Any]]]:
         cache_key = f"ranked_symbols:{max_symbols if max_symbols > 0 else 'all'}"
         cached = self._get_cached(cache_key)
@@ -2038,13 +2364,19 @@ class PumpScannerService:
                 continue
             if market.get("settle") != "USDT":
                 continue
+            if settings.pump_hunter_exclude_tradfi_symbols and self._is_pump_hunter_tradfi_symbol(market):
+                continue
             ticker = tickers.get(symbol) if isinstance(tickers, dict) else None
             if not isinstance(ticker, dict):
                 continue
             quote_volume = _safe_float(ticker.get("quoteVolume")) or 0.0
             change_pct = abs(_safe_float(ticker.get("percentage")) or 0.0)
             count = _safe_float(ticker.get("count")) or 0.0
-            activity = quote_volume * (1.0 + min(change_pct, 35.0) / 18.0) + (count * 80.0)
+            # Use compressed activity metrics so large-cap names do not dominate
+            # purely because of absolute quote volume.
+            volume_score = float(np.log1p(max(quote_volume, 0.0)))
+            count_score = float(np.log1p(max(count, 0.0)))
+            activity = (volume_score * (1.0 + min(change_pct, 35.0) / 22.0)) + (count_score * 2.0)
             ranked.append((symbol, activity, ticker))
 
         ranked.sort(key=lambda item: item[1], reverse=True)
@@ -2057,6 +2389,7 @@ class PumpScannerService:
         *,
         scanned: int,
         items: list[dict[str, Any]],
+        near_misses: list[dict[str, Any]] | None = None,
         min_score: float,
         max_symbols: int,
         limit: int,
@@ -2069,8 +2402,125 @@ class PumpScannerService:
             "min_score": min_score,
             "max_symbols": max_symbols,
             "items": items[:safe_limit],
+            "near_misses": near_misses[:safe_limit] if isinstance(near_misses, list) else [],
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "note": note,
+        }
+
+    @staticmethod
+    def _infer_near_miss_candidate_side(row: dict[str, Any]) -> str:
+        long_score = float(row.get("long_signal_score") or 0.0)
+        short_score = float(row.get("short_signal_score") or 0.0)
+        sweep_score = float(row.get("short_sweep_score") or 0.0)
+        if max(short_score, sweep_score) > max(long_score, 0.0):
+            return "SHORT"
+        return "LONG"
+
+    @classmethod
+    def _build_near_miss_payload(cls, row: dict[str, Any], *, min_score: float) -> dict[str, Any]:
+        score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+        score_gap = max(0.0, float(min_score) - score)
+        mark_price = float(row.get("mark_price") or 0.0)
+        target_price = float(row.get("est_liq_target_price") or 0.0)
+        candidate_side = cls._infer_near_miss_candidate_side(row)
+        source = str(row.get("source") or "").strip()
+        long_active = bool(row.get("long_signal_active"))
+        short_active = bool(row.get("short_signal_active"))
+        sweep_active = bool(row.get("swept_recently"))
+        sweep_ready = bool(row.get("entry_ready"))
+        vol_ratio_15m = float(row.get("volume_ratio_15m") or 0.0)
+        vol_ratio_5m = float(row.get("volume_ratio_5m") or 0.0)
+        ema13_gap_pct = float(row.get("ema13_gap_pct") or 0.0)
+        ema25_gap_pct = float(row.get("ema25_gap_pct") or 0.0)
+        ema99_gap_pct = float(row.get("ema99_gap_pct") or 0.0)
+        breakout_pct_20 = float(row.get("breakout_pct_20") or 0.0)
+        breakdown_pct_20 = float(row.get("breakdown_pct_20") or 0.0)
+        momentum_pct_3 = float(row.get("momentum_pct_3") or 0.0)
+        momentum_pct_12 = float(row.get("momentum_pct_12") or 0.0)
+        close_in_range = float(row.get("close_in_range") or 0.0)
+        rr_ratio = float(row.get("rr_ratio") or 0.0)
+
+        reasons: list[str] = []
+        if score_gap > 0:
+            reasons.append(f"Thieu {score_gap:.2f} diem de qua nguong {min_score:.0f}")
+        if rr_ratio < 1.0:
+            reasons.append(f"RR thap ({rr_ratio:.2f})")
+
+        if not long_active and not short_active and not sweep_active:
+            if vol_ratio_15m < 0.9 and vol_ratio_5m < 1.1:
+                reasons.append("Volume chua mo")
+            if abs(ema99_gap_pct) > 0.85:
+                reasons.append(f"Gia con xa EMA99 ({ema99_gap_pct:+.2f}%)")
+            if breakout_pct_20 < -0.8 and breakdown_pct_20 < 0.15:
+                reasons.append("Chua co breakout/breakdown pressure")
+            if abs(momentum_pct_12) < 0.4 and 0.42 <= close_in_range <= 0.58:
+                reasons.append("Momentum/close con lung chung")
+        elif candidate_side == "LONG":
+            if not long_active:
+                reasons.append("Long buildup chua active")
+            if target_price <= 0 or mark_price <= 0 or target_price <= mark_price:
+                reasons.append("Target long khong nam tren gia hien tai")
+            if vol_ratio_15m < 1.0 and vol_ratio_5m < 1.35:
+                reasons.append("Volume confirm long con yeu")
+            if ema13_gap_pct < -0.22 or ema25_gap_pct < -0.22:
+                reasons.append("Chua reclaim EMA13/EMA25")
+            if ema99_gap_pct < -0.85:
+                reasons.append("Con xa duoi EMA99")
+            if breakout_pct_20 < -0.15 and momentum_pct_3 < 0.45:
+                reasons.append("Breakout confirm chua du")
+        else:
+            if not short_active and not sweep_active:
+                reasons.append("Short setup chua active")
+            if short_active and (target_price <= 0 or mark_price <= 0 or target_price >= mark_price):
+                reasons.append("Target short khong nam duoi gia hien tai")
+            if vol_ratio_15m < 1.0 and vol_ratio_5m < 1.35:
+                reasons.append("Volume confirm short con yeu")
+            if ema13_gap_pct > 0.22 or ema25_gap_pct > 0.22:
+                reasons.append("Chua mat EMA13/EMA25")
+            if ema99_gap_pct > 0.85:
+                reasons.append("Con xa tren EMA99")
+            if short_active and breakdown_pct_20 < 0.15 and momentum_pct_3 > -0.35:
+                reasons.append("Breakdown confirm chua du")
+            if sweep_active and not sweep_ready:
+                reasons.append("Da sweep nhung chua reject du de vao short")
+
+        if not reasons:
+            reasons.append("Dang duoi nguong score tong")
+
+        if candidate_side == "LONG":
+            candidate_source = (
+                source
+                if "long_buildup" in source
+                else "pump_hunter_long_buildup_pre_breakout_test"
+            )
+        elif sweep_active and float(row.get("short_sweep_score") or 0.0) >= float(row.get("short_signal_score") or 0.0):
+            candidate_source = "pump_hunter_post_sweep_test"
+        else:
+            candidate_source = (
+                source
+                if "short_buildup" in source
+                else "pump_hunter_short_buildup_pre_breakdown_test"
+            )
+
+        return {
+            "symbol": str(row.get("symbol") or "").strip(),
+            "candidate_side": candidate_side,
+            "candidate_source": candidate_source,
+            "candidate_stage": str(row.get("stage") or "").upper() or None,
+            "candidate_label": str(row.get("signal_label") or "").upper() or None,
+            "score": round(score, 2),
+            "score_gap": round(score_gap, 2),
+            "mark_price": round(mark_price, 6) if mark_price > 0 else None,
+            "target_price": round(target_price, 6) if target_price > 0 else None,
+            "volume_ratio_15m": round(vol_ratio_15m, 2),
+            "volume_ratio_5m": round(vol_ratio_5m, 2),
+            "ema99_gap_pct": round(ema99_gap_pct, 2),
+            "breakout_pct_20": round(breakout_pct_20, 2),
+            "breakdown_pct_20": round(breakdown_pct_20, 2),
+            "momentum_pct_3": round(momentum_pct_3, 2),
+            "momentum_pct_12": round(momentum_pct_12, 2),
+            "rr_ratio": round(rr_ratio, 2),
+            "reasons": reasons[:4],
         }
 
     def _process_scan_alerts(self, payload: dict[str, Any]) -> None:
@@ -2101,7 +2551,13 @@ class PumpScannerService:
 
         atr = max(float(latest_15m.get("atr14") or 0.0), current_price * 0.003)
         target_price, zone_low, zone_high, zone_score = self._estimate_target_zone(frame_15m, current_price=current_price, atr=atr)
+        short_target_price, short_zone_low, short_zone_high, short_zone_score = self._estimate_downside_target_zone(
+            frame_15m,
+            current_price=current_price,
+            atr=atr,
+        )
         distance_pct = ((target_price - current_price) / current_price) * 100 if current_price > 0 and target_price > 0 else 0.0
+        short_distance_pct = ((current_price - short_target_price) / current_price) * 100 if current_price > 0 and short_target_price > 0 else 0.0
 
         invalidation_price = min(
             float(latest_15m.get("ema25") or current_price),
@@ -2109,16 +2565,27 @@ class PumpScannerService:
         )
         if invalidation_price <= 0:
             invalidation_price = max(current_price - atr, current_price * 0.985)
+        short_invalidation_price = max(
+            float(latest_15m.get("ema25") or current_price),
+            float(latest_15m.get("prev_high_20") or current_price),
+        )
+        if short_invalidation_price <= 0:
+            short_invalidation_price = max(current_price + atr, current_price * 1.015)
 
         risk_pct = max(0.0, ((current_price - invalidation_price) / current_price) * 100) if current_price > 0 else 0.0
         reward_pct = max(0.0, distance_pct)
         rr_ratio = (reward_pct / risk_pct) if risk_pct > 0 else 0.0
+        short_risk_pct = max(0.0, ((short_invalidation_price - current_price) / current_price) * 100) if current_price > 0 else 0.0
+        short_reward_pct = max(0.0, short_distance_pct)
+        short_rr_ratio = (short_reward_pct / short_risk_pct) if short_risk_pct > 0 else 0.0
 
         vol_ratio_15m = float(latest_15m.get("volume_ratio") or 0.0)
         vol_ratio_5m = float(latest_5m.get("volume_ratio") or 0.0)
         vol_z_15m = float(latest_15m.get("volume_z") or 0.0)
         breakout_pct_20 = float(latest_15m.get("breakout_pct_20") or 0.0) * 100.0
         breakout_pct_55 = float(latest_15m.get("breakout_pct_55") or 0.0) * 100.0
+        breakdown_pct_20 = float(latest_15m.get("breakdown_pct_20") or 0.0) * 100.0
+        breakdown_pct_55 = float(latest_15m.get("breakdown_pct_55") or 0.0) * 100.0
         momentum_pct_3 = float(latest_15m.get("ret_3") or 0.0) * 100.0
         momentum_pct_12 = float(latest_15m.get("ret_12") or 0.0) * 100.0
         expansion_ratio = float(latest_15m.get("expansion_ratio") or 1.0)
@@ -2132,6 +2599,7 @@ class PumpScannerService:
         ema25_gap_pct = (((current_price - float(latest_15m.get("ema25") or current_price)) / float(latest_15m.get("ema25") or current_price)) * 100.0) if float(latest_15m.get("ema25") or 0.0) > 0 else 0.0
         ema99_gap_pct = (((current_price - float(latest_15m.get("ema99") or current_price)) / float(latest_15m.get("ema99") or current_price)) * 100.0) if float(latest_15m.get("ema99") or 0.0) > 0 else 0.0
         above_ema_stack = bool(latest_15m.get("above_ema_stack"))
+        below_ema_stack = bool(latest_15m.get("below_ema_stack"))
 
         pump_score = (
             (_norm(vol_ratio_15m, 1.1, 3.8) * 26.0)
@@ -2149,6 +2617,8 @@ class PumpScannerService:
 
         if above_ema_stack:
             pump_score += 6.0
+        if below_ema_stack:
+            pump_score += 4.0
         if distance_pct < 0.7:
             pump_score -= 5.5
         if distance_pct > 12.0:
@@ -2185,6 +2655,28 @@ class PumpScannerService:
             ema99_gap_pct=ema99_gap_pct,
             above_ema_stack=above_ema_stack,
         )
+        short_ctx = self._detect_short_buildup_signal(
+            breakdown_pct_20=breakdown_pct_20,
+            breakdown_pct_55=breakdown_pct_55,
+            breakout_pct_20=breakout_pct_20,
+            breakout_pct_55=breakout_pct_55,
+            vol_ratio_15m=vol_ratio_15m,
+            vol_ratio_5m=vol_ratio_5m,
+            vol_z_15m=vol_z_15m,
+            momentum_pct_3=momentum_pct_3,
+            momentum_pct_12=momentum_pct_12,
+            expansion_ratio=expansion_ratio,
+            close_in_range=close_in_range,
+            body_pct=body_pct,
+            range_pct_15m=range_pct_15m,
+            atr_pct_15m=atr_pct_15m,
+            stack_gap_pct=stack_gap_pct,
+            downside_distance_pct=short_distance_pct,
+            ema13_gap_pct=ema13_gap_pct,
+            ema25_gap_pct=ema25_gap_pct,
+            ema99_gap_pct=ema99_gap_pct,
+            below_ema_stack=below_ema_stack,
+        )
         if bool(long_ctx.get("active")):
             target_price = max(float(target_price), current_price * 1.01)
             distance_pct = ((target_price - current_price) / current_price) * 100 if current_price > 0 else distance_pct
@@ -2199,13 +2691,14 @@ class PumpScannerService:
         signal_type = str(long_ctx.get("signal_type") or "")
         selected_bonus = float(long_ctx.get("signal_bonus") or 0.0)
 
-        short_effective_score = round(_clamp(pump_score + float(sweep_ctx["signal_bonus"]), 0.0, 100.0), 2)
+        short_sweep_effective_score = round(_clamp(pump_score + float(sweep_ctx["signal_bonus"]), 0.0, 100.0), 2)
+        short_buildup_effective_score = round(float(short_ctx.get("score") or 0.0), 2)
         long_effective_score = round(float(long_ctx.get("score") or 0.0), 2)
 
-        if bool(sweep_ctx["entry_ready"]) and not (
-            bool(long_ctx.get("active"))
-            and long_effective_score >= short_effective_score
-        ):
+        prefer_long = bool(long_ctx.get("active")) and long_effective_score >= max(short_sweep_effective_score, short_buildup_effective_score)
+        prefer_short_buildup = bool(short_ctx.get("active")) and short_buildup_effective_score > max(long_effective_score, short_sweep_effective_score)
+
+        if bool(sweep_ctx["entry_ready"]) and not prefer_long and not prefer_short_buildup:
             trade_side = "SHORT"
             source = "pump_hunter_post_sweep_test"
             stage = "POST_SWEEP"
@@ -2213,6 +2706,22 @@ class PumpScannerService:
             execution_mode = "WAIT_TOUCH"
             signal_type = "POST_SWEEP_SHORT"
             selected_bonus = float(sweep_ctx["signal_bonus"])
+        elif prefer_short_buildup:
+            trade_side = "SHORT"
+            source = str(short_ctx.get("source") or "pump_hunter_short_buildup_test")
+            stage = str(short_ctx.get("stage") or "PRE_DUMP")
+            signal_label = str(short_ctx.get("signal_label") or "WATCH")
+            execution_mode = str(short_ctx.get("execution_mode") or "")
+            signal_type = str(short_ctx.get("signal_type") or "")
+            selected_bonus = float(short_ctx.get("signal_bonus") or 0.0)
+            target_price = short_target_price
+            zone_low = short_zone_low
+            zone_high = short_zone_high
+            zone_score = short_zone_score
+            distance_pct = short_distance_pct
+            risk_pct = short_risk_pct
+            reward_pct = short_reward_pct
+            rr_ratio = short_rr_ratio
         elif bool(long_ctx.get("active")):
             trade_side = "LONG"
             source = str(long_ctx.get("source") or "pump_hunter_long_buildup_test")
@@ -2221,6 +2730,22 @@ class PumpScannerService:
             execution_mode = str(long_ctx.get("execution_mode") or "")
             signal_type = str(long_ctx.get("signal_type") or "")
             selected_bonus = float(long_ctx.get("signal_bonus") or 0.0)
+        elif bool(short_ctx.get("active")):
+            trade_side = "SHORT"
+            source = str(short_ctx.get("source") or "pump_hunter_short_buildup_pre_breakdown_test")
+            stage = str(short_ctx.get("stage") or "PRE_DUMP")
+            signal_label = str(short_ctx.get("signal_label") or "WATCH")
+            execution_mode = str(short_ctx.get("execution_mode") or "")
+            signal_type = str(short_ctx.get("signal_type") or "")
+            selected_bonus = float(short_ctx.get("signal_bonus") or 0.0)
+            target_price = short_target_price
+            zone_low = short_zone_low
+            zone_high = short_zone_high
+            zone_score = short_zone_score
+            distance_pct = short_distance_pct
+            risk_pct = short_risk_pct
+            reward_pct = short_reward_pct
+            rr_ratio = short_rr_ratio
         elif bool(sweep_ctx["swept_recently"]):
             trade_side = "SHORT"
             source = "pump_hunter_post_sweep_test"
@@ -2236,6 +2761,8 @@ class PumpScannerService:
         effective_score = round(_clamp(pump_score + selected_bonus, 0.0, 100.0), 2)
         if trade_side == "LONG" and bool(long_ctx.get("active")):
             effective_score = long_effective_score
+        elif trade_side == "SHORT" and signal_type.startswith("SHORT_BUILDUP") and bool(short_ctx.get("active")):
+            effective_score = short_buildup_effective_score
 
         notes: list[str] = []
         if vol_ratio_15m >= 2.0:
@@ -2244,8 +2771,12 @@ class PumpScannerService:
             notes.append(f"5m acceleration x{vol_ratio_5m:.2f}")
         if breakout_pct_20 > 0:
             notes.append(f"Breakout {breakout_pct_20:.2f}% above 20-candle high")
+        if breakdown_pct_20 > 0:
+            notes.append(f"Breakdown {breakdown_pct_20:.2f}% below 20-candle low")
         if above_ema_stack:
             notes.append("EMA13 > EMA25 > EMA99")
+        if below_ema_stack:
+            notes.append("EMA13 < EMA25 < EMA99")
         if zone_score >= 0.9:
             notes.append("Overhead wick cluster suggests short-liq sweep")
         if rr_ratio >= 1.5:
@@ -2261,13 +2792,24 @@ class PumpScannerService:
                 notes.append("MA99 reclaimed")
             elif bool(long_ctx.get("ma99_pressing")):
                 notes.append(f"Pressing MA99 ({abs(ema99_gap_pct):.2f}% away)")
+        elif trade_side == "SHORT" and source == "pump_hunter_short_buildup_test":
+            notes.append("Short buildup breakdown duoc xac nhan")
+            notes.append("Lost EMA13/EMA25")
+            notes.append("MA99 lost")
+        elif trade_side == "SHORT" and source == "pump_hunter_short_buildup_pre_breakdown_test":
+            notes.append("Short buildup pre-breakdown dang bi nen xuong")
+            notes.append("Lost EMA13/EMA25")
+            if bool(short_ctx.get("ma99_lost")):
+                notes.append("MA99 lost")
+            elif bool(short_ctx.get("ma99_pressing")):
+                notes.append(f"Pressing MA99 ({abs(ema99_gap_pct):.2f}% away)")
         if trade_side == "SHORT" and bool(sweep_ctx["entry_ready"]):
             notes.append("Da quet len kill zone va bi tu choi xuong")
         elif trade_side == "SHORT" and bool(sweep_ctx["swept_recently"]):
             notes.append("Gia vua quet len vung thanh ly gan day")
 
         suggested_entry_price = current_price
-        if trade_side == "SHORT":
+        if trade_side == "SHORT" and signal_type == "POST_SWEEP_SHORT":
             suggested_entry_price = self._derive_post_sweep_short_entry(
                 current_price=current_price,
                 invalidation_price=invalidation_price,
@@ -2281,6 +2823,9 @@ class PumpScannerService:
             "suggested_entry_price": round(float(suggested_entry_price), 6),
             "pump_score": pump_score,
             "effective_score": effective_score,
+            "long_signal_score": long_effective_score,
+            "short_signal_score": short_buildup_effective_score,
+            "short_sweep_score": short_sweep_effective_score,
             "trade_side": trade_side,
             "source": source,
             "stage": stage,
@@ -2301,6 +2846,8 @@ class PumpScannerService:
             "volume_z_15m": round(vol_z_15m, 2),
             "breakout_pct_20": round(breakout_pct_20, 2),
             "breakout_pct_55": round(breakout_pct_55, 2),
+            "breakdown_pct_20": round(breakdown_pct_20, 2),
+            "breakdown_pct_55": round(breakdown_pct_55, 2),
             "momentum_pct_3": round(momentum_pct_3, 2),
             "momentum_pct_12": round(momentum_pct_12, 2),
             "expansion_ratio": round(expansion_ratio, 2),
@@ -2314,12 +2861,14 @@ class PumpScannerService:
             "ema25_gap_pct": round(ema25_gap_pct, 2),
             "ema99_gap_pct": round(ema99_gap_pct, 2),
             "above_ema_stack": above_ema_stack,
+            "below_ema_stack": below_ema_stack,
             "est_liq_target_price": round(float(target_price), 6),
             "est_liq_target_low": round(float(zone_low), 6),
             "est_liq_target_high": round(float(zone_high), 6),
             "est_liq_distance_pct": round(float(distance_pct), 2),
             "est_liq_score": round(float(zone_score), 2),
             "invalidation_price": round(float(invalidation_price), 6),
+            "short_invalidation_price": round(float(short_invalidation_price), 6),
             "risk_pct": round(float(risk_pct), 2),
             "reward_pct": round(float(reward_pct), 2),
             "rr_ratio": round(float(rr_ratio), 2),
@@ -2327,7 +2876,15 @@ class PumpScannerService:
             "entry_ready": bool(sweep_ctx["entry_ready"]),
             "rejection_score": round(float(sweep_ctx["rejection_score"]), 2),
             "sweep_distance_pct": sweep_ctx["sweep_distance_pct"],
+            "long_signal_active": bool(long_ctx.get("active")),
+            "short_signal_active": bool(short_ctx.get("active")),
+            "ma99_reclaimed": bool(long_ctx.get("ma99_reclaimed")),
+            "ma99_pressing": bool(long_ctx.get("ma99_pressing") or short_ctx.get("ma99_pressing")),
+            "reclaimed_ema13_25": bool(long_ctx.get("reclaimed_ema13_25")),
+            "ma99_lost": bool(short_ctx.get("ma99_lost")),
+            "lost_ema13_25": bool(short_ctx.get("lost_ema13_25")),
             "long_buildup_early_active": bool(long_ctx.get("long_buildup_early_active")),
+            "short_buildup_early_active": bool(short_ctx.get("short_buildup_early_active")),
             "kill_short_active": trade_side == "SHORT" and bool(sweep_ctx["entry_ready"]),
             "notes": notes[:5],
             "ticker_quote_volume": round(_safe_float(ticker.get("quoteVolume")) or 0.0, 2),
@@ -2361,12 +2918,18 @@ class PumpScannerService:
         max_symbols: int = 35,
         min_score: float = 58.0,
         limit: int = 18,
+        debug_near_miss: bool = False,
+        near_miss_limit: int | None = None,
         send_alerts: bool = False,
     ) -> dict[str, Any]:
         safe_max_symbols = 0 if int(max_symbols) <= 0 else max(10, min(max_symbols, 500))
         safe_limit = max(1, min(limit, 100))
+        safe_near_miss_limit = max(1, min(int(near_miss_limit or safe_limit), 50))
         safe_min_score = _clamp(float(min_score), 0.0, 100.0)
-        cache_key = f"pump_scan:{safe_max_symbols if safe_max_symbols > 0 else 'all'}:{safe_min_score:.2f}:{safe_limit}"
+        cache_key = (
+            f"pump_scan:{safe_max_symbols if safe_max_symbols > 0 else 'all'}:"
+            f"{safe_min_score:.2f}:{safe_limit}:{1 if debug_near_miss else 0}:{safe_near_miss_limit}"
+        )
         cached = self._get_cached(cache_key)
         if cached is not None:
             payload = self._attach_runtime_status(cached)
@@ -2376,6 +2939,7 @@ class PumpScannerService:
         stale_cached = self._get_cached(cache_key, allow_stale=True)
 
         items: list[dict[str, Any]] = []
+        near_misses: list[dict[str, Any]] = []
         try:
             ranked_symbols = self._ranked_symbols(max_symbols=safe_max_symbols)
         except Exception as exc:
@@ -2407,9 +2971,19 @@ class PumpScannerService:
                 row = self.analyze_symbol(symbol=symbol, ticker=ticker, include_candles=False)
             except Exception:
                 continue
-            if float(row.get("effective_score") or row.get("pump_score") or 0.0) < safe_min_score:
-                continue
-            if float(row.get("est_liq_target_price") or 0.0) <= float(row.get("mark_price") or 0.0):
+            effective_score = float(row.get("effective_score") or row.get("pump_score") or 0.0)
+            score_ok = effective_score >= safe_min_score
+            target_price = float(row.get("est_liq_target_price") or 0.0)
+            mark_price = float(row.get("mark_price") or 0.0)
+            trade_side = str(row.get("trade_side") or "LONG").upper()
+            target_ok = True
+            if trade_side == "SHORT":
+                target_ok = target_price > 0 and mark_price > 0 and target_price < mark_price
+            else:
+                target_ok = target_price > 0 and mark_price > 0 and target_price > mark_price
+            if not score_ok or not target_ok:
+                if debug_near_miss:
+                    near_misses.append(self._build_near_miss_payload(row, min_score=safe_min_score))
                 continue
             items.append(row)
 
@@ -2421,9 +2995,19 @@ class PumpScannerService:
             ),
             reverse=True,
         )
+        near_misses.sort(
+            key=lambda row: (
+                float(row.get("score") or 0.0),
+                -float(row.get("score_gap") or 0.0),
+                float(row.get("volume_ratio_15m") or 0.0),
+                float(row.get("volume_ratio_5m") or 0.0),
+            ),
+            reverse=True,
+        )
         payload = self._build_scan_payload(
             scanned=len(ranked_symbols),
             items=items,
+            near_misses=near_misses[:safe_near_miss_limit] if debug_near_miss else [],
             min_score=safe_min_score,
             max_symbols=safe_max_symbols,
             limit=safe_limit,

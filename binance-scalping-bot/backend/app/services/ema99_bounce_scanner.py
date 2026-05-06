@@ -259,18 +259,19 @@ class Ema99BounceScannerService:
     def _dynamic_tp_pct(item: dict[str, Any], *, timeframe: str, risk_pct: float) -> float:
         is_4h = timeframe == "4h"
         base_tp_pct = float(settings.ema99_bounce_4h_tp_pct if is_4h else settings.ema99_bounce_1h_tp_pct)
-        max_tp_pct = max(base_tp_pct, float(settings.ema99_bounce_max_tp_pct))
+        timeframe_max_tp_pct = float(settings.ema99_bounce_4h_max_tp_pct if is_4h else settings.ema99_bounce_1h_max_tp_pct)
+        max_tp_pct = max(base_tp_pct, min(float(settings.ema99_bounce_max_tp_pct), timeframe_max_tp_pct))
         score = max(0.0, float(item.get("score") or 0.0))
         volume_ratio = max(0.0, float(item.get("volume_ratio") or 0.0))
         touch_gap_pct = max(0.0, abs(float(item.get("touch_gap_pct") or 0.0)))
         touch_tol_pct = 1.2 if is_4h else 0.8
 
-        score_component = max(0.0, score - float(settings.ema99_bounce_paper_min_score)) * (0.9 if is_4h else 0.7)
-        volume_component = min(max(0.0, volume_ratio - 1.0), 4.0) * (1.0 if is_4h else 0.8)
+        score_component = max(0.0, score - float(settings.ema99_bounce_paper_min_score)) * (0.35 if is_4h else 0.22)
+        volume_component = min(max(0.0, volume_ratio - 1.0), 3.0) * (0.35 if is_4h else 0.25)
         touch_quality = max(0.0, min(1.0, (touch_tol_pct - touch_gap_pct) / touch_tol_pct))
-        touch_component = touch_quality * (2.5 if is_4h else 1.8)
-        timeframe_bonus = 1.0 if is_4h else 0.0
-        rr_floor_pct = max(base_tp_pct, risk_pct * 1.6)
+        touch_component = touch_quality * (0.45 if is_4h else 0.30)
+        timeframe_bonus = 0.25 if is_4h else 0.0
+        rr_floor_pct = max(base_tp_pct, risk_pct * 1.1)
 
         dynamic_tp_pct = base_tp_pct + score_component + volume_component + touch_component + timeframe_bonus
         dynamic_tp_pct = max(dynamic_tp_pct, rr_floor_pct)

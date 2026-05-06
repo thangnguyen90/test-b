@@ -347,9 +347,11 @@ class Settings(BaseModel):
     ema99_bounce_paper_max_open_trades: int = int(os.getenv("EMA99_BOUNCE_PAPER_MAX_OPEN_TRADES", "24"))
     ema99_bounce_paper_max_hold_minutes: int = int(os.getenv("EMA99_BOUNCE_PAPER_MAX_HOLD_MINUTES", "480"))
     ema99_bounce_max_tp_pct: float = float(os.getenv("EMA99_BOUNCE_MAX_TP_PCT", "20"))
-    ema99_bounce_1h_tp_pct: float = float(os.getenv("EMA99_BOUNCE_1H_TP_PCT", "1.8"))
+    ema99_bounce_1h_max_tp_pct: float = float(os.getenv("EMA99_BOUNCE_1H_MAX_TP_PCT", "2.0"))
+    ema99_bounce_4h_max_tp_pct: float = float(os.getenv("EMA99_BOUNCE_4H_MAX_TP_PCT", "3.0"))
+    ema99_bounce_1h_tp_pct: float = float(os.getenv("EMA99_BOUNCE_1H_TP_PCT", "1.2"))
     ema99_bounce_1h_sl_pct: float = float(os.getenv("EMA99_BOUNCE_1H_SL_PCT", "0.9"))
-    ema99_bounce_4h_tp_pct: float = float(os.getenv("EMA99_BOUNCE_4H_TP_PCT", "3.2"))
+    ema99_bounce_4h_tp_pct: float = float(os.getenv("EMA99_BOUNCE_4H_TP_PCT", "2.0"))
     ema99_bounce_4h_sl_pct: float = float(os.getenv("EMA99_BOUNCE_4H_SL_PCT", "1.4"))
     pump_hunter_bg_enabled: bool = os.getenv("PUMP_HUNTER_BG_ENABLED", "true").lower() == "true"
     pump_hunter_bg_interval_sec: float = float(os.getenv("PUMP_HUNTER_BG_INTERVAL_SEC", "45"))
@@ -359,9 +361,15 @@ class Settings(BaseModel):
     pump_hunter_paper_trade_enabled: bool = os.getenv("PUMP_HUNTER_PAPER_TRADE_ENABLED", "true").lower() == "true"
     pump_hunter_paper_min_score: float = float(os.getenv("PUMP_HUNTER_PAPER_MIN_SCORE", "58"))
     pump_hunter_paper_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_PAPER_SIGNAL_COOLDOWN_SEC", "900"))
+    pump_hunter_paper_move_sl_to_entry_pnl_pct: float = float(os.getenv("PUMP_HUNTER_PAPER_MOVE_SL_TO_ENTRY_PNL_PCT", "3"))
+    pump_hunter_fixed_sl_pct: float = float(os.getenv("PUMP_HUNTER_FIXED_SL_PCT", "12"))
+    pump_hunter_short_leverage: int = int(os.getenv("PUMP_HUNTER_SHORT_LEVERAGE", "10"))
+    pump_hunter_major_long_leverage: int = int(os.getenv("PUMP_HUNTER_MAJOR_LONG_LEVERAGE", "10"))
     pump_hunter_live_status_cache_sec: int = int(os.getenv("PUMP_HUNTER_LIVE_STATUS_CACHE_SEC", "300"))
     pump_hunter_tp_scale_down_threshold_pct: float = float(os.getenv("PUMP_HUNTER_TP_SCALE_DOWN_THRESHOLD_PCT", "50"))
     pump_hunter_tp_scale_down_factor: float = float(os.getenv("PUMP_HUNTER_TP_SCALE_DOWN_FACTOR", "0.5"))
+    pump_hunter_tp_target_scale_factor: float = float(os.getenv("PUMP_HUNTER_TP_TARGET_SCALE_FACTOR", "0.5"))
+    pump_hunter_tp_target_max_pct: float = float(os.getenv("PUMP_HUNTER_TP_TARGET_MAX_PCT", "20"))
     binance_api_key: str = os.getenv("BINANCE_API_KEY", "")
     binance_api_secret: str = os.getenv("BINANCE_API_SECRET", "")
     binance_api_base_url: str = os.getenv("BINANCE_API_BASE_URL", "https://fapi.binance.com")
@@ -373,6 +381,7 @@ class Settings(BaseModel):
     pump_hunter_live_margin_type: str = os.getenv("PUMP_HUNTER_LIVE_MARGIN_TYPE", "ISOLATED").upper()
     pump_hunter_live_min_score: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_SCORE", "60"))
     pump_hunter_live_min_tp_pct: float = float(os.getenv("PUMP_HUNTER_LIVE_MIN_TP_PCT", "20"))
+    pump_hunter_exclude_tradfi_symbols: bool = os.getenv("PUMP_HUNTER_EXCLUDE_TRADFI_SYMBOLS", "true").lower() == "true"
     pump_hunter_live_low_expected_pnl_threshold_pct: float = float(
         os.getenv("PUMP_HUNTER_LIVE_LOW_EXPECTED_PNL_THRESHOLD_PCT", "30")
     )
@@ -416,7 +425,7 @@ class Settings(BaseModel):
         "true",
     ).lower() == "true"
     pump_hunter_live_move_sl_to_entry_pnl_pct: float = float(
-        os.getenv("PUMP_HUNTER_LIVE_MOVE_SL_TO_ENTRY_PNL_PCT", "5")
+        os.getenv("PUMP_HUNTER_LIVE_MOVE_SL_TO_ENTRY_PNL_PCT", "3")
     )
     pump_hunter_live_cancel_unfilled_enabled: bool = os.getenv(
         "PUMP_HUNTER_LIVE_CANCEL_UNFILLED_ENABLED",
@@ -439,7 +448,7 @@ class Settings(BaseModel):
     paper_trade_candles_bg_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_CANDLES_BG_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_liquid_max_orders_per_cycle: int = int(os.getenv("PAPER_TRADE_LIQUID_MAX_ORDERS_PER_CYCLE", "2"))
     paper_trade_max_open_trades: int = int(os.getenv("PAPER_TRADE_MAX_OPEN_TRADES", "24"))
-    paper_trade_pump_max_open_trades: int = int(os.getenv("PAPER_TRADE_PUMP_MAX_OPEN_TRADES", "48"))
+    paper_trade_pump_max_open_trades: int = int(os.getenv("PAPER_TRADE_PUMP_MAX_OPEN_TRADES", "50"))
     paper_trade_ema99_bounce_max_open_trades: int = int(os.getenv("PAPER_TRADE_EMA99_BOUNCE_MAX_OPEN_TRADES", "24"))
     paper_trade_max_open_shorts: int = int(os.getenv("PAPER_TRADE_MAX_OPEN_SHORTS", "18"))
     paper_trade_single_position_per_symbol_side: bool = os.getenv("PAPER_TRADE_SINGLE_POSITION_PER_SYMBOL_SIDE", "true").lower() == "true"

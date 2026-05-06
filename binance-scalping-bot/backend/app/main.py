@@ -208,6 +208,7 @@ async def on_startup() -> None:
                 move_sl_lock_pnl_pct=settings.paper_trade_move_sl_lock_pnl_pct,
                 move_sl_scale_by_leverage=settings.paper_trade_move_sl_scale_by_leverage,
                 move_sl_reference_leverage=settings.paper_trade_move_sl_reference_leverage,
+                pump_hunter_move_sl_to_entry_pnl_pct=settings.pump_hunter_paper_move_sl_to_entry_pnl_pct,
                 liquid_enabled=settings.liquid_ml_enabled,
                 liquid_min_win_probability=settings.liquid_ml_min_win,
                 liquid_top_vol_days=settings.liquid_ml_top_vol_days,

@@ -284,6 +284,51 @@ class BinanceFuturesTradeService:
         )
         return self._signed_request("DELETE", "/fapi/v1/order", params)
 
+    def _algo_order_lookup_params(
+        self,
+        *,
+        symbol: str,
+        algo_id: int | str | None = None,
+        client_algo_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_symbol(symbol)
+        params: dict[str, Any] = {"symbol": normalized}
+        if algo_id is not None and str(algo_id).strip():
+            params["algoId"] = int(algo_id)
+        elif client_algo_id:
+            params["clientAlgoId"] = str(client_algo_id).strip()
+        else:
+            raise ValueError("Missing algo_id or client_algo_id")
+        return params
+
+    def get_algo_order_status(
+        self,
+        *,
+        symbol: str,
+        algo_id: int | str | None = None,
+        client_algo_id: str | None = None,
+    ) -> dict[str, Any]:
+        params = self._algo_order_lookup_params(
+            symbol=symbol,
+            algo_id=algo_id,
+            client_algo_id=client_algo_id,
+        )
+        return self._signed_request("GET", "/fapi/v1/algoOrder", params)
+
+    def cancel_algo_order(
+        self,
+        *,
+        symbol: str,
+        algo_id: int | str | None = None,
+        client_algo_id: str | None = None,
+    ) -> dict[str, Any]:
+        params = self._algo_order_lookup_params(
+            symbol=symbol,
+            algo_id=algo_id,
+            client_algo_id=client_algo_id,
+        )
+        return self._signed_request("DELETE", "/fapi/v1/algoOrder", params)
+
     def build_limit_order(self, *, symbol: str, side: str, entry_price: float, order_usdt: float) -> dict[str, Any]:
         normalized = self._normalize_symbol(symbol)
         rules = self.get_symbol_rules(normalized)
@@ -378,19 +423,20 @@ class BinanceFuturesTradeService:
         qty_value = self._floor_to_step(qty_value, step_size or (10 ** -6))
         if min_qty > 0 and qty_value < min_qty:
             raise ValueError("Quantity below exchange minimum for SL order")
+        stop_price_text = self._format_decimal(stop_price, tick_size or (10 ** -6))
         return {
             "symbol": normalized,
             "side": side_text,
-            "type": "STOP",
+            "algoType": "CONDITIONAL",
+            "type": "STOP_MARKET",
             "timeInForce": "GTC",
             "quantity": self._format_decimal(qty_value, step_size or (10 ** -6)),
-            "price": self._format_decimal(stop_price, tick_size or (10 ** -6)),
-            "stopPrice": self._format_decimal(stop_price, tick_size or (10 ** -6)),
+            "triggerPrice": stop_price_text,
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
-            "priceProtect": "true",
+            "priceProtect": "TRUE",
             "newOrderRespType": "ACK",
-            "newClientOrderId": f"{client_order_prefix}_{int(time.time() * 1000)}",
+            "clientAlgoId": f"{client_order_prefix}_{int(time.time() * 1000)}",
         }
 
     def place_limit_order(
@@ -578,14 +624,19 @@ class BinanceFuturesTradeService:
             stop_price=stop_price,
             quantity=quantity,
         )
-        endpoint = "/fapi/v1/order/test" if test_mode else "/fapi/v1/order"
+        if test_mode:
+            raise ValueError("Binance futures algo stop orders do not support test_mode in this flow")
+        endpoint = "/fapi/v1/algoOrder"
         order_resp = self._signed_request("POST", endpoint, order_params)
         return {
             "test_mode": bool(test_mode),
             "symbol": order_params["symbol"],
             "side": order_params["side"],
             "quantity": order_params["quantity"],
-            "stop_price": order_params["stopPrice"],
+            "stop_price": order_params["triggerPrice"],
+            "algo_id": order_resp.get("algoId"),
+            "client_algo_id": order_resp.get("clientAlgoId") or order_params.get("clientAlgoId"),
+            "is_algo_order": True,
             "reduce_only": True,
             "exchange_response": order_resp,
         }

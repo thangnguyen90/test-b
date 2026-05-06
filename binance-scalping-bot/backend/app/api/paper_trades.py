@@ -1562,7 +1562,7 @@ class PaperTradeAPI:
                 raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
 
         leverage = self._resolve_open_leverage(req.symbol, req.leverage, req.side)
-        if entry_type == "PUMP_ENTRY_TOUCH":
+        if entry_type in {"PUMP_ENTRY_TOUCH", "EMA99_BOUNCE"}:
             normalized_tp = float(req.take_profit)
             normalized_sl = float(req.stop_loss)
         else:

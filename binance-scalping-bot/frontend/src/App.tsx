@@ -4308,6 +4308,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th>BTC Follow</th>
                     <th>Pattern / DB</th>
                     <th>Entry Source</th>
+                    <th>Mode</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_usdt')}>uPnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('upnl_pct')}>uPnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mae_pct')}>MAE%</button></th>
@@ -4357,6 +4358,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                       </td>
                       <td>{renderSignalPatternSummary(row.current_candle_pattern, row.current_btc_trend, 'BTC Trend Hien Tai:')}</td>
                       <td>{renderEntrySnapshotSummary(row)}</td>
+                      <td>
+                        {row.entry_execution_mode ? (
+                          <span className={`badge ${row.entry_execution_mode === 'CONFIRMED' ? 'success' : row.entry_execution_mode === 'SCOUT' ? 'warn' : 'neutral'}`}>
+                            {row.entry_execution_mode}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>
                         {typeof upnlUsdt === 'number' ? (
                           <span className={upnlUsdt >= 0 ? 'pnl-pos' : 'pnl-neg'}>
@@ -4573,6 +4581,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th>BTC Follow</th>
                     <th>Pattern / DB</th>
                     <th>Entry Source</th>
+                    <th>Mode</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl')}>PnL (USDT)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('pnl_pct')}>PnL% (Margin)</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleHistorySort('mae_pct')}>MAE%</button></th>
@@ -4617,6 +4626,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                         </td>
                         <td>{renderSignalPatternSummary(row.close_candle_pattern, row.btc_trend_at_close)}</td>
                         <td>{renderEntrySnapshotSummary(row)}</td>
+                        <td>
+                          {row.entry_execution_mode ? (
+                            <span className={`badge ${row.entry_execution_mode === 'CONFIRMED' ? 'success' : row.entry_execution_mode === 'SCOUT' ? 'warn' : 'neutral'}`}>
+                              {row.entry_execution_mode}
+                            </span>
+                          ) : '-'}
+                        </td>
                         <td>
                           {typeof row.pnl === 'number' ? (
                             <span className={row.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}>
