@@ -505,6 +505,12 @@ type BtcTrendResponse = {
   items: BtcTrendItem[]
 }
 
+type PumpHunterEntrySideControl = {
+  allow_long: boolean
+  allow_short: boolean
+  updated_at?: string
+}
+
 type MlStatus = {
   is_loaded: boolean
   model_path: string
@@ -1360,6 +1366,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   const [paperPriceWsStatus, setPaperPriceWsStatus] = useState<'connecting' | 'live' | 'fallback'>('connecting')
   const [isOpeningMarketOrder, setIsOpeningMarketOrder] = useState(false)
   const [closingTradeId, setClosingTradeId] = useState<number | null>(null)
+  const [bulkClosingSide, setBulkClosingSide] = useState<'LONG' | 'SHORT' | null>(null)
   const [closeModalTrade, setCloseModalTrade] = useState<PaperTrade | null>(null)
   const [volDays, setVolDays] = useState<1 | 3 | 5 | 7>(1)
   const [topVolatility, setTopVolatility] = useState<VolatilityItem[]>([])
@@ -1368,6 +1375,8 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   const [liqPageSize] = useState(30)
   const [liqTotalSymbols, setLiqTotalSymbols] = useState(0)
   const [btcTrend, setBtcTrend] = useState<BtcTrendResponse | null>(null)
+  const [pumpHunterEntrySideControl, setPumpHunterEntrySideControl] = useState<PumpHunterEntrySideControl | null>(null)
+  const [isUpdatingPumpHunterEntrySide, setIsUpdatingPumpHunterEntrySide] = useState<'LONG' | 'SHORT' | null>(null)
   const [autoLiqMarketEnabled, setAutoLiqMarketEnabled] = useState(false)
   const [volSort, setVolSort] = useState<{ key: keyof VolatilityItem; direction: SortDirection }>({
     key: 'abs_move_pct',
@@ -1633,6 +1642,20 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b))
   }, [highWinSignals, mlCandlesSignals, showMlCandlesScreen, mlCandlesScreenView])
+  const highWinWsSymbolsKey = useMemo(
+    () => highWinWsSymbols.join(','),
+    [highWinWsSymbols],
+  )
+  const paperTrackedSymbols = useMemo(() => {
+    const trackedOpenTrades: PaperTrade[] = []
+    if (showPaperScreen) trackedOpenTrades.push(...paperOpenTrades)
+    if (showMlCandlesScreen && mlCandlesScreenView === 'compare') trackedOpenTrades.push(...mlCandlesOpenTradesDb)
+    return Array.from(new Set(trackedOpenTrades.map((row) => row.symbol))).sort((a, b) => a.localeCompare(b))
+  }, [showPaperScreen, showMlCandlesScreen, mlCandlesScreenView, paperOpenTrades, mlCandlesOpenTradesDb])
+  const paperTrackedSymbolsKey = useMemo(
+    () => paperTrackedSymbols.join(','),
+    [paperTrackedSymbols],
+  )
   const sortedPaperHistory = useMemo(() => {
     const rows = [...paperHistory]
     const { key, direction } = historySort
@@ -1784,6 +1807,36 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     if (paperModelFilter === 'ALL') return sortedPaperOpenTrades
     return sortedPaperOpenTrades.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
   }, [sortedPaperOpenTrades, paperModelFilter])
+  const profitablePaperLongTrades = useMemo(
+    () => paperOpenTrades.filter((row) => {
+      if (row.side !== 'LONG') return false
+      const mark = resolveLivePrice(row.symbol)
+      const marginUsdt = typeof row.margin_usdt === 'number'
+        ? row.margin_usdt
+        : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+      const upnlPct = calcUnrealizedPnlPct(row, mark)
+      const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
+        ? (marginUsdt * upnlPct / 100)
+        : null
+      return typeof upnlUsdt === 'number' && upnlUsdt > 0
+    }),
+    [paperOpenTrades, paperLivePrices],
+  )
+  const profitablePaperShortTrades = useMemo(
+    () => paperOpenTrades.filter((row) => {
+      if (row.side !== 'SHORT') return false
+      const mark = resolveLivePrice(row.symbol)
+      const marginUsdt = typeof row.margin_usdt === 'number'
+        ? row.margin_usdt
+        : calcMarginUsdt(row.entry_price, row.quantity, row.leverage)
+      const upnlPct = calcUnrealizedPnlPct(row, mark)
+      const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
+        ? (marginUsdt * upnlPct / 100)
+        : null
+      return typeof upnlUsdt === 'number' && upnlUsdt > 0
+    }),
+    [paperOpenTrades, paperLivePrices],
+  )
   const filteredPaperHistory = useMemo(() => {
     if (paperModelFilter === 'ALL') return sortedPaperHistory
     return sortedPaperHistory.filter((row) => tradeModelSource(row.entry_type) === paperModelFilter)
@@ -2719,6 +2772,36 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     }
   }
 
+  async function fetchPumpHunterEntrySideControl() {
+    const response = await fetch(`${API_BASE}/api/v1/analytics/pump-hunter/entry-side-control`)
+    if (!response.ok) throw new Error('Cannot fetch Pump Hunter entry-side control')
+    const payload = await response.json() as PumpHunterEntrySideControl
+    markBackendAlive()
+    setPumpHunterEntrySideControl(payload)
+  }
+
+  async function updatePumpHunterEntrySideControl(side: 'LONG' | 'SHORT') {
+    const current = pumpHunterEntrySideControl ?? { allow_long: true, allow_short: true }
+    const nextPayload = {
+      allow_long: side === 'LONG' ? !current.allow_long : current.allow_long,
+      allow_short: side === 'SHORT' ? !current.allow_short : current.allow_short,
+    }
+    setIsUpdatingPumpHunterEntrySide(side)
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/analytics/pump-hunter/entry-side-control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(nextPayload),
+      })
+      if (!response.ok) throw new Error('Cannot update Pump Hunter entry-side control')
+      const payload = await response.json() as PumpHunterEntrySideControl
+      markBackendAlive()
+      setPumpHunterEntrySideControl(payload)
+    } finally {
+      setIsUpdatingPumpHunterEntrySide(null)
+    }
+  }
+
   async function openPaperMarketOrder(input: PaperMarketOpenRequest) {
     setIsOpeningMarketOrder(true)
     let timeoutId: number | null = null
@@ -2795,7 +2878,12 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     }
   }
 
-  async function closePaperTrade(tradeId: number, payload: PaperManualCloseRequest = {}) {
+  async function closePaperTrade(
+    tradeId: number,
+    payload: PaperManualCloseRequest = {},
+    options: { refreshAfter?: boolean } = {},
+  ) {
+    const { refreshAfter = true } = options
     setClosingTradeId(tradeId)
     try {
       const response = await fetch(`${API_BASE}/api/v1/paper-trades/close/${tradeId}`, {
@@ -2807,10 +2895,33 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
         const text = await response.text()
         throw new Error(`Close trade failed: ${text}`)
       }
-      await fetchPaperTradingStats()
-      await fetchClosedPatternStats()
+      if (refreshAfter) {
+        await fetchPaperTradingStats()
+        await fetchClosedPatternStats()
+      }
     } finally {
       setClosingTradeId(null)
+    }
+  }
+
+  async function closePositivePaperTradesBySide(side: 'LONG' | 'SHORT') {
+    const targets = (side === 'LONG' ? profitablePaperLongTrades : profitablePaperShortTrades)
+    if (targets.length === 0) return
+
+    setBulkClosingSide(side)
+    setError('')
+    try {
+      for (const row of targets) {
+        await closePaperTrade(row.id, {}, { refreshAfter: false })
+      }
+      await fetchPaperTradingStats()
+      await fetchClosedPatternStats()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+      await fetchPaperTradingStats().catch(() => undefined)
+      await fetchClosedPatternStats().catch(() => undefined)
+    } finally {
+      setBulkClosingSide(null)
     }
   }
 
@@ -3146,13 +3257,13 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
   }, [paperModelFilter])
 
   useEffect(() => {
-    const trackedOpenTrades: PaperTrade[] = []
-    if (showPaperScreen) trackedOpenTrades.push(...paperOpenTrades)
-    if (showMlCandlesScreen && mlCandlesScreenView === 'compare') trackedOpenTrades.push(...mlCandlesOpenTradesDb)
-    if (trackedOpenTrades.length === 0) return
+    if (paperTrackedSymbols.length === 0) {
+      setPaperPriceWsStatus('fallback')
+      return () => undefined
+    }
 
     let mounted = true
-    const symbols = Array.from(new Set(trackedOpenTrades.map((row) => row.symbol)))
+    const symbols = paperTrackedSymbols
     let ws: WebSocket | null = null
     let reconnectTimer: number | null = null
     let fallbackTimer: number | null = null
@@ -3241,7 +3352,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       stopFallback()
       ws?.close()
     }
-  }, [showPaperScreen, showMlCandlesScreen, mlCandlesScreenView, paperOpenTrades, mlCandlesOpenTradesDb])
+  }, [paperTrackedSymbolsKey])
 
   useEffect(() => {
     if (!mainDashboardActive) return () => undefined
@@ -3267,6 +3378,23 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       window.clearInterval(timer)
     }
   }, [mainDashboardActive, showDailyScreen])
+
+  useEffect(() => {
+    if (!mainDashboardActive) return () => undefined
+    fetchPumpHunterEntrySideControl().catch(() => {
+      // Keep previous Pump Hunter entry-side state on request failure.
+    })
+
+    const timer = window.setInterval(() => {
+      fetchPumpHunterEntrySideControl().catch(() => {
+        // Keep previous Pump Hunter entry-side state on periodic refresh failure.
+      })
+    }, 15000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [mainDashboardActive])
 
   useEffect(() => {
     if (!mainDashboardActive) return () => undefined
@@ -3553,7 +3681,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
       stopFallback()
       socket?.close()
     }
-  }, [highWinWsSymbols, mainDashboardActive])
+  }, [highWinWsSymbolsKey, mainDashboardActive])
 
   useEffect(() => {
     if (!marketPriceScreenActive) return () => undefined
@@ -4116,6 +4244,90 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
         </div>
       </section>
 
+      <section className="card" style={{ marginTop: 16, marginBottom: 16 }}>
+        <header className="card-header">
+          <h2>Pump Hunter Auto Entry</h2>
+          <span className="badge neutral">
+            Updated: {formatVnTimestamp(pumpHunterEntrySideControl?.updated_at)}
+          </span>
+        </header>
+        <div className="pump-hunter-entry-controls">
+          <div className="pump-hunter-entry-row">
+            <button
+              type="button"
+              disabled={isUpdatingPumpHunterEntrySide !== null || bulkClosingSide !== null}
+              onClick={() => {
+                updatePumpHunterEntrySideControl('LONG').catch(() => {
+                  // keep last known state on request failure
+                })
+              }}
+              style={{
+                minWidth: 150,
+                fontWeight: 700,
+                background: pumpHunterEntrySideControl?.allow_long === false ? undefined : 'rgba(16, 185, 129, 0.16)',
+                borderColor: pumpHunterEntrySideControl?.allow_long === false ? undefined : 'rgba(16, 185, 129, 0.38)',
+                color: pumpHunterEntrySideControl?.allow_long === false ? undefined : '#047857',
+              }}
+            >
+              {isUpdatingPumpHunterEntrySide === 'LONG'
+                ? 'Updating...'
+                : `LONG ${pumpHunterEntrySideControl?.allow_long === false ? 'OFF' : 'ON'}`}
+            </button>
+            <button
+              type="button"
+              disabled={isUpdatingPumpHunterEntrySide !== null || bulkClosingSide !== null}
+              onClick={() => {
+                updatePumpHunterEntrySideControl('SHORT').catch(() => {
+                  // keep last known state on request failure
+                })
+              }}
+              style={{
+                minWidth: 150,
+                fontWeight: 700,
+                background: pumpHunterEntrySideControl?.allow_short === false ? undefined : 'rgba(239, 68, 68, 0.14)',
+                borderColor: pumpHunterEntrySideControl?.allow_short === false ? undefined : 'rgba(239, 68, 68, 0.38)',
+                color: pumpHunterEntrySideControl?.allow_short === false ? undefined : '#b91c1c',
+              }}
+            >
+              {isUpdatingPumpHunterEntrySide === 'SHORT'
+                ? 'Updating...'
+                : `SHORT ${pumpHunterEntrySideControl?.allow_short === false ? 'OFF' : 'ON'}`}
+            </button>
+            <span className="badge neutral">
+              {`Long ${pumpHunterEntrySideControl?.allow_long === false ? 'blocked' : 'allowed'} | Short ${pumpHunterEntrySideControl?.allow_short === false ? 'blocked' : 'allowed'}`}
+            </span>
+          </div>
+          <div className="pump-hunter-entry-row">
+            <button
+              type="button"
+              disabled={isUpdatingPumpHunterEntrySide !== null || bulkClosingSide !== null || closingTradeId !== null || profitablePaperLongTrades.length === 0}
+              onClick={() => {
+                closePositivePaperTradesBySide('LONG').catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unknown error')
+                })
+              }}
+            >
+              {bulkClosingSide === 'LONG'
+                ? 'Closing LONG profit...'
+                : `Close profitable LONG (${profitablePaperLongTrades.length})`}
+            </button>
+            <button
+              type="button"
+              disabled={isUpdatingPumpHunterEntrySide !== null || bulkClosingSide !== null || closingTradeId !== null || profitablePaperShortTrades.length === 0}
+              onClick={() => {
+                closePositivePaperTradesBySide('SHORT').catch((err) => {
+                  setError(err instanceof Error ? err.message : 'Unknown error')
+                })
+              }}
+            >
+              {bulkClosingSide === 'SHORT'
+                ? 'Closing SHORT profit...'
+                : `Close profitable SHORT (${profitablePaperShortTrades.length})`}
+            </button>
+          </div>
+        </div>
+      </section>
+
       {showPaperScreen ? (
         <section className="card">
           <header className="card-header">
@@ -4425,7 +4637,7 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                         <button
                           type="button"
                           className="btn-inline btn-secondary"
-                          disabled={closingTradeId === row.id}
+                          disabled={closingTradeId === row.id || bulkClosingSide !== null}
                           onClick={() => {
                             requestCloseTrade(row)
                           }}

@@ -12,3 +12,7 @@ class PumpHunterBinanceOrderRequest(BaseModel):
     leverage: int | None = Field(default=None, ge=1, le=125)
     margin_type: Literal["ISOLATED", "CROSSED"] | None = None
 
+
+class PumpHunterEntrySideControlRequest(BaseModel):
+    allow_long: bool
+    allow_short: bool

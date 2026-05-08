@@ -362,6 +362,8 @@ class Settings(BaseModel):
     pump_hunter_paper_min_score: float = float(os.getenv("PUMP_HUNTER_PAPER_MIN_SCORE", "58"))
     pump_hunter_paper_signal_cooldown_sec: int = int(os.getenv("PUMP_HUNTER_PAPER_SIGNAL_COOLDOWN_SEC", "900"))
     pump_hunter_paper_move_sl_to_entry_pnl_pct: float = float(os.getenv("PUMP_HUNTER_PAPER_MOVE_SL_TO_ENTRY_PNL_PCT", "3"))
+    pump_hunter_allow_long_entries: bool = os.getenv("PUMP_HUNTER_ALLOW_LONG_ENTRIES", "true").lower() == "true"
+    pump_hunter_allow_short_entries: bool = os.getenv("PUMP_HUNTER_ALLOW_SHORT_ENTRIES", "true").lower() == "true"
     pump_hunter_fixed_sl_pct: float = float(os.getenv("PUMP_HUNTER_FIXED_SL_PCT", "12"))
     pump_hunter_short_leverage: int = int(os.getenv("PUMP_HUNTER_SHORT_LEVERAGE", "10"))
     pump_hunter_major_long_leverage: int = int(os.getenv("PUMP_HUNTER_MAJOR_LONG_LEVERAGE", "10"))

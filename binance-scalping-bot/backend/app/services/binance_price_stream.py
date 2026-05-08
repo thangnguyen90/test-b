@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
+import time
 
 import websockets
 
@@ -20,6 +21,8 @@ class BinancePriceStream:
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
         self._running = False
+        self._last_update_monotonic: float = 0.0
+        self._last_connect_error: str | None = None
 
     async def start(self) -> None:
         if self._task and not self._task.done():
@@ -51,13 +54,21 @@ class BinancePriceStream:
                 async with websockets.connect(url, ping_interval=15, ping_timeout=15, close_timeout=5) as ws:
                     backoff = 1.0
                     url_index = 0
-                    async for message in ws:
+                    self._last_connect_error = None
+                    while self._running:
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=25.0)
+                        except asyncio.TimeoutError:
+                            # The socket can stay open while no messages arrive anymore.
+                            # Force a reconnect so stream cache does not freeze indefinitely.
+                            break
                         if not self._running:
                             break
                         await self._handle_message(message)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._last_connect_error = f"{type(exc).__name__}: {exc}"
                 url_index += 1
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 20.0)
@@ -121,6 +132,7 @@ class BinancePriceStream:
             for key, px in updates.items():
                 self._prices[key] = px
                 self._updated_at[key] = stamps.get(key, datetime.now(timezone.utc).isoformat())
+            self._last_update_monotonic = time.monotonic()
 
     async def get_price(self, symbol: str) -> tuple[float | None, str | None]:
         key = _normalize_symbol(symbol)
@@ -148,9 +160,18 @@ class BinancePriceStream:
         prices, timestamp, timestamps = await self.get_prices(sample)
         async with self._lock:
             total_cached = len(self._prices)
+            last_update_monotonic = self._last_update_monotonic
+            last_connect_error = self._last_connect_error
+        age_sec: float | None = None
+        if last_update_monotonic > 0:
+            age_sec = max(0.0, time.monotonic() - last_update_monotonic)
         return {
             "cached_symbols": total_cached,
             "sample_prices": prices,
             "last_timestamp": timestamp,
             "sample_timestamps": timestamps,
+            "last_update_age_sec": age_sec,
+            "running": bool(self._running),
+            "task_alive": bool(self._task and not self._task.done()),
+            "last_connect_error": last_connect_error,
         }

@@ -1434,6 +1434,7 @@ class PaperTradingEngine:
                 side = str(trade["side"])
                 entry_type = str(trade.get("entry_type") or "LIMIT")
                 skip_btc_guards = self._skip_btc_guards_for_entry_type(entry_type)
+                allow_btc_reversal_profit_exit = (not skip_btc_guards) or self._is_liquidation_style_entry_type(entry_type)
                 price = market_prices.get(symbol)
                 if price is None:
                     stream_price = await self._resolve_stream_price(symbol)
@@ -1512,18 +1513,19 @@ class PaperTradingEngine:
                     ):
                         commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
                         net_pnl = pnl - commission
+                        reversal_tf_label = str(self.btc_filter_timeframe or "15m").upper()
                         self._close_trade_with_context(
                             trade,
                             close_price=price,
                             pnl=net_pnl,
                             result=0,
-                            close_reason="BTC_1H_REVERSAL_LOSS_EXIT",
+                            close_reason=f"BTC_{reversal_tf_label}_REVERSAL_LOSS_EXIT",
                             commission_usdt=commission,
                         )
                         continue
 
-                # Close profitable counter-trend positions when BTC 1H reversal is detected.
-                if not skip_btc_guards:
+                # Close profitable counter-trend positions when BTC trend reversal is detected.
+                if allow_btc_reversal_profit_exit:
                     if self._should_force_close_profit_on_btc_reversal(
                         symbol=symbol,
                         side=side,
@@ -1533,8 +1535,9 @@ class PaperTradingEngine:
                     ):
                         commission = self._calc_fee(entry=entry, quantity=qty, entry_type=entry_type, fee_taker=self.fee_taker_pct, fee_maker=self.fee_maker_pct)
                         net_pnl = pnl - commission
+                        reversal_tf_label = str(self.btc_filter_timeframe or "15m").upper()
                         reversal_reason = (
-                            "BTC_1H_REVERSAL_PROFIT_EXIT"
+                            f"BTC_{reversal_tf_label}_REVERSAL_PROFIT_EXIT"
                             if self._is_countertrend_on_btc_1h_reversal(side=side, btc_guard=btc_guard)
                             else "BTC_REVERSAL_PROFIT_EXIT"
                         )
@@ -1871,6 +1874,93 @@ class PaperTradingEngine:
 
     async def apply_open_pressure_profit_exit(self) -> int:
         return await self._apply_open_pressure_profit_exit()
+
+    async def close_profitable_pump_trades_on_btc_signal(
+        self,
+        *,
+        signal_side: str,
+        exclude_trade_id: int | None = None,
+        close_reason: str | None = None,
+    ) -> int:
+        normalized_signal_side = str(signal_side or "").upper()
+        if normalized_signal_side not in {"LONG", "SHORT"}:
+            return 0
+
+        target_close_side = "SHORT" if normalized_signal_side == "LONG" else "LONG"
+        open_rows = self.repo.list_open_trades()
+        candidate_rows: list[dict[str, Any]] = []
+        symbols: list[str] = []
+
+        for row in open_rows:
+            try:
+                trade_id = int(row.get("id") or 0)
+                side = str(row.get("side") or "").upper()
+                status = str(row.get("status") or "OPEN").upper()
+                symbol = str(row.get("symbol") or "")
+                entry = float(row.get("entry_price") or 0.0)
+                qty = float(row.get("quantity") or 0.0)
+                entry_type = str(row.get("entry_type") or "LIMIT")
+            except Exception:
+                continue
+            if trade_id <= 0 or (exclude_trade_id is not None and trade_id == exclude_trade_id):
+                continue
+            if status != "OPEN" or side != target_close_side or entry <= 0 or qty <= 0 or not symbol:
+                continue
+            if not self._is_liquidation_style_entry_type(entry_type):
+                continue
+            candidate_rows.append(row)
+            symbols.append(symbol)
+
+        prices = await self._resolve_stream_prices(symbols)
+        missing_symbols = [symbol for symbol in symbols if symbol and symbol not in prices]
+        if missing_symbols:
+            prices.update(self._resolve_market_prices(missing_symbols))
+
+        close_candidates: list[tuple[dict[str, Any], float, float, float]] = []
+        for row in candidate_rows:
+            try:
+                side = str(row.get("side") or "").upper()
+                symbol = str(row.get("symbol") or "")
+                entry = float(row.get("entry_price") or 0.0)
+                qty = float(row.get("quantity") or 0.0)
+                leverage = max(1, int(row.get("leverage") or 1))
+                entry_type = str(row.get("entry_type") or "LIMIT")
+            except Exception:
+                continue
+
+            price = prices.get(symbol)
+            if price is None:
+                stream_price = await self._resolve_stream_price(symbol)
+                price = stream_price if stream_price is not None else self._resolve_market_price(symbol)
+                if price is None:
+                    continue
+                prices[symbol] = float(price)
+
+            pnl = self._calc_pnl(side=side, entry=entry, close_price=float(price), quantity=qty)
+            pnl_pct = self._calc_pnl_pct(side=side, entry=entry, mark_price=float(price), leverage=leverage)
+            commission = self._calc_fee(
+                entry=entry,
+                quantity=qty,
+                entry_type=entry_type,
+                fee_taker=self.fee_taker_pct,
+                fee_maker=self.fee_maker_pct,
+            )
+            net_pnl = pnl - commission
+            if pnl <= 0 or net_pnl <= 0 or pnl_pct <= 0:
+                continue
+            close_candidates.append((row, float(price), float(net_pnl), float(commission)))
+
+        reason = close_reason or f"BTC_{normalized_signal_side}_SIGNAL_PROFIT_EXIT"
+        for trade_row, close_price, net_pnl, commission in close_candidates:
+            self._close_trade_with_context(
+                trade_row,
+                close_price=close_price,
+                pnl=net_pnl,
+                result=1,
+                close_reason=reason,
+                commission_usdt=commission,
+            )
+        return len(close_candidates)
 
     @staticmethod
     def _parse_dt(value: object) -> datetime | None:
@@ -3535,6 +3625,17 @@ class PaperTradingEngine:
                 payload = neutral
             else:
                 trend_side, confidence, score, ema_fast, ema_slow = self._resolve_trend_signal(closes)
+                trend_prev_side = "NEUTRAL"
+                trend_reversal = False
+                if len(closes) >= 61:
+                    prev_side, _, _, _, _ = self._resolve_trend_signal(closes[:-1])
+                    trend_prev_side = prev_side
+                    trend_reversal = (
+                        trend_side in {"LONG", "SHORT"}
+                        and trend_prev_side in {"LONG", "SHORT"}
+                        and trend_side != trend_prev_side
+                        and confidence >= self.btc_reversal_min_confidence
+                    )
                 rsi_15m = self._rsi_last(closes, period=14)
                 rsi_1h = rsi_15m
                 ema99_15m = self._ema_last(closes[-180:], period=99) if len(closes) >= 99 else 0.0
@@ -3930,6 +4031,8 @@ class PaperTradingEngine:
                     "confidence": float(confidence),
                     "score": float(score),
                     "timeframe": self.btc_filter_timeframe,
+                    "trend_prev_side": trend_prev_side,
+                    "trend_reversal": bool(trend_reversal),
                     "mark_price": float(closes[-1]),
                     "ema_fast": float(ema_fast),
                     "ema_slow": float(ema_slow),
@@ -4717,6 +4820,23 @@ class PaperTradingEngine:
         side_key = str(side or "").upper()
         if side_key not in {"LONG", "SHORT"}:
             return False
+
+        active_trend_side = str((btc_guard or {}).get("side") or "NEUTRAL").upper()
+        active_prev_side = str((btc_guard or {}).get("trend_prev_side") or "NEUTRAL").upper()
+        try:
+            active_confidence = float((btc_guard or {}).get("confidence") or 0.0)
+        except Exception:
+            active_confidence = 0.0
+        reversal_active = bool((btc_guard or {}).get("trend_reversal"))
+        if not reversal_active:
+            reversal_active = (
+                active_trend_side in {"LONG", "SHORT"}
+                and active_prev_side in {"LONG", "SHORT"}
+                and active_trend_side != active_prev_side
+                and active_confidence >= self.btc_reversal_min_confidence
+            )
+        if reversal_active and active_trend_side in {"LONG", "SHORT"} and active_confidence >= self.btc_reversal_min_confidence:
+            return side_key != active_trend_side
 
         trend_1h_side = str((btc_guard or {}).get("trend_1h_side") or "NEUTRAL").upper()
         trend_1h_prev_side = str((btc_guard or {}).get("trend_1h_prev_side") or "NEUTRAL").upper()

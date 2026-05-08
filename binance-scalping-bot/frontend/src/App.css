@@ -168,6 +168,19 @@ h1 {
   margin: 0;
 }
 
+.pump-hunter-entry-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pump-hunter-entry-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
 .entry-hour-card {
   overflow: hidden;
 }

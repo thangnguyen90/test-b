@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 from fastapi import APIRouter, Query
 
-from app.models.pump_hunter import PumpHunterBinanceOrderRequest
+from app.models.pump_hunter import PumpHunterBinanceOrderRequest, PumpHunterEntrySideControlRequest
 from app.services.analytics_service import AnalyticsService
 from app.services.binance_futures_trade_service import BinanceApiError
 from app.services.pump_scanner_service import PumpScannerService
@@ -75,6 +75,19 @@ def get_pump_hunter_scan(
         "paper_trade_enabled": payload.get("paper_trade_enabled"),
         "live_order_status": payload.get("live_order_status"),
     }
+
+
+@router.get("/pump-hunter/entry-side-control")
+def get_pump_hunter_entry_side_control() -> dict:
+    return pump_service.get_entry_side_control()
+
+
+@router.post("/pump-hunter/entry-side-control")
+def update_pump_hunter_entry_side_control(req: PumpHunterEntrySideControlRequest) -> dict:
+    return pump_service.set_entry_side_control(
+        allow_long=bool(req.allow_long),
+        allow_short=bool(req.allow_short),
+    )
 
 
 @router.get("/pump-hunter/detail")

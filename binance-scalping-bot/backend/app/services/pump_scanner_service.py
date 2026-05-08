@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from app.core.config import settings
+from app.deps import get_paper_trade_runtime
 from app.services.binance_client import BinanceFuturesClient
 from app.services.binance_futures_trade_service import BinanceApiError, BinanceFuturesTradeService
 
@@ -55,7 +56,13 @@ class PumpScannerService:
         self._alert_lock = threading.Lock()
         self._live_order_lock = threading.Lock()
         self._status_lock = threading.Lock()
+        self._entry_side_lock = threading.Lock()
         self._live_order_registry: dict[str, dict[str, Any]] = {}
+        self._entry_side_control: dict[str, Any] = {
+            "allow_long": bool(settings.pump_hunter_allow_long_entries),
+            "allow_short": bool(settings.pump_hunter_allow_short_entries),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
         self._live_order_status: dict[str, Any] = {
             "state": "disabled",
             "mode": "DISABLED",
@@ -97,6 +104,11 @@ class PumpScannerService:
     @staticmethod
     def _normalize_symbol_key(symbol: str | None) -> str:
         return str(symbol or "").upper().strip().replace(":USDT", "")
+
+    @classmethod
+    def _is_btc_signal_symbol(cls, symbol: str | None) -> bool:
+        symbol_key = cls._normalize_symbol_key(symbol)
+        return symbol_key in {"BTC/USDT", "BTCUSDT", "BTC"}
 
     def _is_pump_hunter_major_symbol(self, symbol: str | None) -> bool:
         symbol_key = self._normalize_symbol_key(symbol)
@@ -535,6 +547,27 @@ class PumpScannerService:
         with self._status_lock:
             return dict(self._live_order_status)
 
+    def get_entry_side_control(self) -> dict[str, Any]:
+        with self._entry_side_lock:
+            return dict(self._entry_side_control)
+
+    def set_entry_side_control(self, *, allow_long: bool | None = None, allow_short: bool | None = None) -> dict[str, Any]:
+        with self._entry_side_lock:
+            next_payload = dict(self._entry_side_control)
+            if allow_long is not None:
+                next_payload["allow_long"] = bool(allow_long)
+            if allow_short is not None:
+                next_payload["allow_short"] = bool(allow_short)
+            next_payload["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._entry_side_control = next_payload
+            return dict(next_payload)
+
+    def _is_entry_side_enabled(self, side: str | None) -> bool:
+        control = self.get_entry_side_control()
+        if str(side or "").upper() == "SHORT":
+            return bool(control.get("allow_short", True))
+        return bool(control.get("allow_long", True))
+
     def refresh_live_order_status(self, *, force: bool = False) -> dict[str, Any]:
         if not settings.pump_hunter_live_trade_enabled:
             return self._set_live_order_status(
@@ -614,6 +647,9 @@ class PumpScannerService:
             logger.info("Pump hunter paper order skipped: symbol=%s reason=not_listed_on_binance", symbol)
             return
         side, entry, take_profit, stop_loss = self._derive_paper_trade_plan(row)
+        if not self._is_entry_side_enabled(side):
+            logger.info("Pump hunter paper order skipped: symbol=%s side=%s reason=side_disabled", symbol, side)
+            return
         if entry <= 0 or take_profit <= 0 or stop_loss <= 0:
             logger.info("Pump hunter paper order skipped: symbol=%s side=%s reason=invalid_trade_plan", symbol, side)
             return
@@ -686,6 +722,29 @@ class PumpScannerService:
             )
             trade = asyncio.run(paper_trade_api.market_open(request))
             self._set_cache(order_key, {"trade_id": int(trade.id)}, ttl_sec=cooldown_sec)
+            if self._is_btc_signal_symbol(symbol):
+                runtime_repo, runtime_engine = get_paper_trade_runtime()
+                if runtime_engine is not None and runtime_repo is paper_trade_api.repo:
+                    try:
+                        closed_count = asyncio.run(
+                            runtime_engine.close_profitable_pump_trades_on_btc_signal(
+                                signal_side=side,
+                                exclude_trade_id=int(trade.id),
+                            )
+                        )
+                        if closed_count > 0:
+                            logger.info(
+                                "Pump hunter BTC signal profit exit applied: btc_side=%s closed=%s trigger_trade_id=%s",
+                                side,
+                                closed_count,
+                                int(trade.id),
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Pump hunter BTC signal profit exit failed: btc_side=%s trigger_trade_id=%s",
+                            side,
+                            int(trade.id),
+                        )
             logger.info(
                 "Pump hunter paper order opened: symbol=%s side=%s trade_id=%s score=%.1f entry=%.8f tp=%.8f sl=%.8f",
                 symbol,
@@ -714,6 +773,7 @@ class PumpScannerService:
     def _attach_runtime_status(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload["paper_trade_enabled"] = bool(settings.pump_hunter_paper_trade_enabled)
         payload["live_order_status"] = self.get_live_order_status()
+        payload["entry_side_control"] = self.get_entry_side_control()
         return payload
 
     def _maybe_send_discord_alert(self, row: dict[str, Any]) -> None:
@@ -902,10 +962,11 @@ class PumpScannerService:
         if symbol and not self._is_binance_symbol(symbol):
             logger.info("Pump hunter Binance order skipped: symbol=%s reason=not_listed_on_binance", symbol)
             return
-        leverage = self._resolve_pump_hunter_leverage(
-            str(row.get("trade_side") or row.get("side") or ""),
-            str(row.get("symbol") or ""),
-        )
+        side = self._resolve_trade_side(row)
+        if not self._is_entry_side_enabled(side):
+            logger.info("Pump hunter Binance order skipped: symbol=%s side=%s reason=side_disabled", symbol, side)
+            return
+        leverage = self._resolve_pump_hunter_leverage(side, symbol)
         try:
             side, entry, take_profit, stop_loss, tp_pct = self._validate_live_order_tp_requirement(
                 row,
@@ -972,12 +1033,15 @@ class PumpScannerService:
         leverage: int | None = None,
         margin_type: str | None = None,
     ) -> dict[str, Any]:
+        resolved_side = self._resolve_trade_side(row)
+        if not self._is_entry_side_enabled(resolved_side):
+            raise ValueError(f"Pump Hunter {resolved_side} entries are currently disabled")
         effective_leverage = max(
             1,
             int(
                 leverage
                 or self._resolve_pump_hunter_leverage(
-                    str(row.get("trade_side") or row.get("side") or ""),
+                    resolved_side,
                     str(row.get("symbol") or ""),
                 )
             ),
