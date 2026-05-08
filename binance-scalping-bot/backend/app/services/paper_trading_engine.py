@@ -778,10 +778,11 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+                fill_price = float(market_price)
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
-                    market_price=float(market_price),
+                    market_price=fill_price,
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                 ):
@@ -789,11 +790,11 @@ class PaperTradingEngine:
 
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / fill_price) * 100 if fill_price > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct, side)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     take_profit=tp,
                     stop_loss=sl,
                     min_sl_pct=max(
@@ -817,13 +818,13 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=fill_price, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -835,7 +836,7 @@ class PaperTradingEngine:
                         "entry_type": "LIMIT",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "liq_zone_price": float(item["liq_zone_price"]) if item.get("liq_zone_price") is not None else None,
@@ -853,7 +854,7 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     quantity=quantity,
                 )
                 self._register_open_pressure_event(side=side)
@@ -942,6 +943,7 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+                fill_price = float(market_price)
                 if not self._pass_btc_filter(
                     symbol=symbol,
                     side=side,
@@ -953,7 +955,7 @@ class PaperTradingEngine:
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
-                    market_price=float(market_price),
+                    market_price=fill_price,
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                 ):
@@ -961,11 +963,11 @@ class PaperTradingEngine:
 
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / fill_price) * 100 if fill_price > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct, side)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     take_profit=tp,
                     stop_loss=sl,
                     min_sl_pct=max(
@@ -989,13 +991,13 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=fill_price, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -1007,7 +1009,7 @@ class PaperTradingEngine:
                         "entry_type": "ML_TEST",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "reference_win_symbol": getattr(candles_signal, "reference_win_symbol", None),
@@ -1025,7 +1027,7 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     quantity=quantity,
                 )
                 self._register_open_pressure_event(side=side)
@@ -1134,6 +1136,7 @@ class PaperTradingEngine:
                 touched = self._entry_touched(side=side, market_price=market_price, entry=entry)
                 if not touched:
                     continue
+                fill_price = float(market_price)
                 if not skip_btc_guards:
                     if not self._pass_btc_filter(
                         symbol=symbol,
@@ -1146,7 +1149,7 @@ class PaperTradingEngine:
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
-                    market_price=float(market_price),
+                    market_price=fill_price,
                     open_trades_by_symbol=candles_open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                 ):
@@ -1154,11 +1157,11 @@ class PaperTradingEngine:
 
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / fill_price) * 100 if fill_price > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct, side)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     take_profit=tp,
                     stop_loss=sl,
                     min_sl_pct=max(
@@ -1182,13 +1185,13 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=fill_price, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -1200,7 +1203,7 @@ class PaperTradingEngine:
                         "entry_type": candles_entry_type,
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "quantity": quantity,
@@ -1216,7 +1219,7 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     quantity=quantity,
                 )
                 self._cache_open_trade_row(
@@ -1224,7 +1227,7 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     quantity=quantity,
                 )
                 self._register_open_pressure_event(side=side)
@@ -1235,7 +1238,7 @@ class PaperTradingEngine:
                     side=side,
                     entry_type=candles_entry_type,
                     btc_following=btc_following,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     take_profit=normalized_tp,
                     stop_loss=normalized_sl,
                     leverage=leverage,
@@ -1340,10 +1343,11 @@ class PaperTradingEngine:
                     continue
                 if not self._pass_btc_filter(symbol=symbol, side=side, effective_prob=effective_prob, btc_guard=btc_guard):
                     continue
+                fill_price = float(market_price)
                 if not self._handle_opposite_signal_on_touch(
                     symbol=symbol,
                     target_side=side,
-                    market_price=float(market_price),
+                    market_price=fill_price,
                     open_trades_by_symbol=open_trades_by_symbol,
                     closed_trade_ids=closed_trade_ids,
                 ):
@@ -1351,11 +1355,11 @@ class PaperTradingEngine:
 
                 atr_value = await self._resolve_symbol_atr(symbol)
                 atr_for_pct = float(atr_value) if atr_value is not None else 0.0
-                atr_pct = (atr_for_pct / float(entry)) * 100 if entry > 0 else 0.0
+                atr_pct = (atr_for_pct / fill_price) * 100 if fill_price > 0 else 0.0
                 leverage = self._resolve_symbol_leverage(symbol, atr_pct, side)
                 normalized_tp, normalized_sl = normalize_tp_sl(
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     take_profit=tp,
                     stop_loss=sl,
                     min_sl_pct=max(
@@ -1379,13 +1383,13 @@ class PaperTradingEngine:
                     continue
 
                 quantity = calc_quantity_from_order_usdt(
-                    entry_price=entry,
+                    entry_price=fill_price,
                     order_usdt=self.order_usdt,
                     fallback_quantity=self.quantity,
                 )
                 margin_usdt = self.margin_usdt
                 if margin_usdt <= 0:
-                    margin_usdt = calc_margin_usdt(entry_price=entry, quantity=quantity, leverage=leverage)
+                    margin_usdt = calc_margin_usdt(entry_price=fill_price, quantity=quantity, leverage=leverage)
                 feature_snapshot = await asyncio.to_thread(self._capture_feature_snapshot, symbol, side)
                 btc_following = self._resolve_btc_following_flag(symbol)
 
@@ -1397,7 +1401,7 @@ class PaperTradingEngine:
                         "entry_type": "LIQ_EMA99",
                         "signal_win_probability": raw_prob,
                         "effective_win_probability": effective_prob,
-                        "entry_price": entry,
+                        "entry_price": fill_price,
                         "take_profit": normalized_tp,
                         "stop_loss": normalized_sl,
                         "quantity": quantity,
@@ -1413,7 +1417,7 @@ class PaperTradingEngine:
                     trade_id=trade_id,
                     symbol=symbol,
                     side=side,
-                    entry_price=entry,
+                    entry_price=fill_price,
                     quantity=quantity,
                 )
                 self._register_open_pressure_event(side=side)

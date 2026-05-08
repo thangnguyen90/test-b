@@ -1534,15 +1534,15 @@ class PaperTradeAPI:
             ):
                 raise HTTPException(status_code=409, detail="Reentry cooldown")
 
-        market_price = req.entry_price
-        if market_price is None:
-            if self.price_stream is not None:
-                try:
-                    stream_price, _ = await self.price_stream.get_price(symbol=req.symbol)
-                    if stream_price is not None:
-                        market_price = float(stream_price)
-                except Exception:
-                    pass
+        requested_entry_price = req.entry_price
+        market_price: float | None = None
+        if self.price_stream is not None:
+            try:
+                stream_price, _ = await self.price_stream.get_price(symbol=req.symbol)
+                if stream_price is not None:
+                    market_price = float(stream_price)
+            except Exception:
+                pass
 
         if market_price is None:
             try:
@@ -1559,7 +1559,13 @@ class PaperTradeAPI:
                 if market_price is None:
                     raise RuntimeError("No market price")
             except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
+                if requested_entry_price is None:
+                    raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: {exc}") from exc
+
+        if market_price is None and requested_entry_price is not None:
+            market_price = float(requested_entry_price)
+        if market_price is None:
+            raise HTTPException(status_code=503, detail=f"Cannot open market trade for {req.symbol}: no fill price")
 
         leverage = self._resolve_open_leverage(req.symbol, req.leverage, req.side)
         if entry_type in {"PUMP_ENTRY_TOUCH", "EMA99_BOUNCE"}:
