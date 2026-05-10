@@ -20,6 +20,7 @@ from app.models.event_windows import (
     MarketEventWindowUpdateRequest,
 )
 from app.models.paper_trades import (
+    PaperBinanceOrderRequest,
     PaperManualCloseRequest,
     PaperTradeDailySummary,
     PaperTradeDailySummaryResponse,
@@ -42,6 +43,7 @@ from app.models.paper_trades import (
     PaperTradeStatsResponse,
 )
 from app.services.binance_client import BinanceFuturesClient
+from app.services.binance_futures_trade_service import BinanceApiError, BinanceFuturesTradeService
 from app.services.candle_pattern_analyzer import CandlePatternAnalyzer
 from app.services.data_pipeline import DataPipeline
 from app.services.ema99_bounce_scanner import Ema99BounceScannerService
@@ -78,6 +80,7 @@ class PaperTradeAPI:
         self.major_symbol_resolver = None
         self.btc_follow_resolver = None
         self.market_client = BinanceFuturesClient()
+        self.binance_trade_client = BinanceFuturesTradeService()
         self.pattern_analyzer = CandlePatternAnalyzer(client=self.market_client)
         self.ema99_bounce_scanner = Ema99BounceScannerService(client=self.market_client)
         self.data_pipeline = DataPipeline()
@@ -97,6 +100,7 @@ class PaperTradeAPI:
         self.router.add_api_route("/event-windows/{event_id}", self.update_event_window, methods=["PATCH"], response_model=MarketEventWindow)
         self.router.add_api_route("/event-windows/{event_id}", self.disable_event_window, methods=["DELETE"], response_model=MarketEventWindow)
         self.router.add_api_route("/market-open", self.market_open, methods=["POST"], response_model=PaperTrade)
+        self.router.add_api_route("/binance-order", self.submit_binance_order, methods=["POST"])
         self.router.add_api_route("/close/{trade_id}", self.manual_close, methods=["POST"], response_model=PaperTrade)
 
     def bind_repo(self, repo: MySQLTradeRepository | None) -> None:
@@ -216,6 +220,38 @@ class PaperTradeAPI:
         if scope not in {"main", "candles", "auto"}:
             return "main"
         return scope
+
+    @staticmethod
+    def _resolve_manual_binance_leverage(order_usdt: float, margin_usdt: float) -> int:
+        notional_usdt = float(order_usdt or 0.0)
+        margin_value = float(margin_usdt or 0.0)
+        if notional_usdt <= 0 or margin_value <= 0:
+            raise HTTPException(status_code=422, detail="Order USDT and margin USDT must be positive")
+        leverage_raw = notional_usdt / margin_value
+        leverage_value = int(round(leverage_raw))
+        if leverage_value <= 0 or leverage_value > 125:
+            raise HTTPException(status_code=422, detail="Derived leverage must be between 1x and 125x")
+        if not math.isclose(leverage_raw, leverage_value, rel_tol=1e-9, abs_tol=1e-6):
+            raise HTTPException(
+                status_code=422,
+                detail="Order USDT / margin USDT must resolve to an integer leverage, e.g. 100 / 20 = 5x",
+            )
+        return leverage_value
+
+    @staticmethod
+    def _price_from_pct(*, side: str, entry_price: float, pct: float, target: str) -> float:
+        side_text = str(side or "").strip().upper()
+        target_text = str(target or "").strip().upper()
+        entry = float(entry_price or 0.0)
+        pct_value = float(pct or 0.0)
+        if entry <= 0 or pct_value <= 0:
+            raise HTTPException(status_code=422, detail=f"Invalid {target_text} percentage or entry price")
+        ratio = pct_value / 100.0
+        if target_text == "TP":
+            return entry * (1.0 + ratio) if side_text == "LONG" else entry * (1.0 - ratio)
+        if target_text == "SL":
+            return entry * (1.0 - ratio) if side_text == "LONG" else entry * (1.0 + ratio)
+        raise HTTPException(status_code=422, detail=f"Unsupported target {target_text}")
 
     def _resolve_repo(
         self,
@@ -1504,6 +1540,71 @@ class PaperTradeAPI:
             count=len(items),
             items=items,
         )
+
+    async def submit_binance_order(self, req: PaperBinanceOrderRequest) -> dict:
+        from app.api.analytics import pump_service
+
+        order_type = str(req.order_type or "MARKET").strip().upper()
+        side = str(req.side or "").strip().upper()
+        leverage = self._resolve_manual_binance_leverage(req.order_usdt, req.margin_usdt)
+        if order_type == "LIMIT" and req.entry_price is None:
+            raise HTTPException(status_code=422, detail="entry_price is required for LIMIT order")
+        try:
+            if order_type == "LIMIT":
+                result = self.binance_trade_client.place_limit_order(
+                    symbol=req.symbol,
+                    side=side,
+                    entry_price=float(req.entry_price or 0.0),
+                    order_usdt=float(req.order_usdt),
+                    leverage=leverage,
+                    margin_usdt=float(req.margin_usdt),
+                    margin_type=req.margin_type,
+                    test_mode=bool(req.test_mode),
+                )
+            else:
+                result = self.binance_trade_client.place_market_order(
+                    symbol=req.symbol,
+                    side=side,
+                    order_usdt=float(req.order_usdt),
+                    leverage=leverage,
+                    margin_usdt=float(req.margin_usdt),
+                    margin_type=req.margin_type,
+                    test_mode=bool(req.test_mode),
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except BinanceApiError as exc:
+            status_code = exc.status_code if 400 <= int(exc.status_code) < 600 else 502
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Cannot submit Binance order: {exc}") from exc
+        entry_price_value = float(result.get("entry_price") or req.entry_price or 0.0)
+        tp_price = (
+            self._price_from_pct(side=side, entry_price=entry_price_value, pct=float(req.tp_pct), target="TP")
+            if req.tp_pct is not None
+            else None
+        )
+        sl_price = (
+            self._price_from_pct(side=side, entry_price=entry_price_value, pct=float(req.sl_pct), target="SL")
+            if req.sl_pct is not None
+            else None
+        )
+        tracking = pump_service.register_external_live_order(
+            result,
+            side=side,
+            tp_price=tp_price,
+            sl_price=sl_price,
+        )
+        result["requested_side"] = side
+        result["requested_order_type"] = order_type
+        result["requested_margin_usdt"] = float(req.margin_usdt)
+        result["requested_notional_usdt"] = float(req.order_usdt)
+        result["requested_tp_pct"] = float(req.tp_pct) if req.tp_pct is not None else None
+        result["requested_sl_pct"] = float(req.sl_pct) if req.sl_pct is not None else None
+        result["tp_price"] = tp_price
+        result["sl_price"] = sl_price
+        result["tracking"] = tracking
+        return result
 
     async def market_open(self, req: PaperMarketOpenRequest) -> PaperTrade:
         repo = self._resolve_repo(repo_scope=req.repo_scope, entry_type=req.entry_type)

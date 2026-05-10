@@ -1548,6 +1548,55 @@ class PumpScannerService:
         )
         return True
 
+    def register_external_live_order(
+        self,
+        result: dict[str, Any],
+        *,
+        side: str,
+        tp_price: float | None = None,
+        sl_price: float | None = None,
+    ) -> dict[str, Any]:
+        signal = result.get("signal") if isinstance(result.get("signal"), dict) else {}
+        result["signal"] = {
+            **signal,
+            "side": str(side or signal.get("side") or "").upper(),
+            "tp": float(tp_price or 0.0),
+            "sl": float(sl_price or 0.0),
+            "entry_order_type": str(
+                signal.get("entry_order_type")
+                or result.get("entry_order_type")
+                or result.get("order_type")
+                or "LIMIT"
+            ).upper(),
+        }
+        self._track_live_order(result)
+        exchange = result.get("exchange_response") if isinstance(result.get("exchange_response"), dict) else {}
+        key = self._build_live_order_registry_key(
+            str(result.get("symbol") or "").strip(),
+            exchange.get("orderId"),
+            exchange.get("clientOrderId") or exchange.get("origClientOrderId"),
+        )
+        if not key:
+            return {"tracked": False, "entry_filled": False, "tp_order_placed": False, "sl_order_placed": False}
+        with self._live_order_lock:
+            tracked = self._live_order_registry.get(key)
+        if not isinstance(tracked, dict):
+            return {"tracked": False, "entry_filled": False, "tp_order_placed": False, "sl_order_placed": False}
+        if bool(tracked.get("entry_filled")):
+            if float(tp_price or 0.0) > 0:
+                self._maybe_place_tp_for_tracked_order(
+                    tracked,
+                    {"executedQty": tracked.get("filled_qty") or tracked.get("quantity") or 0.0},
+                )
+            if float(sl_price or 0.0) > 0:
+                self._maybe_place_sl_for_tracked_order(tracked)
+        return {
+            "tracked": True,
+            "entry_filled": bool(tracked.get("entry_filled")),
+            "tp_order_placed": bool(tracked.get("tp_order_placed")),
+            "sl_order_placed": bool(tracked.get("sl_order_placed")),
+        }
+
     def _get_tracked_child_order_status(self, tracked: dict[str, Any], prefix: str) -> tuple[str, dict[str, Any]]:
         if not bool(tracked.get(f"{prefix}_order_placed")):
             return "", {}

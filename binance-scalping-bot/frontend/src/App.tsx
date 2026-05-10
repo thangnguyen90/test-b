@@ -628,6 +628,19 @@ type PaperManualCloseRequest = {
   force_result?: 0 | 1
 }
 
+type BinanceManualOrderRequest = {
+  symbol: string
+  side: 'LONG' | 'SHORT'
+  order_type: 'MARKET' | 'LIMIT'
+  entry_price?: number
+  order_usdt: number
+  margin_usdt: number
+  tp_pct?: number
+  sl_pct?: number
+  margin_type: 'ISOLATED' | 'CROSSED'
+  test_mode?: boolean
+}
+
 const API_BASE = 'http://127.0.0.1:8000'
 const WS_BASE = API_BASE.replace(/^http/, 'ws')
 const AUTO_LIQ_MIN_WIN = 0.7
@@ -1395,6 +1408,16 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     direction: 'desc',
   })
   const [paperModelFilter, setPaperModelFilter] = useState<ModelViewFilter>('ALL')
+  const [binanceOrderUsdt, setBinanceOrderUsdt] = useState('100')
+  const [binanceMarginUsdt, setBinanceMarginUsdt] = useState('20')
+  const [binanceTpPct, setBinanceTpPct] = useState('2')
+  const [binanceSlPct, setBinanceSlPct] = useState('1')
+  const [binanceLimitPrices, setBinanceLimitPrices] = useState<Record<number, string>>({})
+  const [binanceSubmittingKey, setBinanceSubmittingKey] = useState<string | null>(null)
+  const [binanceOrderFeedback, setBinanceOrderFeedback] = useState<{
+    kind: 'success' | 'error'
+    message: string
+  } | null>(null)
 
   const [selectedCoin, setSelectedCoin] = useState('BTC/USDT')
   const [searchCoin, setSearchCoin] = useState('')
@@ -1413,6 +1436,16 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     && !showLiqMapScreen
     && !showMlCandlesScreen
   const marketPriceScreenActive = mainDashboardActive || showLiqMapScreen
+  const parsedBinanceOrderUsdt = Number(binanceOrderUsdt)
+  const parsedBinanceMarginUsdt = Number(binanceMarginUsdt)
+  const binanceDerivedLeverage = (
+    Number.isFinite(parsedBinanceOrderUsdt)
+    && Number.isFinite(parsedBinanceMarginUsdt)
+    && parsedBinanceOrderUsdt > 0
+    && parsedBinanceMarginUsdt > 0
+  )
+    ? (parsedBinanceOrderUsdt / parsedBinanceMarginUsdt)
+    : null
   const paperPatternStatsActive = showPaperScreen || (showMlCandlesScreen && mlCandlesScreenView === 'compare')
 
   useEffect(() => {
@@ -2875,6 +2908,153 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
     } finally {
       if (timeoutId != null) window.clearTimeout(timeoutId)
       setIsOpeningMarketOrder(false)
+    }
+  }
+
+  function resolveManualBinanceOrderConfig(): { orderUsdt: number; marginUsdt: number; leverage: number } {
+    const orderUsdt = Number(binanceOrderUsdt)
+    const marginUsdt = Number(binanceMarginUsdt)
+    if (!Number.isFinite(orderUsdt) || orderUsdt <= 0) {
+      throw new Error('Binance order USDT must be greater than 0')
+    }
+    if (!Number.isFinite(marginUsdt) || marginUsdt <= 0) {
+      throw new Error('Binance margin USDT must be greater than 0')
+    }
+    const rawLeverage = orderUsdt / marginUsdt
+    const leverage = Math.round(rawLeverage)
+    if (!Number.isFinite(rawLeverage) || Math.abs(rawLeverage - leverage) > 0.000001) {
+      throw new Error('Order USDT / Margin USDT must form an integer leverage, e.g. 100 / 20 = 5x')
+    }
+    if (leverage < 1 || leverage > 125) {
+      throw new Error('Derived leverage must stay between 1x and 125x')
+    }
+    return { orderUsdt, marginUsdt, leverage }
+  }
+
+  function resolveManualBinanceExitConfig(): { tpPct?: number; slPct?: number } {
+    const tpPct = Number(binanceTpPct)
+    const slPct = Number(binanceSlPct)
+    const next: { tpPct?: number; slPct?: number } = {}
+    if (binanceTpPct.trim()) {
+      if (!Number.isFinite(tpPct) || tpPct <= 0) throw new Error('TP % must be greater than 0')
+      next.tpPct = tpPct
+    }
+    if (binanceSlPct.trim()) {
+      if (!Number.isFinite(slPct) || slPct <= 0) throw new Error('SL % must be greater than 0')
+      next.slPct = slPct
+    }
+    return next
+  }
+
+  async function submitManualBinanceOrder(row: PaperTrade, orderType: 'MARKET' | 'LIMIT') {
+    try {
+      const { orderUsdt, marginUsdt, leverage } = resolveManualBinanceOrderConfig()
+      const { tpPct, slPct } = resolveManualBinanceExitConfig()
+      const limitPriceText = binanceLimitPrices[row.id] ?? String(row.entry_price)
+      const entryPrice = orderType === 'LIMIT' ? Number(limitPriceText) : undefined
+      if (orderType === 'LIMIT' && (!Number.isFinite(entryPrice) || entryPrice == null || entryPrice <= 0)) {
+        throw new Error(`Limit price for ${row.symbol} must be greater than 0`)
+      }
+      const confirmMessage = [
+        `Place Binance ${orderType} ${row.side} order?`,
+        `${row.symbol}`,
+        `Notional: ${orderUsdt.toFixed(2)} USDT`,
+        `Margin: ${marginUsdt.toFixed(2)} USDT`,
+        `Leverage: ${leverage}x`,
+        tpPct ? `TP: +${tpPct}% gia` : 'TP: off',
+        slPct ? `SL: -${slPct}% gia` : 'SL: off',
+        orderType === 'LIMIT' ? `Limit: ${entryPrice}` : null,
+      ].filter(Boolean).join('\n')
+      if (!window.confirm(confirmMessage)) return
+
+      const requestKey = `${row.id}:${orderType}`
+      const payload: BinanceManualOrderRequest = {
+        symbol: row.symbol,
+        side: row.side,
+        order_type: orderType,
+        order_usdt: orderUsdt,
+        margin_usdt: marginUsdt,
+        tp_pct: tpPct,
+        sl_pct: slPct,
+        margin_type: 'ISOLATED',
+        test_mode: false,
+      }
+      if (orderType === 'LIMIT' && typeof entryPrice === 'number') {
+        payload.entry_price = entryPrice
+      }
+
+      setBinanceOrderFeedback(null)
+      setBinanceSubmittingKey(requestKey)
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 15000)
+      let response: Response
+      try {
+        response = await fetch(`${API_BASE}/api/v1/paper-trades/binance-order`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        })
+      } finally {
+        window.clearTimeout(timeoutId)
+      }
+      if (response.status === 404) {
+        throw new Error('Backend chua nap route /api/v1/paper-trades/binance-order. Can restart backend test-b.')
+      }
+      if (!response.ok) {
+        const text = await response.text()
+        let detail = text
+        try {
+          const parsed = JSON.parse(text) as { detail?: string }
+          if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+            detail = parsed.detail
+          }
+        } catch {
+          // Keep raw response text when backend did not return JSON.
+        }
+        throw new Error(`Binance ${orderType} order failed: ${detail}`)
+      }
+      const result = await response.json() as {
+        symbol?: string
+        quantity?: string
+        entry_price?: number | string
+        leverage?: number
+        tp_price?: number | string | null
+        sl_price?: number | string | null
+        tracking?: {
+          tracked?: boolean
+          entry_filled?: boolean
+          tp_order_placed?: boolean
+          sl_order_placed?: boolean
+        }
+      }
+      markBackendAlive()
+      setError('')
+      const trackingNote = result.tracking?.tracked
+        ? result.tracking.entry_filled
+          ? ` | exits: TP ${result.tracking.tp_order_placed ? 'on' : 'off'}, SL ${result.tracking.sl_order_placed ? 'on' : 'off'}`
+          : ' | order dang cho khop, exits se dat sau khi fill'
+        : ''
+      const successMessage = `Binance ${orderType} order sent: ${result.symbol ?? row.symbol} ${row.side} ${result.quantity ?? ''}${trackingNote}`.trim()
+      setBinanceOrderFeedback({
+        kind: 'success',
+        message: successMessage,
+      })
+      window.alert(successMessage)
+    } catch (err) {
+      const message = err instanceof DOMException && err.name === 'AbortError'
+        ? `Binance ${orderType} order timeout sau 15s`
+        : err instanceof Error
+          ? err.message
+          : 'Unknown error'
+      setError(message)
+      setBinanceOrderFeedback({
+        kind: 'error',
+        message,
+      })
+      window.alert(message)
+    } finally {
+      setBinanceSubmittingKey(null)
     }
   }
 
@@ -4509,14 +4689,82 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
             </button>
           </div>
           <div className="content table-wrap">
+            <div className="binance-order-toolbar">
+              <label className="binance-order-field">
+                <span>Binance Notional (USDT)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="search-input binance-order-input"
+                  value={binanceOrderUsdt}
+                  disabled={binanceSubmittingKey !== null}
+                  onChange={(event) => setBinanceOrderUsdt(event.target.value)}
+                />
+              </label>
+              <label className="binance-order-field">
+                <span>Margin (USDT)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="search-input binance-order-input"
+                  value={binanceMarginUsdt}
+                  disabled={binanceSubmittingKey !== null}
+                  onChange={(event) => setBinanceMarginUsdt(event.target.value)}
+                />
+              </label>
+              <label className="binance-order-field">
+                <span>TP % (gia)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  className="search-input binance-order-input"
+                  value={binanceTpPct}
+                  disabled={binanceSubmittingKey !== null}
+                  onChange={(event) => setBinanceTpPct(event.target.value)}
+                />
+              </label>
+              <label className="binance-order-field">
+                <span>SL % (gia)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  className="search-input binance-order-input"
+                  value={binanceSlPct}
+                  disabled={binanceSubmittingKey !== null}
+                  onChange={(event) => setBinanceSlPct(event.target.value)}
+                />
+              </label>
+              <span className={`badge ${
+                typeof binanceDerivedLeverage === 'number' && Math.abs(binanceDerivedLeverage - Math.round(binanceDerivedLeverage)) <= 0.000001
+                  ? 'neutral'
+                  : 'warn'
+              }`}
+              >
+                Leverage: {typeof binanceDerivedLeverage === 'number' ? `${binanceDerivedLeverage.toFixed(2)}x` : '-'}
+              </span>
+              <span className="symbols-text">Notional la gia tri truoc leverage. Margin nhap rieng de suy ra x.</span>
+            </div>
+            {binanceOrderFeedback ? (
+              <div className={`binance-order-feedback ${binanceOrderFeedback.kind === 'error' ? 'binance-order-feedback-error' : 'binance-order-feedback-success'}`}>
+                {binanceOrderFeedback.message}
+              </div>
+            ) : null}
             {filteredPaperOpenTrades.length === 0 ? (
               <p>No open paper trades.</p>
             ) : (
               <table>
                 <thead>
                   <tr>
+                    <th>Binance</th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('id')}>ID</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('symbol')}>Symbol</button></th>
+                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('side')}>Side</button></th>
+                    <th>Coinglass</th>
+                    <th>Binance</th>
                     <th>BTC Follow</th>
                     <th>Pattern / DB</th>
                     <th>Entry Source</th>
@@ -4527,7 +4775,6 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('mfe_pct')}>MFE%</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_type')}>Type</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('model')}>Model</button></th>
-                    <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('side')}>Side</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('margin_usdt')}>Margin</button></th>
                     <th><button type="button" className="th-sort-btn" onClick={() => toggleOpenSort('entry_price')}>Entry</button></th>
                     <th>EMA99 15m</th>
@@ -4557,10 +4804,72 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                     const upnlUsdt = (typeof upnlPct === 'number' && typeof marginUsdt === 'number')
                       ? (marginUsdt * upnlPct / 100)
                       : null
+                    const requestKeyMarket = `${row.id}:MARKET`
+                    const requestKeyLimit = `${row.id}:LIMIT`
+                    const rowLimitPrice = binanceLimitPrices[row.id] ?? String(row.entry_price)
+                    const coinglassCoin = canonicalSymbol(row.symbol).split('/')[0]
+                    const coinglassHref = `https://www.coinglass.com/pro/futures/LiquidationHeatMapModel3?coin=${encodeURIComponent(coinglassCoin)}&type=pair`
+                    const binanceHref = `https://www.binance.com/vi/futures/${encodeURIComponent(canonicalSymbol(row.symbol).replace('/', ''))}`
                     return (
                     <tr key={row.id}>
+                      <td>
+                        <div className="binance-order-cell">
+                          <button
+                            type="button"
+                            className="btn-inline btn-secondary"
+                            disabled={binanceSubmittingKey !== null}
+                            onClick={() => {
+                              submitManualBinanceOrder(row, 'MARKET').catch(() => undefined)
+                            }}
+                          >
+                            {binanceSubmittingKey === requestKeyMarket ? 'Sending...' : 'Market'}
+                          </button>
+                          <div className="binance-limit-row">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.000001"
+                              className="search-input binance-limit-input"
+                              value={rowLimitPrice}
+                              disabled={binanceSubmittingKey !== null}
+                              onChange={(event) => {
+                                const nextValue = event.target.value
+                                setBinanceLimitPrices((prev) => ({
+                                  ...prev,
+                                  [row.id]: nextValue,
+                                }))
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="btn-inline btn-secondary"
+                              disabled={binanceSubmittingKey !== null}
+                              onClick={() => {
+                                submitManualBinanceOrder(row, 'LIMIT').catch(() => undefined)
+                              }}
+                            >
+                              {binanceSubmittingKey === requestKeyLimit ? 'Sending...' : 'Limit'}
+                            </button>
+                          </div>
+                        </div>
+                      </td>
                       <td>{row.id}</td>
                       <td>{renderSymbolJump(row.symbol, row.entry_price)}</td>
+                      <td>
+                        <span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>
+                          {row.side}
+                        </span>
+                      </td>
+                      <td>
+                        <a href={coinglassHref} target="_blank" rel="noreferrer">
+                          coinglass
+                        </a>
+                      </td>
+                      <td>
+                        <a href={binanceHref} target="_blank" rel="noreferrer">
+                          binance
+                        </a>
+                      </td>
                       <td>
                         {typeof row.btc_following === 'boolean' ? (
                           <span className={`badge ${row.btc_following ? 'success' : 'neutral'}`}>
@@ -4613,11 +4922,6 @@ function LegacyDashboard({ initialScreenView }: { initialScreenView: AppScreenVi
                       <td>
                         <span className={`badge ${tradeModelBadge(modelSource)}`}>
                           {modelSource}
-                        </span>
-                      </td>
-                      <td>
-                        <span className={row.side === 'LONG' ? 'pill-long' : 'pill-short'}>
-                          {row.side}
                         </span>
                       </td>
                       <td>{typeof marginUsdt === 'number' ? `${marginUsdt.toFixed(2)} (${row.leverage}x)` : `${row.leverage}x`}</td>

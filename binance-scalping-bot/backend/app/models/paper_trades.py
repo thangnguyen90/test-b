@@ -261,3 +261,16 @@ class PaperMarketOpenRequest(BaseModel):
 
 class PaperManualCloseRequest(BaseModel):
     force_result: Optional[int] = Field(default=None, ge=0, le=1)
+
+
+class PaperBinanceOrderRequest(BaseModel):
+    symbol: str
+    side: str = Field(pattern="^(LONG|SHORT)$")
+    order_type: str = Field(pattern="^(MARKET|LIMIT)$")
+    entry_price: Optional[float] = Field(default=None, gt=0)
+    order_usdt: float = Field(gt=0)
+    margin_usdt: float = Field(gt=0)
+    tp_pct: Optional[float] = Field(default=None, gt=0)
+    sl_pct: Optional[float] = Field(default=None, gt=0)
+    margin_type: str = Field(default="ISOLATED", pattern="^(ISOLATED|CROSSED)$")
+    test_mode: bool = False

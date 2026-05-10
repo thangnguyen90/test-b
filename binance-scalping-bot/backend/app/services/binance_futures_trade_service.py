@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import threading
 import time
 from decimal import Decimal, ROUND_DOWN
@@ -447,16 +448,21 @@ class BinanceFuturesTradeService:
         entry_price: float,
         order_usdt: float,
         leverage: int,
+        margin_usdt: float | None = None,
         margin_type: str,
         test_mode: bool,
     ) -> dict[str, Any]:
-        margin_usdt = float(order_usdt)
         leverage_value = int(leverage)
-        if margin_usdt <= 0:
+        notional_usdt = float(order_usdt)
+        resolved_margin_usdt = float(margin_usdt) if margin_usdt is not None else float(order_usdt)
+        if resolved_margin_usdt <= 0:
             raise ValueError("Margin USDT must be positive")
         if leverage_value <= 0:
             raise ValueError("Leverage must be positive")
-        notional_usdt = margin_usdt * leverage_value
+        if margin_usdt is None:
+            notional_usdt = resolved_margin_usdt * leverage_value
+        elif not math.isclose(notional_usdt, resolved_margin_usdt * leverage_value, rel_tol=1e-9, abs_tol=0.01):
+            raise ValueError("Notional USDT must equal margin USDT x leverage")
         if notional_usdt < BINANCE_MIN_NOTIONAL_USDT:
             raise ValueError(
                 f"Notional {notional_usdt:.2f} USDT is below Binance minimum {BINANCE_MIN_NOTIONAL_USDT:.2f} USDT"
@@ -480,10 +486,11 @@ class BinanceFuturesTradeService:
             "side": order_params["side"],
             "entry_price": order_params["price"],
             "quantity": order_params["quantity"],
-            "margin_usdt": margin_usdt,
+            "margin_usdt": resolved_margin_usdt,
             "notional_usdt": notional_usdt,
             "leverage": leverage_value,
             "margin_type": str(margin_type or "ISOLATED").upper(),
+            "order_type": "LIMIT",
             "config": config_resp,
             "exchange_response": order_resp,
         }
@@ -523,16 +530,21 @@ class BinanceFuturesTradeService:
         side: str,
         order_usdt: float,
         leverage: int,
+        margin_usdt: float | None = None,
         margin_type: str,
         test_mode: bool,
     ) -> dict[str, Any]:
-        margin_usdt = float(order_usdt)
         leverage_value = int(leverage)
-        if margin_usdt <= 0:
+        notional_usdt = float(order_usdt)
+        resolved_margin_usdt = float(margin_usdt) if margin_usdt is not None else float(order_usdt)
+        if resolved_margin_usdt <= 0:
             raise ValueError("Margin USDT must be positive")
         if leverage_value <= 0:
             raise ValueError("Leverage must be positive")
-        notional_usdt = margin_usdt * leverage_value
+        if margin_usdt is None:
+            notional_usdt = resolved_margin_usdt * leverage_value
+        elif not math.isclose(notional_usdt, resolved_margin_usdt * leverage_value, rel_tol=1e-9, abs_tol=0.01):
+            raise ValueError("Notional USDT must equal margin USDT x leverage")
         if notional_usdt < BINANCE_MIN_NOTIONAL_USDT:
             raise ValueError(
                 f"Notional {notional_usdt:.2f} USDT is below Binance minimum {BINANCE_MIN_NOTIONAL_USDT:.2f} USDT"
@@ -565,7 +577,7 @@ class BinanceFuturesTradeService:
             "side": order_params["side"],
             "entry_price": response_entry_price,
             "quantity": response_quantity,
-            "margin_usdt": margin_usdt,
+            "margin_usdt": resolved_margin_usdt,
             "notional_usdt": notional_usdt,
             "leverage": leverage_value,
             "margin_type": str(margin_type or "ISOLATED").upper(),
